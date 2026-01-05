@@ -1,8 +1,13 @@
 import torch
 import torch.nn.functional as F
+from load_model import load_model_and_tokenizer
+import sys
+from pathlib import Path
 
-from transformers import AutoTokenizer, AutoModel
-
+#  models directory to path
+BASE_DIR = Path(__file__).parent
+MODELS_DIR = BASE_DIR / "models" / "llada"
+sys.path.insert(0, str(BASE_DIR))
 
 def forward_process(batch, prompt_index, mask_id):
     b, l = batch.shape
@@ -79,9 +84,9 @@ def get_log_likelihood(model, prompt, answer, mc_num=128, batch_size=16, cfg_sca
 
 def main():
     device = 'cuda'
-
-    model = AutoModel.from_pretrained('GSAI-ML/LLaDA-8B-Base', trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
-    tokenizer = AutoTokenizer.from_pretrained('GSAI-ML/LLaDA-8B-Base', trust_remote_code=True)
+    model_dir = MODELS_DIR  
+    
+    model, tokenizer = load_model_and_tokenizer(model_dir, torch_dtype=torch.bfloat16, device=device)
 
     # this prompt and answer is from Hellaswag dataset
     prompt = 'Roof shingle removal: A man is sitting on a roof. He'
