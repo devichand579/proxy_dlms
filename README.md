@@ -1,23 +1,11 @@
 # STrace
-python eval_llada.py \
-  --model llada_dist \
-  --model_args '{"model_path": "GSAI-ML/LLaDA-8B-Instruct", "mc_num": 8, "is_check_greedy": false, "cfg": 0.0, "device": "cuda"}' \
-  --tasks gsm8k \
-  --num_fewshot 0 \
-  --limit 1
-  --verbosity DEBUG \
-  --log_samples \
-  --output_path llada_gsm8k_results > output2.txt
 
-```angular2html
-from transformers import AutoModel, AutoTokenizer
+## Downloading the model configuration 
+Please download the model configuration and safetensors files before running any scheduler or evaluation scripts.
 
-tokenizer = AutoTokenizer.from_pretrained('GSAI-ML/LLaDA-8B-Base', trust_remote_code=True)
-model = AutoModel.from_pretrained('GSAI-ML/LLaDA-8B-Base', trust_remote_code=True, torch_dtype=torch.bfloat16)
 ```
-
-We provide `get_log_likelihood()` and `generate()` functions in `get_log_likelihood.py` 
-and `generate.py` respectively, for conditional likelihood evaluation and conditional generation.
+python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='GSAI-ML/LLaDA-8B-Base', local_dir='./models/llada', local_dir_use_symlinks=False)"
+```
 
 ## Log Likelihood Computation
 
@@ -37,7 +25,18 @@ This provides an unbiased estimate of the negative log-likelihood.
 
 
 
+python eval_llada.py \
+  --model llada_dist \
+  --model_args '{"model_path": "GSAI-ML/LLaDA-8B-Instruct", "mc_num": 8, "is_check_greedy": false, "cfg": 0.0, "device": "cuda"}' \
+  --tasks gsm8k \
+  --num_fewshot 0 \
+  --limit 1
+  --verbosity DEBUG \
+  --log_samples \
+  --output_path llada_gsm8k_results > output2.txt
 
+We provide `get_log_likelihood()` and `generate()` functions in `get_log_likelihood.py` 
+and `generate.py` respectively, for conditional likelihood evaluation and conditional generation.
 
 
 
