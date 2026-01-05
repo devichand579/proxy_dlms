@@ -1,6 +1,6 @@
 # Visualization
 
-This repository contains visualization tools for the LLaDA project.
+This repository contains visualization tools
 
 ## Implementation Steps
 
@@ -13,8 +13,6 @@ Run `generate.py` to produce your own sampling process records. A sample output 
 Choose between two visualization styles:
 - **Paper Style**:  
   `visualization_paper.py` produces visualizations matching the format in [our arXiv paper](https://arxiv.org/abs/2502.09992)
-- **Zhihu Style**:  
-  `visualization_zhihu.py` generates visualizations compatible with [Zhihu's format](https://zhuanlan.zhihu.com/p/24214732238)
 
 The scripts will:
 1. Automatically create an `html/` directory
