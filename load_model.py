@@ -97,12 +97,12 @@ def load_model_and_tokenizer(model_dir: str, torch_dtype=torch.bfloat16, device=
 
 if __name__ == "__main__":
     # Example usage
-    # model_dir = "./models/llada"
+    model_dir = "./models/llada"
     
-    # print(f"Loading model from {model_dir}...")
-    # model, tokenizer = load_model_and_tokenizer(model_dir)
+    print(f"Loading model from {model_dir}...")
+    model, tokenizer = load_model_and_tokenizer(model_dir)
     
-    # print("Model and tokenizer loaded successfully!")
-    # print(f"Model type: {type(model)}")
-    # print(f"Tokenizer type: {type(tokenizer)}")
+    print("Model and tokenizer loaded successfully!")
+    print(f"Model type: {type(model)}")
+    print(f"Tokenizer type: {type(tokenizer)}")
 

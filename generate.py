@@ -6,6 +6,7 @@ from transformers import AutoTokenizer, AutoModel
 from datetime import datetime
 import matplotlib.pyplot as plt
 
+ # IMPORTANT
 
 def add_gumbel_noise(logits, temperature):
     '''
@@ -135,6 +136,15 @@ def generate_eb(
     mask_id=126336,
 ):
 
+    """
+    Args:
+        model: Mask predictor.
+        prompt: A tensor of shape (1, L).
+        steps: Sampling steps, less than or equal to gen_length.
+        gen_length: Generated answer length.
+        block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
+        temperature: Categorical distribution sampling temperature.
+    """
     device = prompt.device
     batch, prompt_len = prompt.shape
 
