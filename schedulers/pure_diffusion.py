@@ -85,35 +85,3 @@ def generate_pure_diffusion(model, prompt, attention_mask=None, steps=128, gen_l
 
 
     return x
-
-def main():
-    device = 'cuda'
-
-    # Example usage
-    model_dir = "./models/llada"
-    model, tokenizer = load_model_and_tokenizer(model_dir, device=device)
-
-    # The LLaDA architecture theoretically supports both left-padding and right-padding. 
-    # However, the sampling code implementation is simpler with left-padding.
-    if tokenizer.padding_side != 'left':
-        tokenizer.padding_side = 'left'
-
-    # If the padding ID equals the mask ID, you need to modify our generate function to achieve correct inference.
-    assert tokenizer.pad_token_id != 126336
-
-    prompts = [ "Lily can run 12 kilometers per hour for 4 hours. After that, she runs 6 kilometers per hour. How many kilometers can she run in 8 hours?"]
-
-    encoded_outputs = tokenizer(
-        prompts,
-        add_special_tokens=False,
-        padding=True,
-        return_tensors="pt"
-    )
-    input_ids = encoded_outputs['input_ids'].to(device)
-    attention_mask = encoded_outputs['attention_mask'].to(device)
-
-    out = generate_pure_diffusion(model, input_ids, attention_mask, steps=128, gen_length=128, temperature=0., remasking='low_confidence')
-    output = tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)
-    for o in output:
-        print(o)
-        print('-' * 50)

@@ -16,7 +16,11 @@ Please download the model configuration and safetensors files before running any
 python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='GSAI-ML/LLaDA-8B-Base', local_dir='./models/llada', local_dir_use_symlinks=False)"
 ```
 
+### Samplers
 
+1. top-k confidence (k = 1, LLaDA general, l = 1024)
+2. block LLaDA (b = 32, l = 1024)
+3. top-margin
 
 ## Log Likelihood Computation
 
