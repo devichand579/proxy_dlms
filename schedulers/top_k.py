@@ -17,7 +17,7 @@ def generate_block_topk(
     block_length=32,
     steps_per_block=32,
     top_k=4,
-    metric="top_margin",   # "top_margin", "confidence", "entropy", "random"
+    metric="confidence",   # "top_margin", "confidence", "entropy", "random"
     temperature=0.0,
     mask_id=126336,
     eos_id=126081,
@@ -29,6 +29,8 @@ def generate_block_topk(
     assert gen_length % block_length == 0
     assert gen_length % top_k == 0
     assert top_k >= 1
+
+    num_steps_taken = 0
 
     # Initialize latent sequence
     x = torch.full((B, L + gen_length), mask_id, dtype=torch.long, device=device)
@@ -58,6 +60,7 @@ def generate_block_topk(
 
             # Model prediction
             logits = model(x, attention_mask=attention_mask).logits
+            num_steps_taken += 1
 
             # EOS / EOT must be removed from diffusion
             logits[:, :, eos_id] = -torch.inf
@@ -101,4 +104,4 @@ def generate_block_topk(
             # Commit updates
             x = torch.where(transfer, x0, x)
 
-    return x
+    return x, num_steps_taken
