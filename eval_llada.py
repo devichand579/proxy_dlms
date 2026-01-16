@@ -1,7 +1,6 @@
 '''
 This file is inspired by the code from https://github.com/ML-GSAI/SMDM
 '''
-# import accelerate
 import torch
 import re
 from pathlib import Path
@@ -15,8 +14,8 @@ from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
 from tqdm import tqdm
 
-from transformers import AutoTokenizer, AutoModel
-from generate import generate, generate_eb
+from load_model import load_model_and_tokenizer
+from generate import generate
 
 import warnings
 from dill._dill import PicklingWarning
@@ -37,7 +36,7 @@ def set_seed(seed):
 class LLaDAEvalHarness(LM):
     def __init__(
         self,
-        model_path='',
+        model_path="./models/llada",
         mask_id=126336,
         max_length=4096,
         batch_size=32,
@@ -70,32 +69,17 @@ class LLaDAEvalHarness(LM):
         '''
         super().__init__()
 
-        # accelerator = accelerate.Accelerator()
-        # if accelerator.num_processes > 1:
-        #     self.accelerator = accelerator
-        # else:
-        #     self.accelerator = None
-        
-        model_kwargs = {}
-        # if self.accelerator is not None:
-        #     model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
-
-        self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.bfloat16, **model_kwargs)
-        self.model.eval()
-
         self.device = torch.device(device)
-        # if self.accelerator is not None:
-        #     self.model = self.accelerator.prepare(self.model)
-        #     self.device = torch.device(f'{self.accelerator.device}')
-        #     self._rank = self.accelerator.local_process_index
-        #     self._world_size = self.accelerator.num_processes
-        # else: 
-            # self.model = self.model.to(device)
+        self.model.eval()
+        self.model = load_model_and_tokenizer(model_path, device=device)
 
-        self.model = self.model.to(device)
+        self.model, self.tokenizer = self.model.to(device)
 
         self.mask_id = mask_id
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        if self.tokenizer.padding_side != 'left':
+            self.tokenizer.padding_side = 'left'
+
+        assert self.tokenizer.pad_token_id != mask_id
 
         self.mc_num = mc_num
         self.batch_size = int(batch_size)
@@ -250,42 +234,6 @@ class LLaDAEvalHarness(LM):
     def loglikelihood_rolling(self, requests):
         raise NotImplementedError
 
-    # def generate_until(self, requests: list[Instance]):
-    #     def _tokenize(e):
-    #         return {
-    #             "question": self.tokenizer(e["question"])["input_ids"],
-    #             "question_text": e["question"],
-    #             "until": e["until"],
-    #         }
-
-    #     ds = [{"question": req.args[0], "until": req.args[1]['until']} for req in requests]
-    #     ds = Dataset.from_list(ds)
-    #     ds = ds.map(_tokenize)
-    #     ds = ds.with_format("torch")
-
-    #     out = []
-    #     for elem in tqdm(ds, desc="Generating..."):
-    #         prompt = elem["question"].unsqueeze(0).to(self.device)
-    #         stop_tokens = elem["until"]
- 
-    #         generated_answer = generate(self.model, prompt, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
-    #                                     temperature=0, cfg_scale=self.cfg, remasking=self.remasking, mask_id=self.mask_id)
-            
-    #         generated_answer = self.tokenizer.decode(generated_answer[0][prompt.shape[1]:], skip_special_tokens=False)
-    #         for stop_seq in stop_tokens:
-    #                 if stop_seq in generated_answer:
-    #                     generated_answer = generated_answer.split(stop_seq)[0]
-
-    #         # remove special tokens
-    #         generated_answer_ids = self.tokenizer(generated_answer)["input_ids"]
-    #         generated_answer = self.tokenizer.decode(generated_answer_ids, skip_special_tokens=True)
-    #         out.append(generated_answer)
-            
-    #         if self.accelerator:
-    #             self.accelerator.wait_for_everyone()
-
-    #     return out
-
     def generate_until(self, requests: list[Instance]):
 
         out = []
@@ -307,20 +255,20 @@ class LLaDAEvalHarness(LM):
             prompt_ids = self.tokenizer(question_text)["input_ids"]
             prompt = torch.tensor(prompt_ids, device=self.device).unsqueeze(0)
 
-            # generated = generate(
-            #     self.model,
-            #     prompt,
-            #     steps=self.steps,
-            #     gen_length=self.gen_length,
-            #     block_length=self.block_length,
-            #     temperature=0.0,
-            #     cfg_scale=self.cfg,
-            #     remasking=self.remasking,
-            #     mask_id=self.mask_id,
-            # )
+            generated = generate(
+                self.model,
+                prompt,
+                steps=self.steps,
+                gen_length=self.gen_length,
+                block_length=self.block_length,
+                temperature=0.0,
+                cfg_scale=self.cfg,
+                remasking=self.remasking,
+                mask_id=self.mask_id,
+            )
 
-            generated, steps_taken = generate_eb(self.model, prompt)
-            total_steps += steps_taken
+            # generated, steps_taken = generate_eb(self.model, prompt)
+            # total_steps += steps_taken
 
             gen_text = self.tokenizer.decode(
                 generated[0][len(prompt_ids):],
