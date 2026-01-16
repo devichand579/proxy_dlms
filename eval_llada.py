@@ -251,10 +251,10 @@ class LLaDAEvalHarness(LM):
 
             stop_tokens = gen_cfg.get("until", [])
 
-            print("\n" + "=" * 80)
-            print(f"EXAMPLE {i}")
-            print("\nQUESTION:")
-            print(question_text)
+            # print("\n" + "=" * 80)
+            # print(f"EXAMPLE {i}")
+            # print("\nQUESTION:")
+            # print(question_text)
 
             prompt_ids = self.tokenizer(question_text)["input_ids"]
             prompt = torch.tensor(prompt_ids, device=self.device).unsqueeze(0)
@@ -280,9 +280,9 @@ class LLaDAEvalHarness(LM):
                 skip_special_tokens=True
             )
 
-            print("\nGENERATED ANSWER:")
-            print(gen_text)
-            print("=" * 80 + "\n")
+            # print("\nGENERATED ANSWER:")
+            # print(gen_text)
+            # print("=" * 80 + "\n")
 
             out.append(gen_text)
 

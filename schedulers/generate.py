@@ -19,7 +19,7 @@ def generate(model, prompt, mode="pure_diffusion"):
         return generate_block_topk(model, prompt, attention_mask=None, gen_length=1024, block_length=32,steps_per_block=32, top_k=1, metric="confidence", temperature=0.0)
     elif mode == "eb_sampler":
         return generate_EB(model, prompt, attention_mask=None, gen_length=512, gamma=0.1, E="confidence",   
-            temperature=0.0, generate_until_id=None)
+            temperature=0.0, generate_until_ids=None)
     elif mode == "top_margin":
         return generate_block_topk(model, prompt, attention_mask=None, gen_length=1024, block_length=32,steps_per_block=32, top_k=1, metric="top_margin", temperature=0.0)
     else:
