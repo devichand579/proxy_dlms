@@ -38,6 +38,8 @@ def generate_pure_diffusion(model, prompt, attention_mask=None, steps=128, gen_l
     mask_index = (x == mask_id)
     num_transfer_tokens = get_num_transfer_tokens(mask_index, steps)
         
+    num_steps_taken = 0
+
     for i in range(steps):
         mask_index = (x == mask_id)
         
@@ -46,6 +48,7 @@ def generate_pure_diffusion(model, prompt, attention_mask=None, steps=128, gen_l
             break
             
         logits = model(x, attention_mask=attention_mask).logits
+        num_steps_taken += 1
 
         if logits_eos_inf:
             logits[:, :, 126081] = -torch.inf
@@ -84,4 +87,4 @@ def generate_pure_diffusion(model, prompt, attention_mask=None, steps=128, gen_l
         x[transfer_index] = x0[transfer_index]
 
 
-    return x
+    return x, num_steps_taken

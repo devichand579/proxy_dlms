@@ -30,6 +30,8 @@ def generate_EB(
     x = torch.full((B, d), mask_id, dtype=torch.long, device=device)
     x[:, :L] = prompt
 
+    num_steps_taken = 0
+
     if attention_mask is not None:
         attention_mask = torch.cat(
             [attention_mask, torch.ones((B, gen_length), device=device)],
@@ -50,6 +52,9 @@ def generate_EB(
         return all(done)
 
     while True:
+        if num_steps_taken > gen_length:
+            break
+        
         # I_m = {l | x^l = m}
         mask_index = (x == mask_id)
         if not mask_index.any():
@@ -59,6 +64,7 @@ def generate_EB(
 
         # p^l = pθ,l(.|x)
         logits = model(x, attention_mask=attention_mask).logits
+        num_steps_taken += 1
 
         # remove EOS / EOT from diffusion
         logits[:, :, eos_id] = -torch.inf
@@ -118,4 +124,4 @@ def generate_EB(
         # apply unmasking
         x = torch.where(transfer, x0, x)
 
-    return x
+    return x, num_steps_taken

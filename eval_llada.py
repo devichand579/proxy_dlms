@@ -15,7 +15,7 @@ from lm_eval.api.registry import register_model
 from tqdm import tqdm
 
 from load_model import load_model_and_tokenizer
-from generate import generate
+from schedulers.generate import generate
 
 import warnings
 from dill._dill import PicklingWarning
@@ -36,6 +36,7 @@ def set_seed(seed):
 class LLaDAEvalHarness(LM):
     def __init__(
         self,
+        mode="pure_diffusion",
         model_path="./models/llada",
         mask_id=126336,
         max_length=4096,
@@ -74,6 +75,7 @@ class LLaDAEvalHarness(LM):
         self.model = load_model_and_tokenizer(model_path, device=device)
 
         self.model, self.tokenizer = self.model.to(device)
+        self.mode = mode
 
         self.mask_id = mask_id
         if self.tokenizer.padding_side != 'left':
@@ -255,20 +257,8 @@ class LLaDAEvalHarness(LM):
             prompt_ids = self.tokenizer(question_text)["input_ids"]
             prompt = torch.tensor(prompt_ids, device=self.device).unsqueeze(0)
 
-            generated = generate(
-                self.model,
-                prompt,
-                steps=self.steps,
-                gen_length=self.gen_length,
-                block_length=self.block_length,
-                temperature=0.0,
-                cfg_scale=self.cfg,
-                remasking=self.remasking,
-                mask_id=self.mask_id,
-            )
-
-            # generated, steps_taken = generate_eb(self.model, prompt)
-            # total_steps += steps_taken
+            generated, steps_taken = generate(self.model, prompt, mode=self.mode)
+            total_steps += steps_taken
 
             gen_text = self.tokenizer.decode(
                 generated[0][len(prompt_ids):],
@@ -289,9 +279,6 @@ class LLaDAEvalHarness(LM):
             # print("=" * 80 + "\n")
 
             out.append(gen_text)
-
-            # if self.accelerator:
-            #     self.accelerator.wait_for_everyone()
 
         print("Average steps:", total_steps/total_reqs)
         return out
