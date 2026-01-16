@@ -1,12 +1,7 @@
 import torch
-import numpy as np
-import torch.nn.functional as F
-from utils import add_gumbel_noise
-
-import torch
 import torch.nn.functional as F
 import numpy as np
-from utils import add_gumbel_noise
+from .utils import add_gumbel_noise
 
 @torch.no_grad()
 def generate_block_topk(

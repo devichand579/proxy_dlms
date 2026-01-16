@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
-from utils import add_gumbel_noise, get_num_transfer_tokens
+from .utils import add_gumbel_noise, get_num_transfer_tokens
 try:
     from ..load_model import load_model_and_tokenizer
 except ImportError:

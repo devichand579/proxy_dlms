@@ -19,6 +19,7 @@ from schedulers.generate import generate
 
 import warnings
 from dill._dill import PicklingWarning
+import time
 
 warnings.filterwarnings("ignore", category=PicklingWarning)
 
@@ -36,7 +37,6 @@ def set_seed(seed):
 class LLaDAEvalHarness(LM):
     def __init__(
         self,
-        mode="pure_diffusion",
         model_path="./models/llada",
         mask_id=126336,
         max_length=4096,
@@ -48,6 +48,7 @@ class LLaDAEvalHarness(LM):
         gen_length=1024,
         block_length=1024,
         remasking='low_confidence',
+        mode='pure_diffusion',
         device="cuda",
         **kwargs,
     ):
@@ -71,10 +72,10 @@ class LLaDAEvalHarness(LM):
         super().__init__()
 
         self.device = torch.device(device)
-        self.model.eval()
-        self.model = load_model_and_tokenizer(model_path, device=device)
+        self.model, self.tokenizer = load_model_and_tokenizer(model_path, device=device)
 
-        self.model, self.tokenizer = self.model.to(device)
+        self.model = self.model.to(device)
+        self.model.eval()
         self.mode = mode
 
         self.mask_id = mask_id
@@ -241,6 +242,7 @@ class LLaDAEvalHarness(LM):
         out = []
         total_steps = 0
         total_reqs = 0
+        total_time = 0
 
         for i, req in enumerate(tqdm(requests, desc="Generating...")):
             question_text = req.args[0]
@@ -249,16 +251,20 @@ class LLaDAEvalHarness(LM):
 
             stop_tokens = gen_cfg.get("until", [])
 
-            # print("\n" + "=" * 80)
-            # print(f"EXAMPLE {i}")
-            # print("\nQUESTION:")
-            # print(question_text)
+            print("\n" + "=" * 80)
+            print(f"EXAMPLE {i}")
+            print("\nQUESTION:")
+            print(question_text)
 
             prompt_ids = self.tokenizer(question_text)["input_ids"]
             prompt = torch.tensor(prompt_ids, device=self.device).unsqueeze(0)
 
+            start_time = time.time()
             generated, steps_taken = generate(self.model, prompt, mode=self.mode)
+            end_time = time.time()
+
             total_steps += steps_taken
+            total_time += end_time - start_time
 
             gen_text = self.tokenizer.decode(
                 generated[0][len(prompt_ids):],
@@ -274,13 +280,14 @@ class LLaDAEvalHarness(LM):
                 skip_special_tokens=True
             )
 
-            # print("\nGENERATED ANSWER:")
-            # print(gen_text)
-            # print("=" * 80 + "\n")
+            print("\nGENERATED ANSWER:")
+            print(gen_text)
+            print("=" * 80 + "\n")
 
             out.append(gen_text)
 
         print("Average steps:", total_steps/total_reqs)
+        print("Average time:", total_time/total_reqs)
         return out
 
 if __name__ == "__main__":
