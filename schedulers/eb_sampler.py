@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from utils import add_gumbel_noise
+from .utils import add_gumbel_noise
 
 @torch.no_grad()
 def generate_EB(
@@ -54,7 +54,7 @@ def generate_EB(
     while True:
         if num_steps_taken > gen_length:
             break
-        
+
         # I_m = {l | x^l = m}
         mask_index = (x == mask_id)
         if not mask_index.any():
