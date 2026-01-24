@@ -1,3 +1,4 @@
+import time
 from load_model import load_model_and_tokenizer
 from schedulers.llada_schedulers import generate_llada
 
@@ -7,7 +8,7 @@ def main():
 
     # Example usage
     model_dir = "./models/llada"
-    model, tokenizer = load_model_and_tokenizer(model_dir, device=device, compile_model=True)
+    model, tokenizer = load_model_and_tokenizer(model_dir, device=device, compile_model=False)
 
     # The LLaDA architecture theoretically supports both left-padding and right-padding. 
     # However, the sampling code implementation is simpler with left-padding.
@@ -28,11 +29,24 @@ def main():
     input_ids = encoded_outputs['input_ids'].to(device)
     attention_mask = encoded_outputs['attention_mask'].to(device)
 
-    out_pure_diffusion = generate_llada(model, input_ids, attention_mask, steps=1024, gen_length=1024, block_length=1024, temperature=0., remasking='low_confidence')
-    out_block_diffusion = generate_llada(model, input_ids, attention_mask, steps=1024, gen_length=1024, block_length=32, temperature=0., remasking='low_confidence')
-    # out = generate_block_topk(model, input_ids, attention_mask=None, gen_length=256, block_length=32, steps_per_block=32, top_k=1, metric="confidence")
-    # out = generate_og(model, input_ids)
-    # out = generate_EB(model, input_ids)
+    # Pure diffusion generation with timing
+    print("Generating with pure diffusion (block_length=256)...")
+    start_time = time.time()
+    out_pure_diffusion = generate_llada(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, temperature=0., remasking='low_confidence')
+    pure_diffusion_time = time.time() - start_time
+    print(f"Pure diffusion generation time: {pure_diffusion_time:.2f} seconds")
+    print()
+
+    # Block diffusion generation with timing
+    print("Generating with block diffusion (block_length=32)...")
+    start_time = time.time()
+    out_block_diffusion = generate_llada(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=32, temperature=0., remasking='low_confidence')
+    block_diffusion_time = time.time() - start_time
+    print(f"Block diffusion generation time: {block_diffusion_time:.2f} seconds")
+    
+
+
+
     output_pure_diffusion = tokenizer.batch_decode(out_pure_diffusion[:, input_ids.shape[1]:], skip_special_tokens=True)
     output_block_diffusion = tokenizer.batch_decode(out_block_diffusion[:, input_ids.shape[1]:], skip_special_tokens=True)
     for o in output_pure_diffusion:

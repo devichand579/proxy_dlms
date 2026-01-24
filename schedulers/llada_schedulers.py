@@ -1,12 +1,12 @@
 '''
     LLaDA paper based schedulers
     1. Pure Diffusion
-    generate_llada(model, prompt, attention_mask=None, steps=1024, gen_length=1024, block_length=1024, temperature=0.,
-             remasking='low_confidence', mask_id=126336, logits_eos_inf=True, confidence_eos_eot_inf=True)
+    generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=256, temperature=0.,
+             remasking='low_confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False)
 
     2. Block Diffusion LLADA
-    generate_block_diffusion_llada(model, prompt, attention_mask=None, steps=1024, gen_length=1024, block_length=32, temperature=0.,
-             remasking='low_confidence', mask_id=126336, logits_eos_inf=True, confidence_eos_eot_inf=True)
+    generate_block_diffusion_llada(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=32, temperature=0.,
+             remasking='low_confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False)
 '''
 
 
@@ -18,8 +18,8 @@ from schedulers.utils import add_gumbel_noise, get_num_transfer_tokens, get_mask
 
 
 @ torch.no_grad()
-def generate_llada(model, prompt, attention_mask=None, steps=1024, gen_length=1024, block_length=32, temperature=0.,
-             remasking='low_confidence', mask_id=126336, logits_eos_inf=True, confidence_eos_eot_inf=True):
+def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=32, temperature=0.,
+             remasking='low_confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False):
     '''
     Args:
         model: Mask predictor.
