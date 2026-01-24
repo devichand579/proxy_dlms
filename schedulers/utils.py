@@ -1,6 +1,7 @@
 import torch
+import torch.nn.functional as F
+from typing import List
 
- # IMPORTANT
 
 def add_gumbel_noise(logits, temperature):
     '''
@@ -35,3 +36,71 @@ def get_num_transfer_tokens(mask_index, steps):
         num_transfer_tokens[i, :remainder[i]] += 1
 
     return num_transfer_tokens
+
+def get_mask_by_confidence(logits: torch.Tensor, x0: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate token confidence based on predicted token probabilities.
+    
+    Confidence is defined as the probability assigned to the predicted token.
+    Higher confidence indicates the model is more certain about the prediction.
+    
+    Args:
+        logits: Model output logits of shape (batch_size, seq_len, vocab_size)
+        x0: Predicted tokens of shape (batch_size, seq_len)
+        
+    Returns:
+        Confidence scores for each position
+    """
+    p = F.softmax(logits.to(torch.float64), dim=-1)
+    x0_p = torch.squeeze(
+        torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
+    )
+    return x0_p
+
+def get_mask_by_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate entropy-based uncertainty for each token position.
+    
+    Entropy measures the uncertainty in the model's prediction.
+    Higher entropy indicates less certain predictions.
+    
+    Args:
+        logits: Model output logits of shape (batch_size, seq_len, vocab_size)
+        
+    Returns:
+        Entropy values for each position
+    """
+    p = F.softmax(logits.to(torch.float64), dim=-1)
+    entropy = -torch.sum(p * torch.log(p + 1e-10), dim=-1)
+    return entropy
+
+def check_stop_generation(
+    x: torch.Tensor, 
+    stop_tokens: List[int], 
+    stop_on_eos: bool, 
+    mask_id: int, 
+    prompt_len: int
+) -> bool:
+    """
+    Check if generation should stop based on stop tokens or EOS conditions.
+    
+    Args:
+        x: Current token sequence
+        stop_tokens: List of token IDs that should trigger stopping
+        stop_on_eos: Whether to enable early stopping
+        mask_id: ID of the mask token
+        prompt_len: Length of the input prompt
+        
+    Returns:
+        True if generation should stop, False otherwise
+    """
+    if not stop_on_eos:
+        return False
+    
+    if stop_tokens:
+        generated_part = x[:, prompt_len:]
+        for stop_token in stop_tokens:
+            if stop_token in generated_part.flatten():
+                return True
+    
+    return False

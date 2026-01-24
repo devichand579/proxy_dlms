@@ -16,27 +16,6 @@ Please download the model configuration and safetensors files before running any
 python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='GSAI-ML/LLaDA-8B-Base', local_dir='./models/llada', local_dir_use_symlinks=False)"
 ```
 
-### Samplers
-
-1. top-k confidence (k = 1, LLaDA general, l = 1024)
-2. block LLaDA (b = 32, l = 1024)
-3. top-margin
-
-## Log Likelihood Computation
-
-The `get_log_likelihood()` function computes the negative log-likelihood (NLL) of an answer given a prompt using **Monte Carlo importance sampling**. This is essential for evaluating masked language models like LLaDA on tasks that require likelihood-based scoring. The function uses an importance sampling approach to estimate the log-likelihood:
-
-1. **Forward Process**: Randomly masks tokens in the answer (prompt tokens are preserved) with varying mask ratios
-2. **Model Prediction**: The model predicts logits for all masked positions
-3. **Importance Weighting**: Computes cross-entropy loss divided by the mask probability for each masked token
-4. **Monte Carlo Averaging**: Repeats the process `mc_num` times and averages the results
-
-The key formula is:
-```
-NLL ≈ (1/N) Σ [cross_entropy_loss / mask_probability]
-```
-
-This provides an unbiased estimate of the negative log-likelihood.
 
 
 
