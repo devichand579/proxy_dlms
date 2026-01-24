@@ -39,14 +39,12 @@ class LLaDAEvalHarness(LM):
         self,
         model_path="./models/llada",
         mask_id=126336,
-        max_length=4096,
         batch_size=32,
         mc_num=128,
         is_check_greedy=False,
         steps=1024,
         gen_length=1024,
         block_length=1024,
-        remasking='low_confidence',
         mode='pure_diffusion',
         device="cuda",
         **kwargs,
@@ -55,7 +53,6 @@ class LLaDAEvalHarness(LM):
         Args:
             model_path: LLaDA-8B-Base model path.
             mask_id: The token id of [MASK] is 126336.
-            max_length: the max sequence length.
             batch_size: mini batch size.
             mc_num: Monte Carlo estimation iterations
             is_check_greedy: For certain metrics like LAMBADA, the evaluation requires the model to verify whether the answer 
@@ -68,8 +65,7 @@ class LLaDAEvalHarness(LM):
                              by default, significantly accelerating the evaluation process.
             steps: Sampling steps, less than or equal to gen_length.
             gen_length: Generated answer length.
-            block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
-            remasking: Remasking strategy. 'low_confidence' or 'random'.
+            block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive generation.
             mode: 'pure_diffusion' or 'block_diffusion'.
         '''
         super().__init__()
@@ -91,13 +87,11 @@ class LLaDAEvalHarness(LM):
         self.batch_size = int(batch_size)
         assert mc_num % self.batch_size == 0
         self.sampling_eps = 0.
-        self.max_length = max_length
         self.is_check_greedy = is_check_greedy
 
         self.steps = steps
         self.gen_length = gen_length
         self.block_length = block_length
-        self.remasking = remasking    
     @property
     def rank(self):
         return self._rank
@@ -242,38 +236,27 @@ class LLaDAEvalHarness(LM):
 
             stop_tokens = gen_cfg.get("until", [])
 
-            # print("\n" + "=" * 80)
-            # print(f"EXAMPLE {i}")
-            # print("\nQUESTION:")
-            # print(question_text)
-
-            prompt_ids = self.tokenizer(question_text)["input_ids"]
-            prompt = torch.tensor(prompt_ids, device=self.device).unsqueeze(0)
+            # Tokenize with proper formatting (Method 1 - better approach)
+            encoded_outputs = self.tokenizer(
+                question_text,
+                add_special_tokens=False,
+                padding=True,
+                return_tensors="pt"
+            )
+            input_ids = encoded_outputs['input_ids'].to(self.device)
+            attention_mask = encoded_outputs['attention_mask'].to(self.device)
 
             start_time = time.time()
-            generated, steps_taken = generate(self.model, prompt, mode=self.mode)
+            generated, steps_taken = generate(self.model, input_ids, attention_mask, mode=self.mode)
             end_time = time.time()
 
             total_steps += steps_taken
             total_time += end_time - start_time
 
             gen_text = self.tokenizer.decode(
-                generated[0][len(prompt_ids):],
-                skip_special_tokens=False
-            )
-
-            for stop in stop_tokens:
-                if stop in gen_text:
-                    gen_text = gen_text.split(stop)[0]
-
-            gen_text = self.tokenizer.decode(
-                self.tokenizer(gen_text)["input_ids"],
+                generated[0][input_ids.shape[1]:],
                 skip_special_tokens=True
             )
-
-            # print("\nGENERATED ANSWER:")
-            # print(gen_text)
-            # print("=" * 80 + "\n")
 
             out.append(gen_text)
 

@@ -12,10 +12,10 @@ def generate(model, input_ids, attention_mask, mode="pure_diffusion"):
 
     print("Generating with mode", mode)
     if mode == "pure_diffusion":
-        return generate_llada(model, input_ids, attention_mask, steps=1024, gen_length=1024, block_length=1024, temperature=0., remasking='low_confidence')
+        return generate_llada(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, temperature=0., remasking='low_confidence')
     
     elif mode == "block_diffusion":
-        return generate_llada(model, input_ids, attention_mask, steps=1024, gen_length=1024, block_length=32, temperature=0., remasking='low_confidence')
+        return generate_llada(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=32, temperature=0., remasking='low_confidence')
     
     # elif mode == "top_k":
     #     return generate_block_topk(model, prompt, attention_mask=None, gen_length=1024, block_length=32,steps_per_block=32, top_k=1, metric="confidence", temperature=0.0)
