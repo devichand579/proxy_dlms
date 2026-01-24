@@ -42,8 +42,7 @@ class LLaDAEvalHarness(LM):
         max_length=4096,
         batch_size=32,
         mc_num=128,
-        is_check_greedy=True,
-        cfg=0.,
+        is_check_greedy=False,
         steps=1024,
         gen_length=1024,
         block_length=1024,
@@ -67,7 +66,11 @@ class LLaDAEvalHarness(LM):
                              However, since none of the metrics in the LLaDA paper (https://arxiv.org/abs/2502.09992) require this functionality, 
                              we recommend setting is_check_greedy to False. This configuration causes suffix_greedy_prediction() to return False 
                              by default, significantly accelerating the evaluation process.
-            cfg_scale: Unsupervised classifier-free guidance scale.
+            steps: Sampling steps, less than or equal to gen_length.
+            gen_length: Generated answer length.
+            block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
+            remasking: Remasking strategy. 'low_confidence' or 'random'.
+            mode: 'pure_diffusion' or 'block_diffusion'.
         '''
         super().__init__()
 
@@ -91,7 +94,6 @@ class LLaDAEvalHarness(LM):
         self.max_length = max_length
         self.is_check_greedy = is_check_greedy
 
-        self.cfg = cfg
         self.steps = steps
         self.gen_length = gen_length
         self.block_length = block_length
@@ -128,19 +130,8 @@ class LLaDAEvalHarness(LM):
 
     @torch.no_grad()
     def get_logits(self, batch, prompt_index):
-        if self.cfg > 0.:
-            assert len(prompt_index) == batch.shape[1]
-            prompt_index = prompt_index.unsqueeze(0).repeat(batch.shape[0], 1)
-            un_batch = batch.clone()
-            un_batch[prompt_index] = self.mask_id
-            batch = torch.cat([batch, un_batch])
-
         logits = self.model(batch).logits
-
-        if self.cfg > 0.:
-            logits, un_logits = torch.chunk(logits, 2, dim=0)
-            logits = un_logits + (self.cfg + 1) * (logits - un_logits)
-        return logits[:, :batch.shape[1]]
+        return logits
 
     @torch.no_grad()
     def get_loglikelihood(self, prefix, target):

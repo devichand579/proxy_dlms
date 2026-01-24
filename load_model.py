@@ -34,9 +34,15 @@ def load_config(model_dir: str):
     return config
 
 
-def load_model(model_dir: str, torch_dtype=torch.bfloat16, device="cuda"):
+def load_model(model_dir: str, torch_dtype=torch.bfloat16, device="cuda", compile_model=True):
     """
     Load LLaDA model completely from local files.
+    
+    Args:
+        model_dir: Path to model directory
+        torch_dtype: Data type for model weights
+        device: Device to load model on
+        compile_model: Whether to compile model with torch.compile for faster inference
     """
     model_dir = Path(model_dir)
     
@@ -54,6 +60,14 @@ def load_model(model_dir: str, torch_dtype=torch.bfloat16, device="cuda"):
     
     model = model.to(device)
     model.eval()
+    
+    # Compile model for faster inference (PyTorch 2.0+)
+    if compile_model:
+        try:
+            model = torch.compile(model, mode="max-autotune")
+        except Exception as e:
+            print(f"Warning: Could not compile model: {e}")
+            print("Continuing without compilation...")
     
     return model
 
@@ -85,11 +99,17 @@ def load_tokenizer(model_dir: str):
     return tokenizer
 
 
-def load_model_and_tokenizer(model_dir: str, torch_dtype=torch.bfloat16, device="cuda"):
+def load_model_and_tokenizer(model_dir: str, torch_dtype=torch.bfloat16, device="cuda", compile_model=True):
     """
     function to load both model and tokenizer from local files.
+    
+    Args:
+        model_dir: Path to model directory
+        torch_dtype: Data type for model weights
+        device: Device to load model on
+        compile_model: Whether to compile model with torch.compile for faster inference
     """
-    model = load_model(model_dir, torch_dtype=torch_dtype, device=device)
+    model = load_model(model_dir, torch_dtype=torch_dtype, device=device, compile_model=compile_model)
     tokenizer = load_tokenizer(model_dir)
     
     return model, tokenizer
@@ -100,7 +120,7 @@ if __name__ == "__main__":
     model_dir = "./models/llada"
     
     print(f"Loading model from {model_dir}...")
-    model, tokenizer = load_model_and_tokenizer(model_dir)
+    model, tokenizer = load_model_and_tokenizer(model_dir, compile_model=True)
     
     print("Model and tokenizer loaded successfully!")
     print(f"Model type: {type(model)}")
