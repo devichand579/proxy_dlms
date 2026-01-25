@@ -18,10 +18,11 @@ def main():
     # If the padding ID equals the mask ID, you need to modify our generate function to achieve correct inference.
     assert tokenizer.pad_token_id != 126336
 
-    prompts = [ "Joy can read 8 pages of a book in 20 minutes. How many hours will it take her to read 120 pages?"]
+    prompt =  "Joy can read 8 pages of a book in 20 minutes. How many hours will it take her to read 120 pages?"
+                
 
     encoded_outputs = tokenizer(
-        prompts,
+        prompt,
         add_special_tokens=False,
         padding=True,
         return_tensors="pt"
@@ -32,19 +33,24 @@ def main():
     # Pure diffusion generation with timing
     print("Generating with pure diffusion (block_length=256)...")
     start_time = time.time()
-    out_pure_diffusion = generate_llada(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, temperature=0., remasking='low_confidence')
+    out_pure_diffusion, steps_pure, blocks_pure = generate_llada(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, temperature=0., remasking='low_confidence')
     pure_diffusion_time = time.time() - start_time
     print(f"Pure diffusion generation time: {pure_diffusion_time:.2f} seconds")
+    print(f"Steps taken: {steps_pure}")
+    print(f"Blocks generated: {blocks_pure}")
+    print(f"output Shape: {out_pure_diffusion.shape}")
+
     print()
 
     # Block diffusion generation with timing
     print("Generating with block diffusion (block_length=32)...")
     start_time = time.time()
-    out_block_diffusion = generate_llada(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=32, temperature=0., remasking='low_confidence')
+    out_block_diffusion, steps_block, blocks_block = generate_llada(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=32, temperature=0., remasking='low_confidence')
     block_diffusion_time = time.time() - start_time
     print(f"Block diffusion generation time: {block_diffusion_time:.2f} seconds")
-    
-
+    print(f"Steps taken: {steps_block}")
+    print(f"Blocks generated: {blocks_block}")
+    print(f"output Shape: {out_block_diffusion.shape}")
 
 
     output_pure_diffusion = tokenizer.batch_decode(out_pure_diffusion[:, input_ids.shape[1]:], skip_special_tokens=True)

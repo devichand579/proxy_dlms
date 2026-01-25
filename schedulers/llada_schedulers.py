@@ -12,7 +12,7 @@
 
 import torch
 import numpy as np
-from schedulers.utils import add_gumbel_noise, get_num_transfer_tokens, get_mask_by_confidence
+from schedulers.utils import add_gumbel_noise, get_num_transfer_tokens, get_mask_by_confidence, check_eos_stop_condition
 
 
 
@@ -48,6 +48,7 @@ def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256
 
     prompt_len = prompt.shape[1]
     eos_id, eot_id = 126081, 126348
+    steps_taken = 0  # Track number of steps actually taken
 
     for num_block in range(num_blocks):
         block_start = prompt_len + num_block * block_length
@@ -64,10 +65,8 @@ def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256
             # Cache mask_index - compute once per step
             mask_index = (x == mask_id)
             
-            # Early exit if all masks are done
-            if not mask_index.any():
-                return x  # All done, return early
             
+            steps_taken += 1  # Increment step counter
             logits = model(x, attention_mask=attention_mask).logits
 
             # Set EOS/EOT to -inf before sampling to prevent them from being predicted
@@ -108,5 +107,8 @@ def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256
             
             x[transfer_index] = x0[transfer_index]
             
+            # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
+            if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
+                return x, steps_taken, num_block + 1  # Stop generation early
 
-    return x
+    return x, steps_taken, num_blocks
