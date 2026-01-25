@@ -60,6 +60,7 @@ checkpoints/
 # Logs and outputs
 *.log
 logs/
+wandb/
 outputs/
 output*.txt
 

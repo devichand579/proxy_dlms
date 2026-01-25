@@ -74,33 +74,36 @@ def get_mask_by_entropy(logits: torch.Tensor) -> torch.Tensor:
     entropy = -torch.sum(p * torch.log(p + 1e-10), dim=-1)
     return entropy
 
-def check_stop_generation(
-    x: torch.Tensor, 
-    stop_tokens: List[int], 
-    stop_on_eos: bool, 
-    mask_id: int, 
+def check_eos_stop_condition(
+    x: torch.Tensor,
+    eos_id: int,
+    mask_id: int,
     prompt_len: int
 ) -> bool:
     """
-    Check if generation should stop based on stop tokens or EOS conditions.
+    Check if generation should stop: EOS token is present AND all tokens before it are unmasked.
     
     Args:
-        x: Current token sequence
-        stop_tokens: List of token IDs that should trigger stopping
-        stop_on_eos: Whether to enable early stopping
+        x: Current token sequence of shape (batch_size, seq_len)
+        eos_id: Token ID of EOS token
         mask_id: ID of the mask token
         prompt_len: Length of the input prompt
         
     Returns:
-        True if generation should stop, False otherwise
+        True if EOS is found and all tokens before it are unmasked, False otherwise
     """
-    if not stop_on_eos:
-        return False
+    generated_part = x[:, prompt_len:]  # Shape: (batch_size, gen_length)
     
-    if stop_tokens:
-        generated_part = x[:, prompt_len:]
-        for stop_token in stop_tokens:
-            if stop_token in generated_part.flatten():
+    for batch_idx in range(x.shape[0]):
+        # Find EOS token positions in generated part
+        eos_positions = (generated_part[batch_idx] == eos_id).nonzero(as_tuple=True)[0]
+        
+        if len(eos_positions) > 0:
+            first_eos_pos = eos_positions[0].item()
+            # Check if all tokens before EOS are unmasked
+            tokens_before_eos = generated_part[batch_idx, :first_eos_pos]
+            if not (tokens_before_eos == mask_id).any():
+                # All tokens before EOS are unmasked, can stop
                 return True
     
     return False

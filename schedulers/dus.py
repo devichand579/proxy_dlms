@@ -1,10 +1,3 @@
-"""
-Core generation functions for masked diffusion language models.
-
-This module contains the essential generation algorithms for MDLM including
-confidence-based remasking and scheduled generation strategies.
-"""
-
 import gc
 import re
 from typing import Optional, Tuple, Union, List
