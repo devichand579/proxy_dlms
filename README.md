@@ -4,33 +4,91 @@
 
 ### Environment Setup
 Run the following command to create a new environment and install the dependencies.
-```
+```bash
 conda create -n strace -f environment.yaml
 conda activate strace
 pip install -r requirements.txt
 ```
-### Downloading the model configuration 
+
+### Downloading the Model
 Please download the model configuration and safetensors files before running any scheduler or evaluation scripts.
 
-```
+```bash
 python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='GSAI-ML/LLaDA-8B-Base', local_dir='./models/llada', local_dir_use_symlinks=False)"
 ```
 
+### Running Evaluation
 
+We provide a convenient shell script `eval.sh` for running evaluations with proper configuration.
 
+#### Basic Usage
 
-python eval_llada.py \
-  --model llada_dist \
-  --model_args '{"model_path": "GSAI-ML/LLaDA-8B-Instruct", "mc_num": 8, "is_check_greedy": false, "cfg": 0.0, "device": "cuda"}' \
-  --tasks gsm8k \
-  --num_fewshot 0 \
-  --limit 1
-  --verbosity DEBUG \
-  --log_samples \
-  --output_path llada_gsm8k_results > output2.txt
+```bash
+./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --compile_model False
+```
 
-We provide `get_log_likelihood()` and `generate()` functions in `get_log_likelihood.py` 
-and `generate.py` respectively, for conditional likelihood evaluation and conditional generation.
+#### Arguments
+
+- `--batch_size`: Batch size for processing requests (e.g., 2, 4, 8)
+- `--mode`: Generation mode
+  - `pd` or `pure_diffusion`: Pure diffusion mode
+  - `bd` or `block_diffusion`: Block diffusion mode
+- `--task_name`: Name of the evaluation task
+  - Supported tasks: `gsm8k`, `minerva_math500`, `humaneval`, `mbpp`, `logiqa`, `bbh`, `truthfulqa`
+- `--model`: Model name (should match the directory name in `./models/`)
+- `--compile_model`: Whether to compile model with `torch.compile` (`True` or `False`)
+
+#### Automatic Configuration
+
+The script automatically sets:
+
+1. **Generation Length & Steps**:
+   - `humaneval` and `mbpp`: 512 tokens, 512 steps
+   - Other tasks: 256 tokens, 256 steps
+
+2. **Block Length**:
+   - `block_diffusion` mode: 32
+   - `pure_diffusion` mode: Same as generation length
+
+3. **Few-shot Examples** (`num_fewshot`):
+   - `humaneval`: 0 shot
+   - `gsm8k`: 4 shot
+   - `minerva_math500`: 4 shot
+   - `mbpp`: 4 shot
+   - `bbh`: 3 shot
+   - `truthfulqa`: 0 shot
+
+4. **Wandb Name**: Automatically generated as `{model}_{task_name}_{mode}_{timestamp}`
+
+5. **Output Path**: `outputs/{model}_{task_name}_{mode}_{timestamp}.json`
+
+#### Example Commands
+
+```bash
+# Evaluate on GSM8K with pure diffusion
+./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --compile_model False
+
+# Evaluate on HumanEval with block diffusion
+./eval.sh --batch_size 1 --mode bd --task_name humaneval --model llada --compile_model False
+
+# Evaluate on BBH with pure diffusion
+./eval.sh --batch_size 4 --mode pd --task_name bbh --model llada --compile_model True
+```
+
+#### Logging
+
+- **File Logs**: Saved to `logs/{model}_{task_name}_{mode}_{timestamp}.log`
+- **Wandb Logging**: Automatically logs metrics including:
+  - Per-chunk metrics (size, generation time, steps, blocks, throughput)
+  - Global statistics (total samples, steps, time, blocks, averages)
+  - Generation metrics (steps per generation, early stopping)
+
+#### Output Files
+
+- **Results**: `outputs/{model}_{task_name}_{mode}_{timestamp}.json`
+- **Logs**: `logs/{model}_{task_name}_{mode}_{timestamp}.log`
+- **Samples**: Included in output JSON when using `--log_samples`
+
 
 
 
