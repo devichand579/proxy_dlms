@@ -1,14 +1,13 @@
 #!/bin/bash
 
 # Parse command-line arguments
-# Usage: ./eval.sh --batch_size 2 --mode pd --task_name logiqa --wandb_name logiqa --model llada --compile_model False
+# Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --compile_model False
 # Mode shortcuts: pd (pure_diffusion), bd (block_diffusion)
 # Datasets : gsm8k, minerva_math500, humaneval, mbpp, logiqa, bbh
 
 BATCH_SIZE=""
 MODE=""
 TASK_NAME=""
-WANDB_NAME=""
 MODEL=""
 COMPILE_MODEL=""
 N_DEVICES=""
@@ -26,10 +25,6 @@ while [[ $# -gt 0 ]]; do
             TASK_NAME="$2"
             shift 2
             ;;
-        --wandb_name)
-            WANDB_NAME="$2"
-            shift 2
-            ;;
         --model)
             MODEL="$2"
             shift 2
@@ -40,18 +35,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --wandb_name <name> --model <model> --compile_model <compile_model>"
+            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> --compile_model <compile_model>"
             exit 1
             ;;
     esac
 done
 
 # Check required arguments
-if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$WANDB_NAME" || -z "$MODEL" ]]; then
+if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "Error: Missing required arguments"
-    echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --wandb_name <name> --model <model> --compile_model <compile_model>"
+    echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> --compile_model <compile_model>"
     echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion)"
-    echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --wandb_name gpqa --model llada --compile_model False"
+    echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
     exit 1
 fi
 
@@ -80,7 +75,7 @@ export HF_DATASETS_TRUST_REMOTE_CODE=true
 export LMEVAL_LOG_LEVEL=INFO
 export TOKENIZERS_PARALLELISM=false
 export HF_TOKEN=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
-export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0  # UNSET if are running with SLURM
 
 # Wandb configuration 
 export WANDB_API_KEY=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
@@ -107,6 +102,26 @@ else
 fi
 
 export MODEL_PATH=./models/${MODEL}
+export TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+# Generate wandb name from same pattern as output file: MODEL_TASK_MODE_TIMESTAMP
+WANDB_NAME="${MODEL}_${TASK_NAME}_${MODE}_${TIMESTAMP}"
+
+# Set num_fewshot based on task name
+NUM_FEWSHOT=0  # Default
+if [[ "$TASK_NAME" == *"humaneval"* ]]; then
+    NUM_FEWSHOT=0
+elif [[ "$TASK_NAME" == *"gsm8k"* ]]; then
+    NUM_FEWSHOT=4
+elif [[ "$TASK_NAME" == *"math500"* ]] || [[ "$TASK_NAME" == *"minerva_math500"* ]]; then
+    NUM_FEWSHOT=4
+elif [[ "$TASK_NAME" == *"mbpp"* ]]; then
+    NUM_FEWSHOT=4
+elif [[ "$TASK_NAME" == *"bbh"* ]]; then
+    NUM_FEWSHOT=3
+elif [[ "$TASK_NAME" == *"truthfulqa"* ]]; then
+    NUM_FEWSHOT=0
+fi
 
 # Display configuration
 echo "Configuration:"
@@ -120,7 +135,7 @@ echo "  Gen Length: $GEN_LENGTH"
 echo "  Steps: $STEPS"
 echo "  Block Length: $BLOCK_LENGTH"
 echo "  Compile Model: $COMPILE_MODEL"
+echo "  Num Fewshot: $NUM_FEWSHOT"
 echo ""
-
-accelerate launch eval_llada.py -L 4 --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --model ${MODEL} --model_args model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME} --wandb_args project=${WANDB_PROJECT},name=${WANDB_NAME}
+accelerate launch eval_llada.py -L 4 --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME} --wandb_args project=${WANDB_PROJECT},name=${WANDB_NAME} --write_out --output_path outputs/${MODEL}_${TASK_NAME}_${MODE}_${TIMESTAMP}.json --log_samples --cache_requests
 

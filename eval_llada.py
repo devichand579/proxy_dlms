@@ -23,6 +23,14 @@ import os
 from datetime import datetime
 import threading
 
+# Optional wandb import
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
+
 warnings.filterwarnings("ignore", category=PicklingWarning)
 
 
@@ -173,6 +181,24 @@ class LLaDAEvalHarness(LM):
         
         # Set up logger
         self.logger = setup_logger(logger_name)
+        
+        # Initialize wandb if available (check if already initialized by lm-eval)
+        self.use_wandb = WANDB_AVAILABLE
+        if self.use_wandb:
+            try:
+                # Check if wandb is already initialized (by lm-eval-harness)
+                if wandb.run is None:
+                    # Not initialized yet, will be initialized by lm-eval-harness
+                    self.use_wandb = True
+                else:
+                    # Already initialized
+                    self.use_wandb = True
+                    self.logger.info("Wandb already initialized by lm-eval-harness")
+            except Exception as e:
+                self.logger.warning(f"Wandb initialization check failed: {e}, disabling wandb logging")
+                self.use_wandb = False
+        else:
+            self.logger.info("Wandb not available, skipping wandb logging")
 
         self.logger.info(f"Model path: {model_path}")
         self.logger.info(f"Mode: {self.mode}")
@@ -383,6 +409,20 @@ class LLaDAEvalHarness(LM):
             total_gen_time += gen_time
             
             self.logger.info(f"Processed chunk: {chunk_start}-{chunk_end-1} of {total_requests} requests (chunk size: {chunk_size}, gen time: {gen_time:.4f}s)")
+            
+            # Log chunk metrics to wandb
+            if self.use_wandb and wandb.run is not None:
+                try:
+                    wandb.log({
+                        "chunk/size": chunk_size,
+                        "chunk/gen_time": gen_time,
+                        "chunk/steps_taken": steps_taken,
+                        "chunk/blocks_processed": blocks,
+                        "chunk/throughput_samples_per_sec": chunk_size / gen_time if gen_time > 0 else 0,
+                        "chunk/chunk_index": chunk_start // self.batch_size,
+                    })
+                except Exception as e:
+                    self.logger.warning(f"Failed to log chunk metrics to wandb: {e}")
         
         # Update global statistics (thread-safe)
         with self._stats_lock:
@@ -409,6 +449,22 @@ class LLaDAEvalHarness(LM):
             self.logger.info(f"Total generation time (global): {total_gen_time_global:.4f} seconds")
             self.logger.info(f"Total blocks (global): {total_blocks}")
             self.logger.info(f"Number of generate_until calls: {call_count}")
+            
+            # Log global statistics to wandb
+            if self.use_wandb and wandb.run is not None:
+                try:
+                    wandb.log({
+                        "global/total_samples": total_samples,
+                        "global/total_steps": total_steps,
+                        "global/total_gen_time": total_gen_time_global,
+                        "global/total_blocks": total_blocks,
+                        "global/generate_until_calls": call_count,
+                        "global/avg_steps_per_sample": total_steps / total_samples if total_samples > 0 else 0,
+                        "global/avg_gen_time_per_sample": total_gen_time_global / total_samples if total_samples > 0 else 0,
+                        "global/throughput_samples_per_sec": total_samples / total_gen_time_global if total_gen_time_global > 0 else 0,
+                    })
+                except Exception as e:
+                    self.logger.warning(f"Failed to log global metrics to wandb: {e}")
         
         torch.cuda.empty_cache()
         return all_gen_texts
