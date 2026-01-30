@@ -1,8 +1,22 @@
-import torch
-import numpy as np
-import torch.nn.functional as F
+'''
+    FHS (First-Hitting Sampling) schedulers
+    1. Extrapolation Method (N <= 128)
+    generate_fhs_extrapolation(model, prompt, attention_mask=None, gen_length=128, steps=128, temperature=1.0,
+                               mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True)
+    
+    2. Predictor-Corrector Method (N > 128)
+    generate_fhs_predictor_corrector(model, prompt, attention_mask=None, gen_length=256, steps=256, temperature=1.0,
+                                     mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True)
+    
+    3. Auto-selector (chooses method based on steps)
+    generate_fhs(model, prompt, attention_mask=None, gen_length=128, steps=128, temperature=1.0,
+                 mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True)
+'''
 
-from utils import add_gumbel_noise
+
+import torch
+import torch.nn.functional as F
+from schedulers.utils import  check_eos_stop_condition
 
 
 def _model_logits(model, x, attention_mask=None, t_cond=None):
@@ -11,12 +25,10 @@ def _model_logits(model, x, attention_mask=None, t_cond=None):
       - time-agnostic model: model(x, attention_mask=...).logits
       - time-conditioned model: model(x, attention_mask=..., timesteps=t).logits  (or similar)
 
-    If your model doesn't accept t, it will just ignore it.
     """
     if t_cond is None:
         return model(x, attention_mask=attention_mask).logits
 
-    # Try common keyword names
     try:
         return model(x, attention_mask=attention_mask, timesteps=t_cond).logits
     except TypeError:
@@ -30,108 +42,299 @@ def _model_logits(model, x, attention_mask=None, t_cond=None):
     return model(x, attention_mask=attention_mask).logits
 
 
-@torch.no_grad()
+
+def update_tau_linear(tau, n_masked):
+    """
+    Linear schedule:
+      alpha(t) = 1 - t
+      => tau_{l-1} = tau_l * u^{1/l}
+    """
+    u = torch.rand_like(tau).clamp(min=1e-12)
+    return tau * torch.pow(u, 1.0 / n_masked)
+
+
+def sample_categorical(logits, temperature=1.0, use_fp64=True):
+    """
+    Sample from a categorical distribution.
+    """
+    if temperature == 0.0:
+        return torch.argmax(logits, dim=-1)
+
+    if use_fp64:
+        logits = logits.double()
+
+    probs = F.softmax(logits / temperature, dim=-1)
+    probs = probs.clamp(min=1e-12)
+
+    # multinomial will use dtype of probs
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+
+
+def make_equal_schedule(L, N):
+    """
+    Requires L divisible by N.
+    """
+    assert L % N == 0, f"L={L} must be divisible by N={N}"
+    return [L // N] * N
+
+
+@ torch.no_grad()
+def generate_fhs_extrapolation(
+    model,
+    prompt,
+    attention_mask=None,
+    gen_length=128,
+    steps=128,
+    temperature=1.0,
+    mask_id=126336,
+    logits_eos_inf=False,
+    confidence_eos_eot_inf=False,
+    pass_time_to_model=True,
+):
+    '''
+    Args:
+        model: Mask predictor.
+        prompt: A tensor of shape (1, L).
+        attention_mask: A tensor of shape (1, L).
+        gen_length: Generated answer length.
+        steps: Number of diffusion steps (chunks). Must be divisible by gen_length.
+        temperature: Categorical distribution sampling temperature.
+        mask_id: The token id of [MASK] is 126336.
+        logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
+        confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
+        pass_time_to_model: Whether to pass time conditioning to the model.
+    '''
+    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+    x[:, :prompt.shape[1]] = prompt.clone()
+
+    if attention_mask is not None:
+        attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
+
+    assert gen_length % steps == 0
+    schedule = make_equal_schedule(gen_length, steps)
+
+    prompt_len = prompt.shape[1]
+    eos_id, eot_id = 126081, 126348
+    steps_taken = 0  
+
+    # Mask bookkeeping
+    masked = torch.zeros_like(x, dtype=torch.bool)
+    masked[:, prompt_len:] = True
+
+    tau = torch.ones((prompt.shape[0],), device=model.device)
+    l = torch.full((prompt.shape[0],), gen_length, device=model.device, dtype=torch.float32)
+
+    mu_prev = None
+    tau_prev = None
+
+    for step, Ln in enumerate(schedule):
+        # Early stopping - check if all tokens are decoded
+        if not masked.any():
+            break
+
+        for i in range(Ln):
+            # First-hitting time update
+            tau_new = update_tau_linear(tau, l)
+
+            # Network eval ONCE per chunk
+            if i == 0:
+                steps_taken += 1  
+                t_cond = tau_new if pass_time_to_model else None
+                logits = _model_logits(model, x, attention_mask, t_cond)
+
+                # Set EOS/EOT to -inf before sampling to prevent them from being predicted
+                if logits_eos_inf:
+                    logits[:, :, eos_id] = -torch.inf
+
+                if confidence_eos_eot_inf:
+                    logits[:, :, eos_id] = -torch.inf
+                    logits[:, :, eot_id] = -torch.inf
+
+                mu = logits
+                tau_curr = tau_new.clone()
+
+            # ----- Extrapolation (2nd order) -----
+            if mu_prev is None:
+                mu_hat = mu
+            else:
+                # Lagrange interpolation in time
+                mu_hat = (
+                    (tau_new - tau_prev) / (tau_curr - tau_prev) * mu
+                    + (tau_new - tau_curr) / (tau_prev - tau_curr) * mu_prev
+                )
+
+            # Sample ONE token per batch
+            for b in range(prompt.shape[0]):
+                if not masked[b].any():
+                    continue
+                idx = torch.nonzero(masked[b]).squeeze(1)
+                if idx.numel() == 0:
+                    continue
+                k = idx[torch.randint(0, idx.numel(), (1,), device=model.device).item()]
+                token = sample_categorical(mu_hat[b, k], temperature)
+                x[b, k] = token
+                masked[b, k] = False
+                l[b] -= 1
+
+            tau = tau_new
+
+            # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
+            if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
+                return x, steps_taken  # Stop generation early
+
+        # Save previous network output for next extrapolation
+        mu_prev = mu
+        tau_prev = tau_curr
+
+        # Clear intermediate tensors to free memory
+        if i == Ln - 1:
+            del mu, logits
+            torch.cuda.empty_cache()
+
+    return x, steps_taken
+
+
+@ torch.no_grad()
+def generate_fhs_predictor_corrector(
+    model,
+    prompt,
+    attention_mask=None,
+    gen_length=256,
+    steps=256,
+    temperature=1.0,
+    mask_id=126336,
+    logits_eos_inf=False,
+    confidence_eos_eot_inf=False,
+    pass_time_to_model=True,
+):
+    '''
+    Args:
+        model: Mask predictor.
+        prompt: A tensor of shape (1, L).
+        attention_mask: A tensor of shape (1, L).
+        gen_length: Generated answer length.
+        steps: Number of diffusion steps (chunks). Must be divisible by gen_length.
+        temperature: Categorical distribution sampling temperature.
+        mask_id: The token id of [MASK] is 126336.
+        logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
+        confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
+        pass_time_to_model: Whether to pass time conditioning to the model.
+    '''
+    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+    x[:, :prompt.shape[1]] = prompt.clone()
+
+    if attention_mask is not None:
+        attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
+
+    assert gen_length % steps == 0
+    schedule = make_equal_schedule(gen_length, steps)
+
+    prompt_len = prompt.shape[1]
+    eos_id, eot_id = 126081, 126348
+    steps_taken = 0 
+
+    # Mask bookkeeping
+    masked = torch.zeros_like(x, dtype=torch.bool)
+    masked[:, prompt_len:] = True
+
+    tau = torch.ones((prompt.shape[0],), device=model.device)
+    l = torch.full((prompt.shape[0],), gen_length, device=model.device, dtype=torch.float32)
+
+    for step, Ln in enumerate(schedule):
+        # Early stopping - check if all tokens are decoded
+        if not masked.any():
+            break
+
+        for i in range(Ln):
+            # First-hitting time update
+            tau_new = update_tau_linear(tau, l)
+            t_cond = tau_new if pass_time_to_model else None
+
+            # ----- Predictor -----
+            steps_taken += 1  
+            logits = _model_logits(model, x, attention_mask, t_cond)
+
+            # Set EOS/EOT to -inf before sampling to prevent them from being predicted
+            if logits_eos_inf:
+                logits[:, :, eos_id] = -torch.inf
+
+            if confidence_eos_eot_inf:
+                logits[:, :, eos_id] = -torch.inf
+                logits[:, :, eot_id] = -torch.inf
+
+            mu_pred = logits
+
+            # Sample ONE token per batch
+            for b in range(prompt.shape[0]):
+                if not masked[b].any():
+                    continue
+                idx = torch.nonzero(masked[b]).squeeze(1)
+                if idx.numel() == 0:
+                    continue
+                k = idx[torch.randint(0, idx.numel(), (1,), device=model.device).item()]
+                token = sample_categorical(mu_pred[b, k], temperature)
+                x[b, k] = token
+                masked[b, k] = False
+                l[b] -= 1
+
+            # ----- Corrector (only at end of chunk) -----
+            if i == Ln - 1:
+                # Refine using updated x (no extra sampling, no feedback to future steps)
+                _ = _model_logits(model, x, attention_mask, t_cond)
+
+            tau = tau_new
+
+            # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
+            if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
+                return x, steps_taken  # Stop generation early
+
+        # Clear intermediate tensors to free memory
+        del mu_pred, logits
+        torch.cuda.empty_cache()
+
+    return x, steps_taken
+
+
+@ torch.no_grad()
 def generate_fhs(
     model,
     prompt,
     attention_mask=None,
     gen_length=128,
-    temperature=0.0,
+    steps=128,
+    temperature=1.0,
     mask_id=126336,
-    schedule="linear",
-    # EOS/EOT handling:
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
-    eos_id=126081,
-    eot_id=126348,
-    # optionally pass time to model (if supported)
-    pass_time_to_model=False,
+    pass_time_to_model=True,
 ):
-    device = model.device
-    B = prompt.shape[0]
-    Lp = prompt.shape[1]
-    L = Lp + gen_length
-
-    # init x: prompt + masks
-    x = torch.full((B, L), mask_id, dtype=torch.long, device=device)
-    x[:, :Lp] = prompt.clone()
-
-    # attention mask: extend with ones for generated tokens
-    if attention_mask is not None:
-        attention_mask = torch.cat(
-            [attention_mask, torch.ones((B, gen_length), dtype=attention_mask.dtype, device=device)],
-            dim=-1
+    '''
+    Matches paper recommendation:
+      - Extrapolation for steps <= 128
+      - Predictor-Corrector for steps > 128
+    
+    Args:
+        model: Mask predictor.
+        prompt: A tensor of shape (1, L).
+        attention_mask: A tensor of shape (1, L).
+        gen_length: Generated answer length.
+        steps: Number of diffusion steps (chunks). Must be divisible by gen_length.
+        temperature: Categorical distribution sampling temperature.
+        mask_id: The token id of [MASK] is 126336.
+        logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
+        confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
+        pass_time_to_model: Whether to pass time conditioning to the model.
+    '''
+    if steps <= 128:
+        return generate_fhs_extrapolation(
+            model, prompt, attention_mask,
+            gen_length, steps, temperature,
+            mask_id, logits_eos_inf, confidence_eos_eot_inf, pass_time_to_model
         )
-
-    # positions we will generate
-    gen_pos = torch.arange(Lp, L, device=device)  # [gen_length]
-
-    # u ~ Uniform(0,1), tau = alpha^{-1}(u)
-    u = torch.rand((B, gen_length), device=device)
-    tau = u  # [B, gen_length], in [0,1]
-
-    # Sort positions by tau (ascending): decode earliest hits first
-    order_idx = torch.argsort(tau, dim=-1)  # [B, gen_length]
-    # Map order indices to actual sequence positions
-    order_pos = gen_pos.unsqueeze(0).expand(B, -1).gather(dim=1, index=order_idx)  # [B, gen_length]
-    order_tau = tau.gather(dim=1, index=order_idx)  # [B, gen_length]
-
-    # Pointer for each batch
-    ptr = torch.zeros((B,), dtype=torch.long, device=device)
-
-    # Loop until all generated positions are filled
-    while True:
-        # Check completion
-        if torch.all(ptr >= gen_length):
-            break
-
-        # Choose next positions to fill (up to chunk_size per batch)
-        # We'll build a mask "to_fill" over [B, L]
-        to_fill = torch.zeros((B, L), dtype=torch.bool, device=device)
-        t_cond = None
-
-        for b in range(B):
-            p = int(ptr[b].item())
-            if p >= gen_length:
-                continue
-            q = min(p, gen_length)
-            pos = order_pos[b, p:q]  # positions in x
-            to_fill[b, pos] = True
-
-        if pass_time_to_model:
-            # Use the tau of the LAST position filled in the chunk as conditioning time.
-            # Shape [B], values in [0,1]
-            t_vals = []
-            for b in range(B):
-                p = int(ptr[b].item())
-                if p >= gen_length:
-                    t_vals.append(torch.tensor(1.0, device=device))
-                    continue
-                q = min(p, gen_length)
-                t_vals.append(order_tau[b, q - 1])
-            t_cond = torch.stack(t_vals, dim=0)  # [B]
-
-        # Forward pass once for all batches
-        logits = _model_logits(model, x, attention_mask=attention_mask, t_cond=t_cond)  # [B, L, V]
-
-        # EOS / EOT logits handling
-        if logits_eos_inf:
-            logits[:, :, eos_id] = -torch.inf
-
-        if confidence_eos_eot_inf:
-            logits[:, :, eos_id] = -torch.inf
-            logits[:, :, eot_id] = -torch.inf
-
-        # Sample / pick tokens
-        logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-        x0 = torch.argmax(logits_with_noise, dim=-1)  # [B, L]
-
-        # Commit only the selected positions
-        x[to_fill] = x0[to_fill]
-
-        # Advance pointers
-        for b in range(B):
-            if ptr[b] < gen_length:
-                ptr[b] = min(ptr[b], gen_length)
-
-    return x
+    else:
+        return generate_fhs_predictor_corrector(
+            model, prompt, attention_mask,
+            gen_length, steps, temperature,
+            mask_id, logits_eos_inf, confidence_eos_eot_inf, pass_time_to_model
+        )
