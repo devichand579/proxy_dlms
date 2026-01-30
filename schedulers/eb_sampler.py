@@ -1,10 +1,17 @@
+'''
+    EB (Entropy-Based) sampler
+    generate_EB(model, prompt, attention_mask=None, steps=128, gen_length=128, block_length=128, 
+                gamma=0.1, E='confidence', temperature=0., mask_id=126336, 
+                logits_eos_inf=False, confidence_eos_eot_inf=False)
+'''
+
+
 import torch
-import numpy as np
 import torch.nn.functional as F
-from utils import add_gumbel_noise
+from schedulers.utils import add_gumbel_noise, get_mask_by_confidence, get_mask_by_entropy, check_eos_stop_condition
 
 
-@torch.no_grad()
+@ torch.no_grad()
 def generate_EB(
     model,
     prompt,
@@ -13,36 +20,32 @@ def generate_EB(
     gen_length=128,
     block_length=128,
     gamma=0.1,
-    E="confidence",
+    E='confidence',
     temperature=0.,
-    cfg_scale=0.,
     mask_id=126336,
-    eos_id=126081,
-    eot_id=126348,
-    generate_until_ids=None,
+    logits_eos_inf=False,
+    confidence_eos_eot_inf=False,
 ):
-    """
-    Blockwise EB sampler with correct early stopping:
-    stop if EOS/EOT appears AND prefix is fully unmasked.
-    """
-
-    device = model.device
-    B, L = prompt.shape
-    d = L + gen_length
-
-    # initialize x
-    x = torch.full((B, d), mask_id, dtype=torch.long, device=device)
-    x[:, :L] = prompt.clone()
+    '''
+    Args:
+        model: Mask predictor.
+        prompt: A tensor of shape (1, L).
+        attention_mask: A tensor of shape (1, L).
+        steps: Sampling steps, less than or equal to gen_length.
+        gen_length: Generated answer length.
+        block_length: Block length, less than or equal to gen_length.
+        gamma: Entropy threshold for EB selection. Lower values select fewer tokens.
+        E: Ranking metric. 'confidence', 'margin', or 'entropy'.
+        temperature: Categorical distribution sampling temperature.
+        mask_id: The token id of [MASK] is 126336.
+        logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
+        confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
+    '''
+    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+    x[:, :prompt.shape[1]] = prompt.clone()
 
     if attention_mask is not None:
-        attention_mask = torch.cat(
-            [attention_mask, torch.ones((B, gen_length), device=device)],
-            dim=-1
-        )
-
-    total_steps = 0
-
-    prompt_index = (x != mask_id)
+        attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
 
     assert gen_length % block_length == 0
     num_blocks = gen_length // block_length
@@ -50,106 +53,109 @@ def generate_EB(
     assert steps % num_blocks == 0
     steps = steps // num_blocks
 
-    def stopping_condition(x):
-        if generate_until_ids is None:
-            return False
-        for xb in x:
-            for stop_id in generate_until_ids:
-                if stop_id in xb:
-                    i = (xb == stop_id).nonzero(as_tuple=True)[0][0]
-                    if (xb[:i] != mask_id).all():
-                        return True
-        return False
+    prompt_len = prompt.shape[1]
+    eos_id, eot_id = 126081, 126348
+    steps_taken = 0  
 
     for num_block in range(num_blocks):
-
-        block_start = L + num_block * block_length
-        block_end   = L + (num_block + 1) * block_length
-
-        for _ in range(steps):
-
-            # global early stop dominates
-            if stopping_condition(x):
-                return x
-
+        block_start = prompt_len + num_block * block_length
+        block_end = prompt_len + (num_block + 1) * block_length
+        
+        # Early stopping - check if block is already complete
+        block_mask_index = (x[:, block_start:block_end] == mask_id)
+        if not block_mask_index.any():
+            continue  # Skip completed blocks
+        
+        for i in range(steps):
+            # Cache mask_index - compute once per step
             mask_index = (x == mask_id)
             block_mask = mask_index[:, block_start:block_end]
-
-            # block finished
+            
             if not block_mask.any():
                 break
-
-            # ---- forward ----
+            
+            steps_taken += 1  
             logits = model(x, attention_mask=attention_mask).logits
-            total_steps += 1
 
-            # prevent EOS / EOT diffusion
-            logits[:, :, eos_id] = -torch.inf
-            logits[:, :, eot_id] = -torch.inf
+            # Set EOS/EOT to -inf before sampling to prevent them from being predicted
+            if logits_eos_inf:
+                logits[:, :, eos_id] = -torch.inf
 
-            # sample proposal
-            logits_noisy = add_gumbel_noise(logits, temperature)
-            x0 = torch.argmax(logits_noisy, dim=-1)
+            if confidence_eos_eot_inf:
+                logits[:, :, eos_id] = -torch.inf
+                logits[:, :, eot_id] = -torch.inf
 
-            p = F.softmax(logits, dim=-1)
+            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+            x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
 
-            # ---- EB score + entropy ----
-            if E == "confidence":
-                e = torch.gather(p, -1, x0.unsqueeze(-1)).squeeze(-1)
-            elif E == "margin":
+            p = F.softmax(logits.to(torch.float64), dim=-1)
+
+            # Compute EB ranking score
+            if E == 'confidence':
+                e = get_mask_by_confidence(logits, x0)
+            elif E == 'margin':
                 top2 = torch.topk(p, 2, dim=-1).values
                 e = top2[..., 0] - top2[..., 1]
-            elif E == "entropy":
-                e = -(p * torch.log(p + 1e-9)).sum(-1)
-                e = -e
+            elif E == 'entropy':
+                entropy = get_mask_by_entropy(logits)
+                e = -entropy  # low entropy = high confidence
             else:
-                raise ValueError(E)
+                raise NotImplementedError(E)
 
+            # Compute entropy for EB constraint
             h = -(p * torch.log(p + 1e-9)).sum(-1)
 
-            transfer = torch.zeros_like(x, dtype=torch.bool)
+            transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
 
-            # ---- EB selection per batch ----
-            for b in range(B):
-
+            # EB selection per batch
+            for j in range(prompt.shape[0]):
                 block_positions = [
-                    i for i in range(block_start, block_end)
-                    if mask_index[b, i]
+                    pos for pos in range(block_start, block_end)
+                    if mask_index[j, pos]
                 ]
 
                 if not block_positions:
                     continue
 
+                # Sort by ranking score (highest first)
                 block_positions = sorted(
                     block_positions,
-                    key=lambda i: e[b, i].item(),
+                    key=lambda pos: e[j, pos].item(),
                     reverse=True
                 )
 
+                # Select tokens while cumulative entropy constraint holds
                 H = []
-                for i in block_positions:
-                    H.append(h[b, i].item())
+                for pos in block_positions:
+                    H.append(h[j, pos].item())
 
+                    # Constraint: sum(H) - max(H) <= gamma
                     if sum(H) - max(H) <= gamma:
-                        transfer[b, i] = True
+                        transfer_index[j, pos] = True
                     else:
                         break
 
-            # entropy too strict
-            if not transfer.any():
-                for b in range(B):
+            # Fallback: if entropy too strict, select most confident token
+            if not transfer_index.any():
+                for j in range(prompt.shape[0]):
                     block_positions = [
-                        i for i in range(block_start, block_end)
-                        if mask_index[b, i]
+                        pos for pos in range(block_start, block_end)
+                        if mask_index[j, pos]
                     ]
                     if not block_positions:
                         continue
 
-                    # choose most confident token
-                    best_i = max(block_positions, key=lambda i: e[b, i].item())
-                    transfer[b, best_i] = True
+                    # Choose most confident token
+                    best_pos = max(block_positions, key=lambda pos: e[j, pos].item())
+                    transfer_index[j, best_pos] = True
 
-            # apply updates
-            x = torch.where(transfer, x0, x)
+            x[transfer_index] = x0[transfer_index]
+            
+            # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
+            if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
+                return x, steps_taken, num_block + 1  # Stop generation early
 
-    return x, total_steps
+            del logits, logits_with_noise, p, e, h
+            torch.cuda.empty_cache()
+
+    return x, steps_taken, num_blocks
