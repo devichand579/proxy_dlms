@@ -3,6 +3,8 @@ from load_model import load_model_and_tokenizer
 from schedulers.llada_schedulers import generate_llada
 from schedulers.top_k import generate_topk
 from schedulers.fhs import generate_fhs
+from schedulers.eb_sampler import generate_EB
+
 
 def main():
     device = 'cuda'
@@ -79,12 +81,21 @@ def main():
     print(f"Steps taken: {steps_fhs}")
     print(f"output Shape: {out_fhs.shape}")
 
+    print("Generating with EB_sampler (confidence metric, block_length=256)...")
+    start_time = time.time()
+    out_eb_sampler, steps_eb_sampler, blocks_eb_sampler = generate_EB(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, gamma=0.1, E='confidence', temperature=0.)
+    eb_sampler_time = time.time() - start_time
+    print(f"EB_sampler generation time: {eb_sampler_time:.2f} seconds")
+    print(f"Steps taken: {steps_eb_sampler}")
+    print(f"Blocks generated: {blocks_eb_sampler}")
+    print(f"output Shape: {out_eb_sampler.shape}")
+
     output_pure_diffusion = tokenizer.batch_decode(out_pure_diffusion[:, input_ids.shape[1]:], skip_special_tokens=True)
     output_block_diffusion = tokenizer.batch_decode(out_block_diffusion[:, input_ids.shape[1]:], skip_special_tokens=True)
     output_top_k_confidence = tokenizer.batch_decode(out_top_k_confidence[:, input_ids.shape[1]:], skip_special_tokens=True)
     output_top_k_margin = tokenizer.batch_decode(out_top_k_margin[:, input_ids.shape[1]:], skip_special_tokens=True)
     output_fhs = tokenizer.batch_decode(out_fhs[:, input_ids.shape[1]:], skip_special_tokens=True)
-
+    output_eb_sampler = tokenizer.batch_decode(out_eb_sampler[:, input_ids.shape[1]:], skip_special_tokens=True)
     print("Output:")
     for o in output_pure_diffusion:
         print("Pure diffusion:")
@@ -104,6 +115,10 @@ def main():
         print('-' * 50)
     for o in output_fhs:
         print("FHS:")
+        print(o)
+        print('-' * 50)
+    for o in output_eb_sampler:
+        print("EB_sampler (confidence):")
         print(o)
         print('-' * 50)
 if __name__ == "__main__":
