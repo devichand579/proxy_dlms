@@ -18,8 +18,19 @@ from schedulers.utils import add_gumbel_noise, get_num_transfer_tokens, get_mask
 
 
 @ torch.no_grad()
-def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=32, temperature=0.,
-             remasking='confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False):
+def generate_llada(
+    model,
+    prompt,
+    attention_mask=None,
+    steps=256,
+    gen_length=256,
+    block_length=256,
+    temperature=0.,
+    remasking='confidence',
+    mask_id=126336,
+    logits_eos_inf=False,
+    confidence_eos_eot_inf=False
+):
     '''
     Args:
         model: Mask predictor.
@@ -48,7 +59,7 @@ def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256
 
     prompt_len = prompt.shape[1]
     eos_id, eot_id = 126081, 126348
-    steps_taken = 0  # Track number of steps actually taken
+    steps_taken = 0  
 
     for num_block in range(num_blocks):
         block_start = prompt_len + num_block * block_length
@@ -80,7 +91,6 @@ def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
 
-            # Skip redundant confidence computation
             if remasking == 'confidence':
                 x0_p = get_mask_by_confidence(logits, x0)
             elif remasking == 'random':
@@ -93,11 +103,9 @@ def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256
             x0 = torch.where(mask_index, x0, x)
             confidence = torch.where(mask_index, x0_p, -np.inf)
 
-            # Clear intermediate tensors to free memory
             del logits, logits_with_noise, x0_p
             torch.cuda.empty_cache()
 
-            # Vectorize topk operations
             transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
             for j in range(confidence.shape[0]):
                 k = num_transfer_tokens[j, i].item()
