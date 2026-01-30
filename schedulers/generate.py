@@ -6,11 +6,12 @@ from schedulers.llada_schedulers import generate_llada
 from schedulers.top_k import generate_topk
 from schedulers.fhs import generate_fhs
 from schedulers.eb_sampler import generate_EB
+from schedulers.dus import generate_dus
 
 @ torch.no_grad()
 def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion", strategy="confidence"):
     '''
-        modes - pure_diffusion, block_diffusion, top_k, FHS, EB_sampler
+        modes - pure_diffusion, block_diffusion, top_k, FHS, EB_sampler, Dilated Scheduling
         strategies - confidence, random, top_margin, entropy
     '''
     
@@ -31,11 +32,14 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
         elif mode == "top_k":
             assert strategy == "confidence" or strategy == "top_margin" or strategy == "entropy" or strategy == "random", "strategy must be confidence, top_margin, entropy, or random"
             return generate_topk(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy)
-        elif mode == "FHS":
+        elif mode == "fhs":
             return generate_fhs(model, prompt, mask, steps=steps, gen_length=gen_length, temperature=1.0, pass_time_to_model=True)
-        elif mode == "EB_sampler":
+        elif mode == "ep_sampler":
             assert strategy == "confidence" or strategy == "margin" or strategy == "entropy" , "strategy must be confidence, top_margin, entropy, or random"
             return generate_EB(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, gamma=0.1, E=strategy, temperature=0.)
+        elif mode == "dus":
+            assert strategy == "confidence" or strategy == "entropy" ,"strategy must be confidence, entropy"
+            return generate_dus(model, prompt, mask, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy, scheduler="dilated", base=2, base_skip=1, confidence_threshold=0.1)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 

@@ -280,8 +280,34 @@ def generate_fhs_predictor_corrector(
 
             # ----- Corrector (only at end of chunk) -----
             if i == Ln - 1:
-                # Refine using updated x (no extra sampling, no feedback to future steps)
-                _ = _model_logits(model, x, attention_mask, t_cond)
+                # Refine using updated x - corrector step
+                steps_taken += 1
+                logits_corr = _model_logits(model, x, attention_mask, t_cond)
+                
+                # Set EOS/EOT to -inf before sampling
+                if logits_eos_inf:
+                    logits_corr[:, :, eos_id] = -torch.inf
+                
+                if confidence_eos_eot_inf:
+                    logits_corr[:, :, eos_id] = -torch.inf
+                    logits_corr[:, :, eot_id] = -torch.inf
+                
+                mu_corr = logits_corr
+                
+                # Refine masked tokens using corrector output
+                for b in range(prompt.shape[0]):
+                    if not masked[b].any():
+                        continue
+                    idx = torch.nonzero(masked[b]).squeeze(1)
+                    if idx.numel() == 0:
+                        continue
+                    k = idx[torch.randint(0, idx.numel(), (1,), device=model.device).item()]
+                    token = sample_categorical(mu_corr[b, k], temperature)
+                    x[b, k] = token
+                    masked[b, k] = False
+                    l[b] -= 1
+                
+                del logits_corr, mu_corr
 
             tau = tau_new
 
