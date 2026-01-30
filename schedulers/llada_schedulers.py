@@ -2,11 +2,11 @@
     LLaDA paper based schedulers
     1. Pure Diffusion
     generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=256, temperature=0.,
-             remasking='low_confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False)
+             remasking='confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False)
 
     2. Block Diffusion LLADA
     generate_block_diffusion_llada(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=32, temperature=0.,
-             remasking='low_confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False)
+             remasking='confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False)
 '''
 
 
@@ -19,7 +19,7 @@ from schedulers.utils import add_gumbel_noise, get_num_transfer_tokens, get_mask
 
 @ torch.no_grad()
 def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=32, temperature=0.,
-             remasking='low_confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False):
+             remasking='confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False):
     '''
     Args:
         model: Mask predictor.
@@ -29,7 +29,7 @@ def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256
         gen_length: Generated answer length.
         block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         temperature: Categorical distribution sampling temperature.
-        remasking: Remasking strategy. 'low_confidence' or 'random'.
+        remasking: Remasking strategy. 'confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
@@ -81,7 +81,7 @@ def generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256
             x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
 
             # Skip redundant confidence computation
-            if remasking == 'low_confidence':
+            if remasking == 'confidence':
                 x0_p = get_mask_by_confidence(logits, x0)
             elif remasking == 'random':
                 x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)

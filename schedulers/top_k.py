@@ -1,6 +1,6 @@
 '''
     Top-K diffusion scheduler
-    generate_topk(model, prompt, attention_mask=None, gen_length=128, block_length=32, steps_per_block=32, 
+    generate_topk(model, prompt, attention_mask=None, gen_length=256, block_length=256, steps=256, 
                  top_k=4, metric='confidence', temperature=0., mask_id=126336, 
                  logits_eos_inf=False, confidence_eos_eot_inf=False)
 '''
@@ -17,10 +17,10 @@ def generate_topk(
     model,
     prompt,
     attention_mask=None,
-    gen_length=128,
-    block_length=32,
-    steps_per_block=32,
-    top_k=4,
+    gen_length=256,
+    block_length=256,
+    steps=256,
+    top_k=1,
     metric='confidence',  # 'top_margin', 'confidence', 'entropy', 'random'
     temperature=0.,
     mask_id=126336,
@@ -34,7 +34,7 @@ def generate_topk(
         attention_mask: A tensor of shape (1, L).
         gen_length: Generated answer length.
         block_length: Block length, less than or equal to gen_length.
-        steps_per_block: Number of diffusion steps per block.
+        steps: Total number of diffusion steps, divided across blocks. Must be divisible by num_blocks.
         top_k: Number of tokens to transfer per step.
         metric: Ranking metric. 'confidence', 'top_margin', 'entropy', or 'random'.
         temperature: Categorical distribution sampling temperature.
@@ -51,6 +51,9 @@ def generate_topk(
     assert gen_length % block_length == 0
     num_blocks = gen_length // block_length
 
+    assert steps % num_blocks == 0
+    steps = steps // num_blocks
+
     prompt_len = prompt.shape[1]
     eos_id, eot_id = 126081, 126348
     steps_taken = 0  # Track number of steps actually taken
@@ -64,17 +67,10 @@ def generate_topk(
         if not block_mask_index.any():
             continue  # Skip completed blocks
         
-        for i in range(steps_per_block):
+        for i in range(steps):
             # Cache mask_index - compute once per step
             mask_index = (x == mask_id)
             
-            # Only current block is allowed to change
-            block_mask = torch.zeros_like(mask_index)
-            block_mask[:, block_start:block_end] = True
-            active_mask = mask_index & block_mask
-
-            if not active_mask.any():
-                break
             
             steps_taken += 1  # Increment step counter
             logits = model(x, attention_mask=attention_mask).logits
@@ -110,7 +106,7 @@ def generate_topk(
             x0_p[:, block_end:] = -np.inf
 
             x0 = torch.where(mask_index, x0, x)
-            confidence = torch.where(active_mask, x0_p, -np.inf)
+            confidence = torch.where(mask_index, x0_p, -np.inf)
 
             # Clear intermediate tensors to free memory
             del logits, logits_with_noise, x0_p
@@ -119,7 +115,7 @@ def generate_topk(
             # Select top-k per batch
             transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
             for j in range(confidence.shape[0]):
-                k = min(top_k, active_mask[j].sum().item())
+                k = min(top_k, block_mask_index[j].sum().item())
                 if k > 0:
                     _, select_index = torch.topk(confidence[j], k=k)
                     transfer_index[j, select_index] = True
