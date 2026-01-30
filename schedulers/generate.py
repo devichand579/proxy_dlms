@@ -34,7 +34,7 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
             return generate_topk(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy)
         elif mode == "fhs":
             return generate_fhs(model, prompt, mask, steps=steps, gen_length=gen_length, temperature=1.0, pass_time_to_model=True)
-        elif mode == "ep_sampler":
+        elif mode == "eb_sampler":
             assert strategy == "confidence" or strategy == "margin" or strategy == "entropy" , "strategy must be confidence, top_margin, entropy, or random"
             return generate_EB(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, gamma=0.1, E=strategy, temperature=0.)
         elif mode == "dus":
