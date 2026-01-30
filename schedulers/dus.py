@@ -1,14 +1,23 @@
-import gc
-import re
-from typing import Optional, Tuple, Union, List
+'''
+    DUS (Dilated Unmasking Scheduler) schedulers
+    1. Binary Search Schedule
+    generate_dus(model, prompt, attention_mask=None, gen_length=256, block_length=32,
+                      temperature=0., remasking='confidence', mask_id=126336, scheduler='binary',
+                      logits_eos_inf=False, confidence_eos_eot_inf=False)
+    
+    2. Dilated Schedule
+    generate_dus(model, prompt, attention_mask=None, gen_length=256, block_length=32,
+                      temperature=0., remasking='confidence', mask_id=126336, scheduler='dilated',
+                      base=2, base_skip=1, logits_eos_inf=False, confidence_eos_eot_inf=False)
+    
+    Note: Number of steps is determined automatically by the schedule (binary/dilated),
+    not by a steps parameter. The schedule creates hierarchical levels of unmasking.
+'''
 
-import numpy as np
+
 import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel
-from utils import add_gumbel_noise, get_num_transfer_tokens, get_mask_by_confidence, get_mask_by_entropy, check_stop_generation
-
-
+from typing import Optional, List
+from schedulers.utils import add_gumbel_noise, get_mask_by_confidence, get_mask_by_entropy, check_eos_stop_condition
 
 
 def dilated_unmask_levels(start: int, end: int, base: int = 2, skip_exp: int = 1) -> List[List[int]]:
@@ -111,152 +120,128 @@ def merge_last_level(levels: List[List[int]]) -> List[List[int]]:
     return levels
 
 
-@torch.no_grad()
-def generate_scheduled(
-    model: torch.nn.Module,
-    prompt: torch.Tensor,
-    steps: int = 128,
-    gen_length: int = 128,
-    block_length: int = 128,
-    temperature: float = 0.,
-    cfg_scale: float = 0.,
-    remasking: str = 'low_confidence',
-    mask_id: int = 126336,
-    stop_on_eos: bool = True,
-    stop_tokens: Optional[List[str]] = None,
-    tokenizer: Optional[AutoTokenizer] = None,
-    confidence_threshold: float = 0.3,
-    scheduler: str = 'binary',
-    base: int = 2,
-    base_skip: int = 1
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Generate text using structured unmasking scheduler.
-    
-    This function implements scheduled generation where tokens are revealed
-    according to a predefined schedule (binary search or dilated) rather than
-    confidence-based selection. Supports remasking based on confidence thresholds.
-    
+@ torch.no_grad()
+def generate_dus(
+    model,
+    prompt,
+    attention_mask=None,
+    gen_length=256,
+    block_length=32,
+    temperature=0.,
+    remasking='confidence',
+    mask_id=126336,
+    scheduler='binary',
+    base=2,
+    base_skip=1,
+    confidence_threshold=0.1,
+    logits_eos_inf=False,
+    confidence_eos_eot_inf=False,
+):
+    '''
     Args:
-        model: The masked language model for prediction
-        prompt: Input prompt tensor of shape (1, prompt_len)
-        steps: Number of sampling steps (for compatibility, not used in scheduling)
-        gen_length: Total length of text to generate
-        block_length: Length of each generation block
-        temperature: Sampling temperature (0 = deterministic)
-        cfg_scale: Classifier-free guidance scale (0 = no guidance)
-        remasking: Strategy for token remasking ('low_confidence', 'high_entropy', 'none')
-        mask_id: Token ID for the [MASK] token
-        stop_on_eos: Whether to stop generation early on EOS tokens
-        stop_tokens: List of strings that trigger early stopping
-        tokenizer: Tokenizer for processing stop tokens
-        confidence_threshold: Threshold below which tokens are remasked
-        scheduler: Scheduling method ('binary' for binary search, 'dilated' for coarse-to-fine)
-        base: Base value for dilated unmasking levels
-        base_skip: Exponent for initial division in dilated scheduling
-        
-    Returns:
-        Tuple of (generated_sequence, unmasking_stages) where:
-            - generated_sequence: Complete sequence including prompt
-            - unmasking_stages: Tensor tracking when each token was unmasked
-    """
-    if stop_tokens is None:
-        stop_tokens = []
-        
-    if tokenizer and stop_tokens:
-        stop_tokens = tokenizer(stop_tokens, add_special_tokens=False)["input_ids"]
-    else:
-        stop_on_eos = False
-
-    device = model.device
-    prompt_len = prompt.shape[1]
+        model: Mask predictor.
+        prompt: A tensor of shape (1, L).
+        attention_mask: A tensor of shape (1, L).
+        gen_length: Generated answer length.
+        block_length: Block length, less than or equal to gen_length.
+        temperature: Categorical distribution sampling temperature.
+        remasking: Remasking strategy. 'confidence', 'entropy', or 'none'.
+        mask_id: The token id of [MASK] is 126336.
+        scheduler: Scheduling method. 'binary' for binary search, 'dilated' for coarse-to-fine.
+        base: Base value for dilated unmasking levels.
+        base_skip: Exponent for initial division in dilated scheduling.
+        confidence_threshold: Threshold below which tokens are remasked.
+        logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
+        confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
     
-    # Initialize generation tensors
-    x = torch.full((1, prompt_len + gen_length), mask_id, dtype=torch.long, device=device)
-    x[:, :prompt_len] = prompt.clone().to(device)
-    
-    unmasking_stage = torch.zeros_like(x, dtype=torch.long, device='cpu')
-    unmasking_stage[:, :prompt_len] = -1
+    Note: Number of steps is determined automatically by the schedule algorithm,
+    not by a parameter. Binary search and dilated schedules create hierarchical
+    levels based on block_length.
+    '''
+    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+    x[:, :prompt.shape[1]] = prompt.clone()
 
-    # Validate block configuration
-    assert gen_length % block_length == 0, "gen_length must be divisible by block_length"
+    if attention_mask is not None:
+        attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
+
+    assert gen_length % block_length == 0
     num_blocks = gen_length // block_length
 
-    total_steps = 0
-    stop_generation = False
-    
+    prompt_len = prompt.shape[1]
+    eos_id, eot_id = 126081, 126348
+    steps_taken = 0  
+
     for num_block in range(num_blocks):
-        if stop_generation:
-            break
         block_start = prompt_len + num_block * block_length
-        block_end = block_start + block_length - 1
+        block_end = prompt_len + (num_block + 1) * block_length
         
+        # Early stopping - check if block is already complete
+        block_mask_index = (x[:, block_start:block_end] == mask_id)
+        if not block_mask_index.any():
+            continue  # Skip completed blocks
+        
+        # Generate schedule for this block
         if scheduler == 'dilated':
-            schedule = dilated_unmask_levels(block_start, block_end, base=base, skip_exp=base_skip)
+            schedule = dilated_unmask_levels(block_start, block_end - 1, base=base, skip_exp=base_skip)
         elif scheduler == 'binary':
-            schedule = binary_search_levels(block_start, block_end)
+            schedule = binary_search_levels(block_start, block_end - 1)
         else:
-            raise NotImplementedError(f"Unknown schedule: {scheduler}")
+            raise NotImplementedError(scheduler)
         
         schedule = merge_last_level(schedule)
         
         for step_idx, step_indices in enumerate(schedule):
-            if stop_generation:
-                break
-
-            # Generate predictions for all masked positions
+            # Cache mask_index - compute once per step
             mask_index = (x == mask_id)
             if not mask_index.any():
                 break
 
-            with torch.no_grad():
-                if cfg_scale > 0.:
-                    prompt_index = (x != mask_id)
-                    un_x = x.clone()
-                    un_x[prompt_index] = mask_id
-                    combined_x = torch.cat([x, un_x], dim=0)
-                    logits = model(combined_x).logits
-                    logits, un_logits = torch.chunk(logits, 2, dim=0)
-                    logits = logits + cfg_scale * (logits - un_logits)
-                else:
-                    logits = model(x).logits
+            steps_taken += 1  
+            logits = model(x, attention_mask=attention_mask).logits
 
-            # Clean cache
-            gc.collect()
-            torch.cuda.empty_cache()
+            # Set EOS/EOT to -inf before sampling to prevent them from being predicted
+            if logits_eos_inf:
+                logits[:, :, eos_id] = -torch.inf
 
-            if temperature == 0:
-                x0 = torch.argmax(logits, dim=-1)
-            else:
-                logits = add_gumbel_noise(logits, temperature)
-                x0 = torch.argmax(logits, dim=-1)
+            if confidence_eos_eot_inf:
+                logits[:, :, eos_id] = -torch.inf
+                logits[:, :, eot_id] = -torch.inf
+
+            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+            x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
 
             # Update positions scheduled for this step
             for pos in step_indices:
-                if x[0, pos] == mask_id:  # Only update if still masked
-                    x[0, pos] = x0[0, pos]
-                    unmasking_stage[0, pos] = total_steps
-            
-            total_steps += 1
+                for j in range(prompt.shape[0]):
+                    if x[j, pos] == mask_id:  # Only update if still masked
+                        x[j, pos] = x0[j, pos]
 
             # Apply remasking if specified
             if remasking != 'none' and step_idx < len(schedule) - 1:  # Don't remask in final step
-                if remasking == 'low_confidence':
+                if remasking == 'confidence':
                     confidence = get_mask_by_confidence(logits, x0)
-                elif remasking == 'high_entropy':
-                    confidence = get_mask_by_entropy(logits)
+                    # Remask low-confidence predictions in current block
+                    for pos in step_indices:
+                        for j in range(prompt.shape[0]):
+                            if pos < confidence.shape[1] and confidence[j, pos] < confidence_threshold:
+                                x[j, pos] = mask_id
+                    del confidence
+                elif remasking == 'entropy':
+                    entropy = get_mask_by_entropy(logits)
+                    # Remask high-entropy predictions in current block
+                    for pos in step_indices:
+                        for j in range(prompt.shape[0]):
+                            if pos < entropy.shape[1] and entropy[j, pos] > confidence_threshold:
+                                x[j, pos] = mask_id
+                    del entropy
                 else:
-                    continue  # Skip remasking
+                    raise NotImplementedError(remasking)
 
-                # Remask low-confidence predictions in current block
-                for pos in step_indices:
-                    if pos < confidence.shape[1] and confidence[0, pos] < confidence_threshold:
-                        x[0, pos] = mask_id
-                        unmasking_stage[0, pos] = -1
+            # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
+            if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
+                return x, steps_taken, num_block + 1  # Stop generation early
 
-            # Check for early stopping
-            if check_stop_generation(x, stop_tokens, stop_on_eos, mask_id, prompt_len):
-                stop_generation = True
-                break
+            del logits, logits_with_noise
+            torch.cuda.empty_cache()
 
-    return x, unmasking_stage
+    return x, steps_taken, num_blocks
