@@ -56,7 +56,7 @@ def generate_topk(
 
     prompt_len = prompt.shape[1]
     eos_id, eot_id = 126081, 126348
-    steps_taken = 0  # Track number of steps actually taken
+    steps_taken = 0  
 
     for num_block in range(num_blocks):
         block_start = prompt_len + num_block * block_length
@@ -72,7 +72,7 @@ def generate_topk(
             mask_index = (x == mask_id)
             
             
-            steps_taken += 1  # Increment step counter
+            steps_taken += 1  
             logits = model(x, attention_mask=attention_mask).logits
 
             # Set EOS/EOT to -inf before sampling to prevent them from being predicted
@@ -108,7 +108,6 @@ def generate_topk(
             x0 = torch.where(mask_index, x0, x)
             confidence = torch.where(mask_index, x0_p, -np.inf)
 
-            # Clear intermediate tensors to free memory
             del logits, logits_with_noise, x0_p
             torch.cuda.empty_cache()
 
