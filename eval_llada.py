@@ -101,6 +101,7 @@ class LLaDAEvalHarness(LM):
         gen_length=256,
         block_length=256,
         mode='pure_diffusion',
+        strategy='confidence',
         compile_model=False,
         device="cuda",
         task_name=None,
@@ -122,7 +123,8 @@ class LLaDAEvalHarness(LM):
             steps: Sampling steps, less than or equal to gen_length.
             gen_length: Generated answer length.
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive generation.
-            mode: 'pure_diffusion' or 'block_diffusion'.
+            mode: 'pure_diffusion' or 'block_diffusion' or 'top_k'.
+            strategy: 'confidence' or 'random' or 'top_margin' or 'entropy'.
             compile_model: Whether to compile model with torch.compile for faster inference
         '''
         super().__init__()
@@ -133,6 +135,7 @@ class LLaDAEvalHarness(LM):
         self.model = self.model.to(self.device)
         self.model.eval()
         self.mode = str(mode)
+        self.strategy = str(strategy)
 
         self.mask_id = int(mask_id)
         if self.tokenizer.padding_side != 'left':
@@ -391,7 +394,8 @@ class LLaDAEvalHarness(LM):
                 steps=self.steps,
                 gen_length=self.gen_length,
                 block_length=self.block_length,
-                mode=self.mode
+                mode=self.mode,
+                strategy=self.strategy
             )
             
             # Extract generated parts (excluding prompts) and batch decode

@@ -3,13 +3,14 @@ import concurrent.futures
 import time
 
 from schedulers.llada_schedulers import generate_llada
-# from .top_k import generate_block_topk
+from schedulers.top_k import generate_topk
 # from .eb_sampler import generate_EB
 
 @ torch.no_grad()
-def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion"):
+def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion", strategy="confidence"):
     '''
-        modes - pure_diffusion, top_k, eb_sampler, top_margin
+        modes - pure_diffusion, block_diffusion, top_k
+        strategies - confidence, random, top_margin, entropy
     '''
     
     start_time = time.time()
@@ -19,11 +20,17 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
     total_blocks = 0
 
     # Helper function for single generation call
-    def run_single_generation(prompt, mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion"):
+    def run_single_generation(prompt, mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion", strategy="confidence"):
         if mode == "pure_diffusion":
-            return generate_llada(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking='low_confidence')
+            assert strategy == "confidence" or strategy == "random"
+            return generate_llada(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy)
         elif mode == "block_diffusion":
-            return generate_llada(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking='low_confidence')
+            assert strategy == "confidence" or strategy == "random"
+            return generate_llada(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy)
+        elif mode == "top_k":
+            assert strategy == "confidence" or strategy == "top_margin" or strategy == "entropy" or strategy == "random"
+            return generate_topk(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy)
+       
         else:
             raise ValueError(f"Unknown mode: {mode}")
 

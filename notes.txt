@@ -1,0 +1,4 @@
+For tracing no need force tokens etc. What to do for tracing? (question!!!!)
+
+TODO - put all params in a params.yaml somehow - make a config class and everyone takes params from there.
+
