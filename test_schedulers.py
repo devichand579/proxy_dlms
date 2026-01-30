@@ -6,6 +6,7 @@ from schedulers.top_k import generate_topk
 from schedulers.fhs import generate_fhs
 from schedulers.eb_sampler import generate_EB
 from schedulers.dus import generate_dus
+from schedulers.fdm import generate_fdm
 
 
 def test_pure_diffusion(model, input_ids, attention_mask, tokenizer):
@@ -127,7 +128,7 @@ def test_dus(model, input_ids, attention_mask, tokenizer):
     start_time = time.time()
     out_dus, steps_dus, blocks_dus = generate_dus(
         model, input_ids, attention_mask, gen_length=256, 
-        block_length=32, temperature=0., remasking='confidence', scheduler='binary'
+        block_length=32, temperature=0., remasking='confidence', scheduler='dilated'
     )
     dus_time = time.time() - start_time
     print(f"DUS generation time: {dus_time:.2f} seconds")
@@ -138,6 +139,23 @@ def test_dus(model, input_ids, attention_mask, tokenizer):
     
     output = tokenizer.batch_decode(out_dus[:, input_ids.shape[1]:], skip_special_tokens=True)
     return output, "DUS (dilated)"
+
+
+def test_fdm(model, input_ids, attention_mask, tokenizer):
+    """Test FDM scheduler"""
+    print("Generating with FDM (steps=256)...")
+    start_time = time.time()
+    out_fdm, steps_fdm = generate_fdm(
+        model, input_ids, attention_mask, steps=256, gen_length=256,
+    )
+    fdm_time = time.time() - start_time
+    print(f"FDM generation time: {fdm_time:.2f} seconds")
+    print(f"Steps taken: {steps_fdm}")
+    print(f"output Shape: {out_fdm.shape}")
+    print()
+    
+    output = tokenizer.batch_decode(out_fdm[:, input_ids.shape[1]:], skip_special_tokens=True)
+    return output, "FDM"
 
 def main(scheduler_name=None):
     device = 'cuda'
@@ -174,6 +192,7 @@ def main(scheduler_name=None):
         'fhs': test_fhs,
         'eb_sampler': test_eb_sampler,
         'dus': test_dus,
+        'fdm': test_fdm,
     }
     
     # Determine which schedulers to run
@@ -210,7 +229,7 @@ if __name__ == "__main__":
         '--scheduler', 
         type=str, 
         default=None,
-        choices=['pure_diffusion', 'block_diffusion', 'top_k_confidence', 'top_k_margin', 'fhs', 'eb_sampler', 'dus'],
+        choices=['pure_diffusion', 'block_diffusion', 'top_k_confidence', 'top_k_margin', 'fhs', 'eb_sampler', 'dus', 'fdm'],
         help='Scheduler name to test. If not provided, all schedulers will be tested.'
     )
     args = parser.parse_args()

@@ -7,6 +7,9 @@ from schedulers.top_k import generate_topk
 from schedulers.fhs import generate_fhs
 from schedulers.eb_sampler import generate_EB
 from schedulers.dus import generate_dus
+from schedulers.fdm import generate_fdm
+
+
 
 @ torch.no_grad()
 def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion", strategy="confidence"):
@@ -40,6 +43,8 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
         elif mode == "dus":
             assert strategy == "confidence" or strategy == "entropy" ,"strategy must be confidence, entropy"
             return generate_dus(model, prompt, mask, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy, scheduler="dilated", base=2, base_skip=1, confidence_threshold=0.1)
+        elif mode == "fdm":
+            return generate_fdm(model, prompt, mask, steps=steps, gen_length=gen_length, K1=8, N=8, eta1=0.8, eta2=0.7, gamma=0.2, temperature=0., mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, global_scale=1.0)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
