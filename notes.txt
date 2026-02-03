@@ -2,3 +2,230 @@ For tracing no need force tokens etc. What to do for tracing? (question!!!!)
 
 TODO - put all params in a params.yaml somehow - make a config class and everyone takes params from there.
 
+accelerate launch --num_processes=1 eval_llada.py \
+  --tasks gsm8k \
+  --batch_size 2 \
+  --num_fewshot 4 \
+  --model llada \
+  --model_args model_path=./models/llada,gen_length=256,steps=256,block_length=256,mode=pure_diffusion,compile_model=False,task_name=gsm8k \
+  --write_out \
+  --output_path outputs/llada_gsm8k_pure_diffusion.json \
+  --log_samples \
+  --limit 4
+The following values were not passed to `accelerate launch` and had defaults used instead:
+        `--num_machines` was set to a value of `1`
+        `--mixed_precision` was set to a value of `'no'`
+        `--dynamo_backend` was set to a value of `'no'`
+To avoid this warning pass in values for each of the problematic parameters or run `accelerate config`.
+2026-02-03:19:25:14 WARNING  [__main__:369]  --limit SHOULD ONLY BE USED FOR TESTING.REAL METRICS SHOULD NOT BE COMPUTED USING LIMIT.
+2026-02-03:19:25:14 INFO     [__main__:465] Selected Tasks: ['gsm8k']
+2026-02-03:19:25:14 INFO     [evaluator:202] Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+2026-02-03:19:25:14 INFO     [evaluator:240] Initializing llada model, with arguments: {'model_path': './models/llada', 'gen_length': 256, 'steps': 256, 'block_length': 256, 'mode':
+        'pure_diffusion', 'compile_model': False, 'task_name': 'gsm8k'}
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████| 6/6 [00:00<00:00, 152.15it/s]
+INFO - Model path: ./models/llada
+2026-02-03:19:25:27 INFO     [llada_gsm8k_pd_20260203_192527:206] Model path: ./models/llada
+INFO - Mode: pure_diffusion
+2026-02-03:19:25:27 INFO     [llada_gsm8k_pd_20260203_192527:207] Mode: pure_diffusion
+INFO - Batch size: 2
+2026-02-03:19:25:27 INFO     [llada_gsm8k_pd_20260203_192527:208] Batch size: 2
+INFO - MC num: 128
+2026-02-03:19:25:27 INFO     [llada_gsm8k_pd_20260203_192527:209] MC num: 128
+INFO - Steps: 256
+2026-02-03:19:25:27 INFO     [llada_gsm8k_pd_20260203_192527:210] Steps: 256
+INFO - Gen length: 256
+2026-02-03:19:25:27 INFO     [llada_gsm8k_pd_20260203_192527:211] Gen length: 256
+INFO - Block length: 256
+2026-02-03:19:25:27 INFO     [llada_gsm8k_pd_20260203_192527:212] Block length: 256
+INFO - Device: cuda
+2026-02-03:19:25:27 INFO     [llada_gsm8k_pd_20260203_192527:213] Device: cuda
+INFO - Compile model: False
+2026-02-03:19:25:27 INFO     [llada_gsm8k_pd_20260203_192527:214] Compile model: False
+INFO - Mask id: 126336
+2026-02-03:19:25:27 INFO     [llada_gsm8k_pd_20260203_192527:215] Mask id: 126336
+2026-02-03:19:25:33 INFO     [tasks:695] Selected tasks:
+2026-02-03:19:25:33 INFO     [tasks:686] Task: gsm8k (gsm8k/gsm8k.yaml)
+2026-02-03:19:25:33 INFO     [evaluator:305] gsm8k: Using gen_kwargs: {'until': ['Question:', '</s>', '<|im_end|>'], 'do_sample': False, 'temperature': 0.0}
+2026-02-03:19:25:33 WARNING  [evaluator:324] Overwriting default num_fewshot of gsm8k from 5 to 4
+2026-02-03:19:25:33 INFO     [api.task:434] Building contexts for gsm8k on rank 0...
+100%|███████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 388.76it/s]
+2026-02-03:19:25:33 INFO     [evaluator_utils:206] Task: ConfigurableTask(task_name=gsm8k,output_type=generate_until,num_fewshot=4,num_samples=1319); document 0; context prompt (starting on next line):    
+Question: Jen and Tyler are gymnasts practicing flips. Jen is practicing the triple-flip while Tyler is practicing the double-flip. Jen did sixteen triple-flips during practice. Tyler flipped in the air half the number of times Jen did. How many double-flips did Tyler do?
+Answer: Jen did 16 triple-flips, so she did 16 * 3 = <<16*3=48>>48 flips.
+Tyler did half the number of flips, so he did 48 / 2 = <<48/2=24>>24 flips.
+A double flip has two flips, so Tyler did 24 / 2 = <<24/2=12>>12 double-flips.
+#### 12
+
+Question: Four people in a law firm are planning a party. Mary will buy a platter of pasta for $20 and a loaf of bread for $2. Elle and Andrea will split the cost for buying 4 cans of soda which cost $1.50 each, and chicken wings for $10. Joe will buy a cake that costs $5. How much more will Mary spend than the rest of the firm put together?
+Answer: Mary will spend $20 + $2 = $<<20+2=22>>22.
+Elle and Andrea will spend $1.5 x 4 = $<<1.5*4=6>>6 for the soda.
+Elle and Andrea will spend $6 + $10 = $<<6+10=16>>16 for the soda and chicken wings.
+Elle, Andrea, and Joe together will spend $16 + $5 = $<<16+5=21>>21.
+So, Mary will spend $22 - $21 = $<<22-21=1>>1 more than all of them combined.
+#### 1
+
+Question: A charcoal grill burns fifteen coals to ash every twenty minutes of grilling. The grill ran for long enough to burn three bags of coals. Each bag of coal contains 60 coals. How long did the grill run?
+Answer: The grill burned 3 * 60 = <<3*60=180>>180 coals.
+It takes 20 minutes to burn 15 coals, so the grill ran for 180 / 15 * 20 = <<180/15*20=240>>240 minutes.
+#### 240
+
+Question: A bear is preparing to hibernate for the winter and needs to gain 1000 pounds. At the end of summer, the bear feasts on berries and small woodland animals. During autumn, it devours acorns and salmon. It gained a fifth of the weight it needed from berries during summer, and during autumn, it gained twice that amount from acorns. Salmon made up half of the remaining weight it had needed to gain. How many pounds did it gain eating small animals?
+Answer: The bear gained 1 / 5 * 1000 = <<1/5*1000=200>>200 pounds from berries.
+It gained 2 * 200 = <<2*200=400>>400 pounds from acorns.
+It still needed 1000 - 200 - 400 = <<1000-200-400=400>>400 pounds.
+Thus, it gained 400 / 2 = <<400/2=200>>200 pounds from salmon.
+Therefore, the bear gained 400 - 200 = <<400-200=200>>200 pounds from small animals.
+#### 200
+
+Question: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?
+Answer:
+(end of prompt on previous line)
+target string or answer choice index (starting on next line):
+Janet sells 16 - 3 - 4 = <<16-3-4=9>>9 duck eggs a day.
+She makes 9 * 2 = $<<9*2=18>>18 every day at the farmer’s market.
+#### 18
+(end of target on previous line)
+2026-02-03:19:25:33 INFO     [evaluator_utils:210] Request: Instance(request_type='generate_until', doc={'question': "Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?", 'answer': 'Janet sells 16 - 3 - 4 = <<16-3-4=9>>9 duck eggs a day.\nShe makes 9 * 2 = $<<9*2=18>>18 every day at the farmer’s market.\n#### 18'}, arguments=("Question: Jen and Tyler are gymnasts practicing flips. Jen is practicing the triple-flip while Tyler is practicing the double-flip. Jen did sixteen triple-flips during practice. Tyler flipped in the air half the number of times Jen did. How many double-flips did Tyler do?\nAnswer: Jen did 16 triple-flips, so she did 16 * 3 = <<16*3=48>>48 flips.\nTyler did half the number of flips, so he did 48 / 2 = <<48/2=24>>24 flips.\nA double flip has two flips, so Tyler did 24 / 2 = <<24/2=12>>12 double-flips.\n#### 12\n\nQuestion: Four people in a law firm are planning a party. Mary will buy a platter of pasta for $20 and a loaf of bread for $2. Elle and Andrea will split the cost for buying 4 cans of soda which cost $1.50 each, and chicken wings for $10. Joe will buy a cake that costs $5. How much more will Mary spend than the rest of the firm put together?\nAnswer: Mary will spend $20 + $2 = $<<20+2=22>>22.\nElle and Andrea will spend $1.5 x 4 = $<<1.5*4=6>>6 for the soda.\nElle and Andrea will spend $6 + $10 = $<<6+10=16>>16 for the soda and chicken wings.\nElle, Andrea, and Joe together will spend $16 + $5 = $<<16+5=21>>21.\nSo, Mary will spend $22 - $21 = $<<22-21=1>>1 more than all of them combined.\n#### 1\n\nQuestion: A charcoal grill burns fifteen coals to ash every twenty minutes of grilling. The grill ran for long enough to burn three bags of coals. Each bag of coal contains 60 coals. How long did the grill run?\nAnswer: The grill burned 3 * 60 = <<3*60=180>>180 coals.\nIt takes 20 minutes to burn 15 coals, so the grill ran for 180 / 15 * 20 = <<180/15*20=240>>240 minutes.\n#### 240\n\nQuestion: A bear is preparing to hibernate for the winter and needs to gain 1000 pounds. At the end of summer, the bear feasts on berries and small woodland animals. During autumn, it devours acorns and salmon. It gained a fifth of the weight it needed from berries during summer, and during autumn, it gained twice that amount from acorns. Salmon made up half of the remaining weight it had needed to gain. How many pounds did it gain eating small animals?\nAnswer: The bear gained 1 / 5 * 1000 = <<1/5*1000=200>>200 pounds from berries.\nIt gained 2 * 200 = <<2*200=400>>400 pounds from acorns.\nIt still needed 1000 - 200 - 400 = <<1000-200-400=400>>400 pounds.\nThus, it gained 400 / 2 = <<400/2=200>>200 pounds from salmon.\nTherefore, the bear gained 400 - 200 = <<400-200=200>>200 pounds from small animals.\n#### 200\n\nQuestion: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?\nAnswer:", {'until': ['Question:', '</s>', '<|im_end|>'], 'do_sample': False, 'temperature': 0.0}), idx=0, metadata=('gsm8k', 0, 1), resps=[], filtered_resps={}, task_name='gsm8k', doc_id=0, repeats=1)
+2026-02-03:19:25:33 INFO     [evaluator:574] Running generate_until requests
+INFO - Processed chunk: 0-1 of 4 requests (chunk size: 2, gen time: 33.3541s)
+2026-02-03:19:26:07 INFO     [llada_gsm8k_pd_20260203_192527:415] Processed chunk: 0-1 of 4 requests (chunk size: 2, gen time: 33.3541s)
+INFO - Processed chunk: 2-3 of 4 requests (chunk size: 2, gen time: 87.5113s)
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:415] Processed chunk: 2-3 of 4 requests (chunk size: 2, gen time: 87.5113s)
+INFO - Total requests in this call: 4 (processed in chunks of 2)
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:439] Total requests in this call: 4 (processed in chunks of 2)
+INFO - Total steps taken in this call: 426
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:440] Total steps taken in this call: 426
+INFO - Total generation time in this call: 120.8654 seconds
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:441] Total generation time in this call: 120.8654 seconds
+INFO - Total blocks in this call: 4
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:442] Total blocks in this call: 4
+INFO - --- Global Statistics (across 1 generate_until calls) ---
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:450] --- Global Statistics (across 1 generate_until calls) ---
+INFO - Total samples (global): 4
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:451] Total samples (global): 4
+INFO - Total steps taken (global): 426
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:452] Total steps taken (global): 426
+INFO - Total generation time (global): 120.8654 seconds
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:453] Total generation time (global): 120.8654 seconds
+INFO - Total blocks (global): 4
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:454] Total blocks (global): 4
+INFO - Number of generate_until calls: 1
+2026-02-03:19:27:34 INFO     [llada_gsm8k_pd_20260203_192527:455] Number of generate_until calls: 1
+2026-02-03:19:27:41 INFO     [loggers.evaluation_tracker:209] Saving results aggregated
+2026-02-03:19:27:41 INFO     [loggers.evaluation_tracker:298] Saving per-sample results for: gsm8k
+llada (model_path=./models/llada,gen_length=256,steps=256,block_length=256,mode=pure_diffusion,compile_model=False,task_name=gsm8k), gen_kwargs: (None), limit: 4.0, num_fewshot: 4, batch_size: 2
+|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value|   |Stderr|
+|-----|------:|----------------|-----:|-----------|---|----:|---|-----:|
+|gsm8k|      3|flexible-extract|     4|exact_match|↑  | 0.75|±  |  0.25|
+|     |       |strict-match    |     4|exact_match|↑  | 0.75|±  |  0.25|
+
+(strace) anubhab-pg@sanskrit:~/gayathri/strace$ accelerate launch --num_processes=1 eval_llada.py   --tasks gsm8k   --batch_size 2   --num_fewshot 4   --model llada   --model_args model_path=./models/llada,gen_length=256,steps=256,block_length=256,mode=pure_diffusion,compile_model=False,task_name=gsm8k   --write_out   --output_path outputs/llada_gsm8k_pure_diffusion.json  --limit 4
+The following values were not passed to `accelerate launch` and had defaults used instead:
+        `--num_machines` was set to a value of `1`
+        `--mixed_precision` was set to a value of `'no'`
+        `--dynamo_backend` was set to a value of `'no'`
+To avoid this warning pass in values for each of the problematic parameters or run `accelerate config`.
+2026-02-03:19:28:49 WARNING  [__main__:369]  --limit SHOULD ONLY BE USED FOR TESTING.REAL METRICS SHOULD NOT BE COMPUTED USING LIMIT.
+2026-02-03:19:28:49 INFO     [__main__:465] Selected Tasks: ['gsm8k']
+2026-02-03:19:28:49 INFO     [evaluator:202] Setting random seed to 0 | Setting numpy seed to 1234 | Setting torch manual seed to 1234 | Setting fewshot manual seed to 1234
+2026-02-03:19:28:49 INFO     [evaluator:240] Initializing llada model, with arguments: {'model_path': './models/llada', 'gen_length': 256, 'steps': 256, 'block_length': 256, 'mode':
+        'pure_diffusion', 'compile_model': False, 'task_name': 'gsm8k'}
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████| 6/6 [00:00<00:00, 182.09it/s]
+INFO - Model path: ./models/llada
+2026-02-03:19:28:51 INFO     [llada_gsm8k_pd_20260203_192851:206] Model path: ./models/llada
+INFO - Mode: pure_diffusion
+2026-02-03:19:28:51 INFO     [llada_gsm8k_pd_20260203_192851:207] Mode: pure_diffusion
+INFO - Batch size: 2
+2026-02-03:19:28:51 INFO     [llada_gsm8k_pd_20260203_192851:208] Batch size: 2
+INFO - MC num: 128
+2026-02-03:19:28:51 INFO     [llada_gsm8k_pd_20260203_192851:209] MC num: 128
+INFO - Steps: 256
+2026-02-03:19:28:51 INFO     [llada_gsm8k_pd_20260203_192851:210] Steps: 256
+INFO - Gen length: 256
+2026-02-03:19:28:51 INFO     [llada_gsm8k_pd_20260203_192851:211] Gen length: 256
+INFO - Block length: 256
+2026-02-03:19:28:51 INFO     [llada_gsm8k_pd_20260203_192851:212] Block length: 256
+INFO - Device: cuda
+2026-02-03:19:28:51 INFO     [llada_gsm8k_pd_20260203_192851:213] Device: cuda
+INFO - Compile model: False
+2026-02-03:19:28:51 INFO     [llada_gsm8k_pd_20260203_192851:214] Compile model: False
+INFO - Mask id: 126336
+2026-02-03:19:28:51 INFO     [llada_gsm8k_pd_20260203_192851:215] Mask id: 126336
+2026-02-03:19:28:59 INFO     [tasks:695] Selected tasks:
+2026-02-03:19:28:59 INFO     [tasks:686] Task: gsm8k (gsm8k/gsm8k.yaml)
+2026-02-03:19:28:59 INFO     [evaluator:305] gsm8k: Using gen_kwargs: {'until': ['Question:', '</s>', '<|im_end|>'], 'do_sample': False, 'temperature': 0.0}
+2026-02-03:19:28:59 WARNING  [evaluator:324] Overwriting default num_fewshot of gsm8k from 5 to 4
+2026-02-03:19:28:59 INFO     [api.task:434] Building contexts for gsm8k on rank 0...
+100%|███████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 390.71it/s]
+2026-02-03:19:28:59 INFO     [evaluator_utils:206] Task: ConfigurableTask(task_name=gsm8k,output_type=generate_until,num_fewshot=4,num_samples=1319); document 0; context prompt (starting on next line):    
+Question: Jen and Tyler are gymnasts practicing flips. Jen is practicing the triple-flip while Tyler is practicing the double-flip. Jen did sixteen triple-flips during practice. Tyler flipped in the air half the number of times Jen did. How many double-flips did Tyler do?
+Answer: Jen did 16 triple-flips, so she did 16 * 3 = <<16*3=48>>48 flips.
+Tyler did half the number of flips, so he did 48 / 2 = <<48/2=24>>24 flips.
+A double flip has two flips, so Tyler did 24 / 2 = <<24/2=12>>12 double-flips.
+#### 12
+
+Question: Four people in a law firm are planning a party. Mary will buy a platter of pasta for $20 and a loaf of bread for $2. Elle and Andrea will split the cost for buying 4 cans of soda which cost $1.50 each, and chicken wings for $10. Joe will buy a cake that costs $5. How much more will Mary spend than the rest of the firm put together?
+Answer: Mary will spend $20 + $2 = $<<20+2=22>>22.
+Elle and Andrea will spend $1.5 x 4 = $<<1.5*4=6>>6 for the soda.
+Elle and Andrea will spend $6 + $10 = $<<6+10=16>>16 for the soda and chicken wings.
+Elle, Andrea, and Joe together will spend $16 + $5 = $<<16+5=21>>21.
+So, Mary will spend $22 - $21 = $<<22-21=1>>1 more than all of them combined.
+#### 1
+
+Question: A charcoal grill burns fifteen coals to ash every twenty minutes of grilling. The grill ran for long enough to burn three bags of coals. Each bag of coal contains 60 coals. How long did the grill run?
+Answer: The grill burned 3 * 60 = <<3*60=180>>180 coals.
+It takes 20 minutes to burn 15 coals, so the grill ran for 180 / 15 * 20 = <<180/15*20=240>>240 minutes.
+#### 240
+
+Question: A bear is preparing to hibernate for the winter and needs to gain 1000 pounds. At the end of summer, the bear feasts on berries and small woodland animals. During autumn, it devours acorns and salmon. It gained a fifth of the weight it needed from berries during summer, and during autumn, it gained twice that amount from acorns. Salmon made up half of the remaining weight it had needed to gain. How many pounds did it gain eating small animals?
+Answer: The bear gained 1 / 5 * 1000 = <<1/5*1000=200>>200 pounds from berries.
+It gained 2 * 200 = <<2*200=400>>400 pounds from acorns.
+It still needed 1000 - 200 - 400 = <<1000-200-400=400>>400 pounds.
+Thus, it gained 400 / 2 = <<400/2=200>>200 pounds from salmon.
+Therefore, the bear gained 400 - 200 = <<400-200=200>>200 pounds from small animals.
+#### 200
+
+Question: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?
+Answer:
+(end of prompt on previous line)
+target string or answer choice index (starting on next line):
+Janet sells 16 - 3 - 4 = <<16-3-4=9>>9 duck eggs a day.
+She makes 9 * 2 = $<<9*2=18>>18 every day at the farmer’s market.
+#### 18
+(end of target on previous line)
+2026-02-03:19:28:59 INFO     [evaluator_utils:210] Request: Instance(request_type='generate_until', doc={'question': "Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?", 'answer': 'Janet sells 16 - 3 - 4 = <<16-3-4=9>>9 duck eggs a day.\nShe makes 9 * 2 = $<<9*2=18>>18 every day at the farmer’s market.\n#### 18'}, arguments=("Question: Jen and Tyler are gymnasts practicing flips. Jen is practicing the triple-flip while Tyler is practicing the double-flip. Jen did sixteen triple-flips during practice. Tyler flipped in the air half the number of times Jen did. How many double-flips did Tyler do?\nAnswer: Jen did 16 triple-flips, so she did 16 * 3 = <<16*3=48>>48 flips.\nTyler did half the number of flips, so he did 48 / 2 = <<48/2=24>>24 flips.\nA double flip has two flips, so Tyler did 24 / 2 = <<24/2=12>>12 double-flips.\n#### 12\n\nQuestion: Four people in a law firm are planning a party. Mary will buy a platter of pasta for $20 and a loaf of bread for $2. Elle and Andrea will split the cost for buying 4 cans of soda which cost $1.50 each, and chicken wings for $10. Joe will buy a cake that costs $5. How much more will Mary spend than the rest of the firm put together?\nAnswer: Mary will spend $20 + $2 = $<<20+2=22>>22.\nElle and Andrea will spend $1.5 x 4 = $<<1.5*4=6>>6 for the soda.\nElle and Andrea will spend $6 + $10 = $<<6+10=16>>16 for the soda and chicken wings.\nElle, Andrea, and Joe together will spend $16 + $5 = $<<16+5=21>>21.\nSo, Mary will spend $22 - $21 = $<<22-21=1>>1 more than all of them combined.\n#### 1\n\nQuestion: A charcoal grill burns fifteen coals to ash every twenty minutes of grilling. The grill ran for long enough to burn three bags of coals. Each bag of coal contains 60 coals. How long did the grill run?\nAnswer: The grill burned 3 * 60 = <<3*60=180>>180 coals.\nIt takes 20 minutes to burn 15 coals, so the grill ran for 180 / 15 * 20 = <<180/15*20=240>>240 minutes.\n#### 240\n\nQuestion: A bear is preparing to hibernate for the winter and needs to gain 1000 pounds. At the end of summer, the bear feasts on berries and small woodland animals. During autumn, it devours acorns and salmon. It gained a fifth of the weight it needed from berries during summer, and during autumn, it gained twice that amount from acorns. Salmon made up half of the remaining weight it had needed to gain. How many pounds did it gain eating small animals?\nAnswer: The bear gained 1 / 5 * 1000 = <<1/5*1000=200>>200 pounds from berries.\nIt gained 2 * 200 = <<2*200=400>>400 pounds from acorns.\nIt still needed 1000 - 200 - 400 = <<1000-200-400=400>>400 pounds.\nThus, it gained 400 / 2 = <<400/2=200>>200 pounds from salmon.\nTherefore, the bear gained 400 - 200 = <<400-200=200>>200 pounds from small animals.\n#### 200\n\nQuestion: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?\nAnswer:", {'until': ['Question:', '</s>', '<|im_end|>'], 'do_sample': False, 'temperature': 0.0}), idx=0, metadata=('gsm8k', 0, 1), resps=[], filtered_resps={}, task_name='gsm8k', doc_id=0, repeats=1)
+2026-02-03:19:28:59 INFO     [evaluator:574] Running generate_until requests
+INFO - Processed chunk: 0-1 of 4 requests (chunk size: 2, gen time: 33.3013s)
+2026-02-03:19:29:32 INFO     [llada_gsm8k_pd_20260203_192851:415] Processed chunk: 0-1 of 4 requests (chunk size: 2, gen time: 33.3013s)
+INFO - Processed chunk: 2-3 of 4 requests (chunk size: 2, gen time: 88.2721s)
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:415] Processed chunk: 2-3 of 4 requests (chunk size: 2, gen time: 88.2721s)
+INFO - Total requests in this call: 4 (processed in chunks of 2)
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:439] Total requests in this call: 4 (processed in chunks of 2)
+INFO - Total steps taken in this call: 426
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:440] Total steps taken in this call: 426
+INFO - Total generation time in this call: 121.5733 seconds
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:441] Total generation time in this call: 121.5733 seconds
+INFO - Total blocks in this call: 4
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:442] Total blocks in this call: 4
+INFO - --- Global Statistics (across 1 generate_until calls) ---
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:450] --- Global Statistics (across 1 generate_until calls) ---
+INFO - Total samples (global): 4
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:451] Total samples (global): 4
+INFO - Total steps taken (global): 426
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:452] Total steps taken (global): 426
+INFO - Total generation time (global): 121.5733 seconds
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:453] Total generation time (global): 121.5733 seconds
+INFO - Total blocks (global): 4
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:454] Total blocks (global): 4
+INFO - Number of generate_until calls: 1
+2026-02-03:19:31:00 INFO     [llada_gsm8k_pd_20260203_192851:455] Number of generate_until calls: 1
+2026-02-03:19:31:02 INFO     [loggers.evaluation_tracker:209] Saving results aggregated
+llada (model_path=./models/llada,gen_length=256,steps=256,block_length=256,mode=pure_diffusion,compile_model=False,task_name=gsm8k), gen_kwargs: (None), limit: 4.0, num_fewshot: 4, batch_size: 2
+|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value|   |Stderr|
+|-----|------:|----------------|-----:|-----------|---|----:|---|-----:|
+|gsm8k|      3|flexible-extract|     4|exact_match|↑  | 0.75|±  |  0.25|
+|     |       |strict-match    |     4|exact_match|↑  | 0.75|±  |  0.25|
+
+(strace) anubhab-pg@sanskrit:~/gayathri/strace$ 
+
+accelerate launch --num_processes=1 eval_llada_tracing.py   --tasks gsm8k   --batch_size 2   --num_fewshot 4   --model llada   --model_args model_path=./models/llada,gen_length=256,steps=256,block_length=256,mode=pure_diffusion,compile_model=False,task_name=gsm8k   --write_out   --output_path outputs/llada_gsm8k_pure_diffusion.json   --log_samples   --limit 4

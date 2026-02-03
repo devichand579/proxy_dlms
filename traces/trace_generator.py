@@ -1,35 +1,84 @@
 """
 General tracing and causal intervention system for masked diffusion schedulers.
-
-This module provides a plug-and-play tracing wrapper that can:
-1. Record all unmasking decisions during generation
-2. Perform causal interventions (force tokens early/late)
-3. Analyze which tokens are bottlenecks
-
 Works with any scheduler by intercepting token selection through a callback mechanism.
 """
 
 import torch
-import numpy as np
-from typing import Dict, List, Optional, Tuple, Callable, Any, Union
+import json
+import os
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from collections import defaultdict
-import copy
 
+
+def _tensor_to_list(tensor: Optional[torch.Tensor]) -> Optional[List]:
+    """Convert torch tensor to JSON-serializable list."""
+    if tensor is None:
+        return None
+    # Move to CPU and convert to numpy, then to list
+    if tensor.is_cuda:
+        tensor = tensor.cpu()
+    # Preserve dtype information by converting to appropriate Python type
+    return tensor.detach().numpy().tolist()
+
+def _list_to_tensor(data: Optional[List], dtype=None) -> Optional[torch.Tensor]:
+    """Convert list back to torch tensor."""
+    if data is None:
+        return None
+    # Try to infer dtype from data if not provided
+    if dtype is None:
+        # Check if it's boolean-like (all 0/1 or True/False)
+        if isinstance(data, list) and len(data) > 0:
+            sample = data[0] if not isinstance(data[0], list) else data[0][0] if isinstance(data[0], list) and len(data[0]) > 0 else None
+            if sample is not None and isinstance(sample, bool):
+                dtype = torch.bool
+    tensor = torch.tensor(data, dtype=dtype)
+    return tensor
 
 @dataclass
 class StepTrace:
     """Records the state at a single generation step."""
     step: int
-    mask_index: torch.Tensor  # Which positions are still masked [B, L]
-    logits: Optional[torch.Tensor] = None  # Model predictions [B, L, V]
-    predictions: Optional[torch.Tensor] = None  # Predicted tokens [B, L]
-    confidences: Optional[torch.Tensor] = None  # Confidence scores [B, L]
-    selected_positions: Optional[torch.Tensor] = None  # Positions that were actually unmasked [B, L] bool
-    selected_tokens: Optional[torch.Tensor] = None  # Tokens that were unmasked [B, L]
+    mask_index: torch.Tensor  # Which positions are still masked [1, L]
+    logits: Optional[torch.Tensor] = None  # Model predictions [1, L, V]
+    predictions: Optional[torch.Tensor] = None  # Predicted tokens [1, L]
+    confidences: Optional[torch.Tensor] = None  # Confidence scores [1, L]
+    selected_positions: Optional[torch.Tensor] = None  # Positions that were actually unmasked [1, L]
+    selected_tokens: Optional[torch.Tensor] = None  # Tokens that were unmasked [1, L]
     intervention_applied: bool = False  # Whether intervention was applied this step
     intervention_type: Optional[str] = None  # Type of intervention if applied
-    metadata: Dict = field(default_factory=dict)  # Additional metadata, can store values to be tracked like mutual information, attention scores, etc.
+    metadata: Dict = field(default_factory=dict)  # Additional metadata, This can store values to be tracked like mutual information, attention scores, etc.
+    
+    def to_dict(self) -> Dict:
+        """Convert StepTrace to JSON-serializable dictionary."""
+        return {
+            "step": self.step,
+            "mask_index": _tensor_to_list(self.mask_index),
+            "logits": _tensor_to_list(self.logits),
+            "predictions": _tensor_to_list(self.predictions),
+            "confidences": _tensor_to_list(self.confidences),
+            "selected_positions": _tensor_to_list(self.selected_positions),
+            "selected_tokens": _tensor_to_list(self.selected_tokens),
+            "intervention_applied": self.intervention_applied,
+            "intervention_type": self.intervention_type,
+            "metadata": self.metadata
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> "StepTrace":
+        """Create StepTrace from dictionary."""
+        return cls(
+            step=data["step"],
+            mask_index=_list_to_tensor(data["mask_index"], dtype=torch.bool),
+            logits=_list_to_tensor(data.get("logits"), dtype=torch.float32),
+            predictions=_list_to_tensor(data.get("predictions"), dtype=torch.long),
+            confidences=_list_to_tensor(data.get("confidences"), dtype=torch.float32),
+            selected_positions=_list_to_tensor(data.get("selected_positions"), dtype=torch.bool),
+            selected_tokens=_list_to_tensor(data.get("selected_tokens"), dtype=torch.long),
+            intervention_applied=data.get("intervention_applied", False),
+            intervention_type=data.get("intervention_type"),
+            metadata=data.get("metadata", {})
+        )
 
 
 @dataclass
@@ -37,7 +86,7 @@ class GenerationTrace:
     """Complete trace of a generation process."""
     prompt: torch.Tensor
     final_sequence: torch.Tensor
-    steps: List[StepTrace] = field(default_factory=list)
+    step_traces: List[StepTrace] = field(default_factory=list)
     unmasking_order: Dict[int, int] = field(default_factory=dict)  # position -> step when unmasked, use this to calculate Kendall's tau
     interventions: List[Dict] = field(default_factory=list)  # List of interventions applied
     start_time: Optional[float] = None
@@ -49,9 +98,9 @@ class GenerationTrace:
     
     def get_token_at_step(self, step: int, position: int) -> Optional[int]:
         """Get the token at a specific position at a specific step."""
-        if step < len(self.steps):
-            if self.steps[step].predictions is not None:
-                return int(self.steps[step].predictions[0, position].item())
+        if step < len(self.step_traces):
+            if self.step_traces[step].predictions is not None:
+                return int(self.step_traces[step].predictions[0, position].item())
         return None
     
     def get_all_unmasked_positions(self) -> List[int]:
@@ -63,6 +112,57 @@ class GenerationTrace:
         if self.start_time is None or self.end_time is None:
             return None
         return self.end_time - self.start_time
+    
+    def to_dict(self) -> Dict:
+        """Convert GenerationTrace to JSON-serializable dictionary."""
+        return {
+            "prompt": _tensor_to_list(self.prompt) if self.prompt is not None else None,
+            "final_sequence": _tensor_to_list(self.final_sequence) if self.final_sequence is not None else None,
+            "step_traces": [st.to_dict() for st in self.step_traces],
+            "unmasking_order": self.unmasking_order,
+            "interventions": self.interventions,
+            "start_time": self.start_time,
+            "end_time": self.end_time
+        }
+    
+    def save_to_json(self, name: str, base_dir: str = "trace_outputs") -> str:
+        """
+        Save trace to JSON file.
+        """
+        os.makedirs(base_dir, exist_ok=True)
+        filepath = os.path.join(base_dir, f"{name}.json")
+        
+        trace_dict = self.to_dict()
+        with open(filepath, 'w') as f:
+            json.dump(trace_dict, f, indent=2)
+        
+        return filepath
+    
+    @classmethod
+    def load_from_json(cls, name: str, base_dir: str = "trace_outputs") -> "GenerationTrace":
+        """
+        Load trace from JSON file.
+        """
+        filepath = os.path.join(base_dir, f"{name}.json")
+        
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Trace file not found: {filepath}")
+        
+        with open(filepath, 'r') as f:
+            trace_dict = json.load(f)
+        
+        # Reconstruct the trace
+        trace = cls(
+            prompt=_list_to_tensor(trace_dict.get("prompt"), dtype=torch.long) if trace_dict.get("prompt") is not None else None,
+            final_sequence=_list_to_tensor(trace_dict.get("final_sequence"), dtype=torch.long) if trace_dict.get("final_sequence") is not None else None,
+            step_traces=[StepTrace.from_dict(st) for st in trace_dict.get("step_traces", [])],
+            unmasking_order=trace_dict.get("unmasking_order", {}),
+            interventions=trace_dict.get("interventions", []),
+            start_time=trace_dict.get("start_time"),
+            end_time=trace_dict.get("end_time")
+        )
+        
+        return trace
 
 class InterventionHook:
     def __init__(
@@ -83,13 +183,25 @@ class TracingContext:
     Tracing + causal intervention context.
     """
 
-    def __init__(self, intervention_hook: Optional[InterventionHook] = None):
+    def __init__(
+        self, 
+        intervention_hook: Optional[InterventionHook] = None,
+        save_to_disk: bool = True,
+        trace_name: Optional[str] = None,
+        base_dir: str = "trace_outputs"
+    ):
         self.trace = GenerationTrace(prompt=None, final_sequence=None)
         self.intervention_hook = intervention_hook or InterventionHook()
         self.current_step = 0
 
         self._current_predictions = None
         self._current_confidences = None
+        
+        # Disk saving options
+        self.save_to_disk = save_to_disk
+        self.trace_name = trace_name
+        self.base_dir = base_dir
+        self._saved_steps = 0  # Track how many steps have been saved
 
     def record_step_start(self, step: int, x: torch.Tensor, mask_id: int):
         self.current_step = step
@@ -99,36 +211,36 @@ class TracingContext:
             step=step,
             mask_index=mask_index.clone()
         )
-        self.trace.steps.append(step_trace)
+        self.trace.step_traces.append(step_trace)
 
     def record_logits(self, logits: torch.Tensor):
-        if self.trace.steps:
-            self.trace.steps[-1].logits = logits.clone()
+        if self.trace.step_traces:
+            self.trace.step_traces[-1].logits = logits.clone()
             
     def record_timestamps(self, start_time: float, end_time: float):
         self.trace.start_time = start_time
         self.trace.end_time = end_time
 
     def record_predictions(self, predictions: torch.Tensor, confidences: torch.Tensor):
-        if self.trace.steps:
-            self.trace.steps[-1].predictions = predictions.clone()
-            self.trace.steps[-1].confidences = confidences.clone()
+        if self.trace.step_traces:
+            self.trace.step_traces[-1].predictions = predictions.clone()
+            self.trace.step_traces[-1].confidences = confidences.clone()
             self._current_predictions = predictions
             self._current_confidences = confidences
 
     def apply_interventions(
         self,
-        transfer_index: torch.Tensor,  # scheduler decision [B, L] bool
-        x0: torch.Tensor,              # predicted tokens [B, L]
+        transfer_index: torch.Tensor,  # scheduler decision [1, L] bool
+        x0: torch.Tensor,              # predicted tokens [1, L]
         x: torch.Tensor,               # current sequence
         mask_id: int
     ) -> Tuple[torch.Tensor, torch.Tensor, bool]:
 
-        if not self.trace.steps:
+        if not self.trace.step_traces:
             return transfer_index, x0, False
 
         hook = self.intervention_hook
-        step_trace = self.trace.steps[-1]
+        step_trace = self.trace.step_traces[-1]
         mask_index = step_trace.mask_index
 
         modified_transfer = transfer_index.clone()
@@ -189,10 +301,10 @@ class TracingContext:
         return modified_transfer, modified_x0, intervention_applied
 
     def record_transfer(self, transfer_index: torch.Tensor, x0: torch.Tensor):
-        if not self.trace.steps:
+        if not self.trace.step_traces:
             return
 
-        step_trace = self.trace.steps[-1]
+        step_trace = self.trace.step_traces[-1]
         step_trace.selected_positions = transfer_index.clone()
 
         selected_tokens = torch.zeros_like(x0)
@@ -206,6 +318,49 @@ class TracingContext:
         for pos in positions.tolist():
             if pos not in self.trace.unmasking_order:
                 self.trace.unmasking_order[pos] = self.current_step
+    
+    def save_trace(self, name: Optional[str] = None) -> str:
+        """
+        Save the current trace to JSON file.
+        """
+        save_name = name or self.trace_name
+        if save_name is None:
+            raise ValueError("trace_name must be provided in __init__ or as argument to save_trace()")
+        
+        return self.trace.save_to_json(save_name, self.base_dir)
+    
+    def save_incremental(self, clear_memory: bool = True):
+        """
+        Save step traces incrementally to reduce memory usage.
+        Saves completed steps to disk and optionally clears them from memory.
+        """
+        if not self.save_to_disk or self.trace_name is None:
+            return
+        
+        if not self.trace.step_traces:
+            return
+        
+        # Save only new steps since last save
+        steps_to_save = self.trace.step_traces[self._saved_steps:]
+        if not steps_to_save:
+            return
+        
+        # Create incremental save file
+        inc_filepath = os.path.join(self.base_dir, f"{self.trace_name}_steps_{self._saved_steps}_{len(self.trace.step_traces)}.json")
+        os.makedirs(self.base_dir, exist_ok=True)
+        
+        steps_data = [st.to_dict() for st in steps_to_save]
+        with open(inc_filepath, 'w') as f:
+            json.dump(steps_data, f, indent=2)
+        
+        # Delete saved step traces from memory if requested
+        if clear_memory:
+            del self.trace.step_traces[self._saved_steps:]
+            
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        self._saved_steps = len(self.trace.step_traces)
 
 def create_intervention_hook(
     mode: Optional[str] = None,      # None | "drop" | "swap"
