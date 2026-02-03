@@ -124,7 +124,7 @@ def test_eb_sampler(model, input_ids, attention_mask, tokenizer):
 
 def test_dus(model, input_ids, attention_mask, tokenizer):
     """Test DUS scheduler"""
-    print("Generating with DUS (binary search schedule, block_length=32)...")
+    print("Generating with DUS (dilated search schedule, block_length=32)...")
     start_time = time.time()
     out_dus, steps_dus, blocks_dus = generate_dus(
         model, input_ids, attention_mask, gen_length=256, 
