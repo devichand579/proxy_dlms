@@ -6,7 +6,6 @@ Works with any scheduler by intercepting token selection through a callback mech
 import torch
 import json
 import os
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -15,10 +14,20 @@ def _tensor_to_list(tensor: Optional[torch.Tensor]) -> Optional[List]:
     """Convert torch tensor to JSON-serializable list."""
     if tensor is None:
         return None
-    # Move to CPU and convert to numpy, then to list
+    # Move to CPU
     if tensor.is_cuda:
         tensor = tensor.cpu()
-    # Preserve dtype information by converting to appropriate Python type
+    
+    # Convert unsupported dtypes to supported ones for JSON serialization
+    if tensor.dtype == torch.bfloat16:
+        tensor = tensor.to(torch.float32)
+    elif tensor.dtype == torch.float16:
+        tensor = tensor.to(torch.float32)
+    elif tensor.dtype == torch.complex64 or tensor.dtype == torch.complex128:
+        # Convert complex to real
+        tensor = tensor.real.to(torch.float32)
+    
+    # Convert to numpy, then to list
     return tensor.detach().numpy().tolist()
 
 def _list_to_tensor(data: Optional[List], dtype=None) -> Optional[torch.Tensor]:
@@ -27,7 +36,7 @@ def _list_to_tensor(data: Optional[List], dtype=None) -> Optional[torch.Tensor]:
         return None
     # Try to infer dtype from data if not provided
     if dtype is None:
-        # Check if it's boolean-like (all 0/1 or True/False)
+        # Check if it's boolean-like 
         if isinstance(data, list) and len(data) > 0:
             sample = data[0] if not isinstance(data[0], list) else data[0][0] if isinstance(data[0], list) and len(data[0]) > 0 else None
             if sample is not None and isinstance(sample, bool):
@@ -40,7 +49,6 @@ class StepTrace:
     """Records the state at a single generation step."""
     step: int
     mask_index: torch.Tensor  # Which positions are still masked [1, L]
-    logits: Optional[torch.Tensor] = None  # Model predictions [1, L, V]
     predictions: Optional[torch.Tensor] = None  # Predicted tokens [1, L]
     confidences: Optional[torch.Tensor] = None  # Confidence scores [1, L]
     selected_positions: Optional[torch.Tensor] = None  # Positions that were actually unmasked [1, L]
@@ -54,11 +62,10 @@ class StepTrace:
         return {
             "step": self.step,
             "mask_index": _tensor_to_list(self.mask_index),
-            "logits": _tensor_to_list(self.logits),
-            "predictions": _tensor_to_list(self.predictions),
-            "confidences": _tensor_to_list(self.confidences),
-            "selected_positions": _tensor_to_list(self.selected_positions),
-            "selected_tokens": _tensor_to_list(self.selected_tokens),
+            "predictions": _tensor_to_list(self.predictions) if self.predictions is not None else None,
+            "confidences": _tensor_to_list(self.confidences) if self.confidences is not None else None,
+            "selected_positions": _tensor_to_list(self.selected_positions) if self.selected_positions is not None else None,
+            "selected_tokens": _tensor_to_list(self.selected_tokens) if self.selected_tokens is not None else None,
             "intervention_applied": self.intervention_applied,
             "intervention_type": self.intervention_type,
             "metadata": self.metadata
@@ -70,7 +77,6 @@ class StepTrace:
         return cls(
             step=data["step"],
             mask_index=_list_to_tensor(data["mask_index"], dtype=torch.bool),
-            logits=_list_to_tensor(data.get("logits"), dtype=torch.float32),
             predictions=_list_to_tensor(data.get("predictions"), dtype=torch.long),
             confidences=_list_to_tensor(data.get("confidences"), dtype=torch.float32),
             selected_positions=_list_to_tensor(data.get("selected_positions"), dtype=torch.bool),
@@ -138,6 +144,44 @@ class GenerationTrace:
         
         return filepath
     
+    def upload_to_wandb(self, name: Optional[str] = None, base_dir: str = "trace_outputs"):
+        """
+        Upload trace to wandb as an artifact.
+        """
+        try:
+            import wandb
+        except ImportError:
+            import warnings
+            warnings.warn("wandb not available. Install with: pip install wandb")
+            return
+        
+        if wandb.run is None:
+            import warnings
+            warnings.warn("wandb run not initialized. Cannot upload trace.")
+            return
+        
+        artifact_name = name or "trace"
+        
+        # Create wandb artifact
+        artifact = wandb.Artifact(
+            name=f"trace_{artifact_name}",
+            type="trace",
+            description=f"Generation trace: {artifact_name}"
+        )
+        
+        # Save trace to JSON file in trace_outputs directory
+        os.makedirs(base_dir, exist_ok=True)
+        filepath = os.path.join(base_dir, f"{artifact_name}.json")
+        
+        trace_dict = self.to_dict()
+        with open(filepath, 'w') as f:
+            json.dump(trace_dict, f, indent=2)
+        
+        # Add file to artifact and upload
+        artifact.add_file(filepath, name=f"{artifact_name}.json")
+        wandb.log_artifact(artifact)
+
+    
     @classmethod
     def load_from_json(cls, name: str, base_dir: str = "trace_outputs") -> "GenerationTrace":
         """
@@ -188,7 +232,10 @@ class TracingContext:
         intervention_hook: Optional[InterventionHook] = None,
         save_to_disk: bool = True,
         trace_name: Optional[str] = None,
-        base_dir: str = "trace_outputs"
+        base_dir: str = "trace_outputs",
+        save_predictions: bool = True,
+        save_confidences: bool = True,
+        upload_to_wandb: bool = False
     ):
         self.trace = GenerationTrace(prompt=None, final_sequence=None)
         self.intervention_hook = intervention_hook or InterventionHook()
@@ -197,11 +244,21 @@ class TracingContext:
         self._current_predictions = None
         self._current_confidences = None
         
+        # Block boundaries 
+        self._current_block_start = None
+        self._current_block_end = None
+        self._block_length = None  
+        
         # Disk saving options
         self.save_to_disk = save_to_disk
         self.trace_name = trace_name
         self.base_dir = base_dir
         self._saved_steps = 0  # Track how many steps have been saved
+        
+        # Performance options
+        self.save_predictions = save_predictions
+        self.save_confidences = save_confidences
+        self.upload_to_wandb = upload_to_wandb
 
     def record_step_start(self, step: int, x: torch.Tensor, mask_id: int):
         self.current_step = step
@@ -212,19 +269,21 @@ class TracingContext:
             mask_index=mask_index.clone()
         )
         self.trace.step_traces.append(step_trace)
+        
+        # Reset block boundaries at start of each step 
+        self._current_block_start = None
+        self._current_block_end = None
 
-    def record_logits(self, logits: torch.Tensor):
-        if self.trace.step_traces:
-            self.trace.step_traces[-1].logits = logits.clone()
-            
     def record_timestamps(self, start_time: float, end_time: float):
         self.trace.start_time = start_time
         self.trace.end_time = end_time
 
     def record_predictions(self, predictions: torch.Tensor, confidences: torch.Tensor):
         if self.trace.step_traces:
-            self.trace.step_traces[-1].predictions = predictions.clone()
-            self.trace.step_traces[-1].confidences = confidences.clone()
+            if self.save_predictions:
+                self.trace.step_traces[-1].predictions = predictions.clone()
+            if self.save_confidences:
+                self.trace.step_traces[-1].confidences = confidences.clone()
             self._current_predictions = predictions
             self._current_confidences = confidences
 
@@ -252,10 +311,22 @@ class TracingContext:
 
         S = torch.nonzero(transfer_index[0], as_tuple=False).squeeze(-1)
 
-        R = torch.nonzero(
+        # For swap: use block boundaries detected from scheduler operations
+        # block_end is detected from slice assignment (x0_p[:, block_end:] = -np.inf)
+        # block_start is calculated as block_end - block_length
+        block_start = self._current_block_start
+        block_end = self._current_block_end
+
+        R_all = torch.nonzero(
             mask_index[0] & (~transfer_index[0]),
             as_tuple=False
         ).squeeze(-1)
+        
+        # For swap: filter R to only include positions within the same block as S
+        if hook.mode == "swap" and block_start is not None and block_end is not None:
+            R = R_all[(R_all >= block_start) & (R_all < block_end)]
+        else:
+            R = R_all
 
         if hook.mode == "drop":
             if S.numel() == 0:
@@ -296,6 +367,9 @@ class TracingContext:
             step_trace.metadata["k"] = k
             step_trace.metadata["S_size"] = int(S.numel())
             step_trace.metadata["R_size"] = int(R.numel())
+            if block_start is not None and block_end is not None:
+                step_trace.metadata["block_start"] = block_start
+                step_trace.metadata["block_end"] = block_end
 
         step_trace.intervention_applied = intervention_applied
         return modified_transfer, modified_x0, intervention_applied
@@ -369,11 +443,6 @@ def create_intervention_hook(
 ) -> InterventionHook:
     """
     Create a scheduler-relative intervention hook.
-
-    Args:
-        mode: "drop" or "swap"
-        steps: list of step indices at which to intervene
-        k: number of tokens to drop / swap at each step
     """
     return InterventionHook(
         mode=mode,
