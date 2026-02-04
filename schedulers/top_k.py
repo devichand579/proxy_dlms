@@ -5,14 +5,20 @@
                  logits_eos_inf=False, confidence_eos_eot_inf=False)
 '''
 
-
+import os
 import torch
 import torch.nn.functional as F
 import numpy as np
 from schedulers.utils import add_gumbel_noise, get_mask_by_confidence, get_mask_by_entropy, check_eos_stop_condition
 
+if os.environ.get('TRACING_ENABLED', 'False') == 'True':
+    from traces.trace_wrapper import trace_scheduler
+else:
+    def trace_scheduler(*args, **kwargs):
+        return lambda x: x
 
 @ torch.no_grad()
+@trace_scheduler(mask_id=126336)  # tracing decorator
 def generate_topk(
     model,
     prompt,
@@ -25,7 +31,12 @@ def generate_topk(
     temperature=0.,
     mask_id=126336,
     logits_eos_inf=False,
-    confidence_eos_eot_inf=False
+    confidence_eos_eot_inf=False,
+    trace_name=None,  
+    upload_to_wandb=False,  
+    intervention_mode=None, 
+    intervention_steps=None, 
+    intervention_k=1  
 ):
     '''
     Args:
@@ -41,6 +52,11 @@ def generate_topk(
         mask_id: The token id of [MASK] is 126336.
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
+        trace_name: Optional trace name. If provided, trace will be saved to disk.
+        upload_to_wandb: If True and trace_name is provided, upload trace to wandb as artifact.
+        intervention_mode: Intervention mode. 'drop' to prevent tokens from being unmasked, 'swap' to swap tokens.
+        intervention_steps: Intervention steps. List of steps to apply intervention.
+        intervention_k: Intervention k. Number of tokens to transfer per step.
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
