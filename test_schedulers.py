@@ -1,4 +1,5 @@
 import time
+import traceback
 import argparse
 from datetime import datetime
 from load_model import load_model_and_tokenizer
@@ -274,6 +275,8 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
             )
             results.append((label, output))
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"Error running {name}: {e}")
             print()
     

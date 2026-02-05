@@ -37,6 +37,7 @@ class ModelTracer:
         self._last_x = None
         self._pending_transfer_index = None
         self._in_intervention = False  # Flag to prevent recursion during intervention
+        self._in_setitem = False  # Additional reentrant guard
         
         # Store original 
         self._original_setitem = None
@@ -54,7 +55,7 @@ class ModelTracer:
             if self.tracing_context is not None:
                 # Track step: each model call typically represents a step
                 if len(args) > 0:
-                    x = args[0] if isinstance(args[0], torch.Tensor) else None
+                    x = args[0] if _is_tensor_like(args[0]) else None
                     if x is not None and x.dim() == 2:
                         self._last_x = x
                         # Record step start
@@ -75,11 +76,11 @@ class ModelTracer:
             # If this is called on logits (or logits_with_noise), it's likely x0
             if self.tracing_context is not None:
                 # Check if input looks like logits (3D tensor) or logits_with_noise
-                if isinstance(input, torch.Tensor) and input.dim() >= 2:
+                if _is_tensor_like(input) and input.dim() >= 2:
                     # This might be predictions
                     if dim == -1 or (dim is None and input.dim() == 3):
                         # Store the full x0 tensor for later use in setitem
-                        self._last_x0 = result.clone() if isinstance(result, torch.Tensor) else result
+                        self._last_x0 = result.clone() if _is_tensor_like(result) else result
                         # Compute confidence from input (logits or logits_with_noise)
                         if input.dim() == 3:  # [batch, length, vocab] - logits
                             with torch.no_grad():
@@ -97,7 +98,7 @@ class ModelTracer:
         def traced_topk(input, k, dim=None, largest=True, sorted=True, *, out=None):
             # Handle dim=None for 1D tensors 
             # For 1D tensors, dim should be -1 (last dimension)
-            if dim is None and isinstance(input, torch.Tensor) and input.dim() == 1:
+            if dim is None and _is_tensor_like(input) and input.dim() == 1:
                 dim = -1
             
             # Call original topk - preserve the named tuple return type
@@ -108,7 +109,7 @@ class ModelTracer:
             # If this is called on confidence, it's likely creating transfer_index
             if self.tracing_context is not None:
                 # Check if input looks like confidence (1D or 2D, float values)
-                if isinstance(input, torch.Tensor) and input.dim() <= 2:
+                if _is_tensor_like(input) and input.dim() <= 2:
                     # Access indices from the named tuple
                     indices = result.indices
                     # Create boolean mask from indices 
@@ -313,29 +314,36 @@ class ModelTracer:
         tracer_instance = self  
         
         def traced_setitem(tensor_self, key, value):
-            # Skip if we're already in an intervention to prevent recursion
-            if tracer_instance._in_intervention:
-                return tracer_instance._original_setitem(tensor_self, key, value)
-            
-            if tracer_instance.tracing_context is None:
+            # Reentrant guard to prevent recursion
+            if getattr(tracer_instance, '_in_setitem', False):
                 return original_setitem(tensor_self, key, value)
-            
-            # Try to detect and handle different patterns
-            # Detect block boundary first (doesn't return early)
-            tracer_instance._detect_block_boundary(key, value)
-            
-            # Try boolean tensor transfer
-            result = tracer_instance._handle_boolean_tensor_transfer(tensor_self, key, value)
-            if result:
-                return tensor_self if result == "modified" else original_setitem(tensor_self, key, value)
-            
-            # Try integer indexing transfer
-            result = tracer_instance._handle_integer_indexing_transfer(tensor_self, key, value)
-            if result:
-                return tensor_self if result == "modified" else original_setitem(tensor_self, key, value)
-            
-            # Fallback: call original setitem
-            return original_setitem(tensor_self, key, value)
+            tracer_instance._in_setitem = True
+            try:
+            # Skip if we're already in an intervention to prevent recursion
+                if tracer_instance._in_intervention:
+                    return original_setitem(tensor_self, key, value)
+                
+                if tracer_instance.tracing_context is None:
+                    return original_setitem(tensor_self, key, value)
+                
+                # Try to detect and handle different patterns
+                # Detect block boundary first (doesn't return early)
+                tracer_instance._detect_block_boundary(key, value)
+                
+                # Try boolean tensor transfer
+                result = tracer_instance._handle_boolean_tensor_transfer(tensor_self, key, value)
+                if result:
+                    return tensor_self if result == "modified" else original_setitem(tensor_self, key, value)
+                
+                # Try integer indexing transfer
+                result = tracer_instance._handle_integer_indexing_transfer(tensor_self, key, value)
+                if result:
+                    return tensor_self if result == "modified" else original_setitem(tensor_self, key, value)
+                
+                # Fallback: call original setitem
+                return original_setitem(tensor_self, key, value)
+            finally:
+                tracer_instance._in_setitem = False
         
         return traced_setitem
     
