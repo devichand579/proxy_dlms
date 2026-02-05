@@ -6,6 +6,7 @@ from typing import Optional, Callable
 import functools
 import time
 import torch
+import torch.nn.functional as F
 import numpy as np
 from traces.trace_generator import TracingContext, InterventionHook
 from traces.utils import is_negative_inf, was_position_masked, was_positions_masked, extract_tensor_value, get_value_item, value_matches_x0, build_transfer_index, build_x0_for_trace, ensure_2d_shape, shapes_match, get_x0_trace, _is_tensor_like
@@ -35,6 +36,7 @@ class ModelTracer:
         self._last_x0 = None  
         self._last_confidence = None
         self._last_x = None
+        self._last_logits = None  # Store logits for FHS-style schedulers
         self._pending_transfer_index = None
         self._in_intervention = False  # Flag to prevent recursion during intervention
         self._in_setitem = False  # Additional reentrant guard
@@ -58,6 +60,11 @@ class ModelTracer:
                     x = args[0] if _is_tensor_like(args[0]) else None
                     if x is not None and x.dim() == 2:
                         self._last_x = x
+                        # Store logits for FHS-style schedulers that don't use argmax
+                        if hasattr(output, 'logits') and output.logits is not None:
+                            self._last_logits = output.logits.clone()
+                            # Also store in tracing context for on-demand prediction computation
+                            self.tracing_context._current_logits = output.logits.clone()
                         # Record step start
                         self.tracing_context.record_step_start(
                             self._step_counter, x, self.mask_id
@@ -77,7 +84,6 @@ class ModelTracer:
             if self.tracing_context is not None:
                 # Check if input looks like logits (3D tensor) or logits_with_noise
                 if _is_tensor_like(input) and input.dim() >= 2:
-                    # This might be predictions
                     if dim == -1 or (dim is None and input.dim() == 3):
                         # Store the full x0 tensor for later use in setitem
                         self._last_x0 = result.clone() if _is_tensor_like(result) else result
@@ -210,6 +216,15 @@ class ModelTracer:
         """Common logic for processing a transfer: apply interventions, record, and apply."""
         self._in_intervention = True
         try:
+            # For FHS-style schedulers: if predictions haven't been recorded yet, compute from logits
+            if (self.tracing_context._current_predictions is None and 
+                self.tracing_context._current_logits is not None):
+                # Compute predictions and confidences from logits
+                predictions = torch.argmax(self.tracing_context._current_logits, dim=-1)  # [1, L]
+                probs = F.softmax(self.tracing_context._current_logits, dim=-1)
+                confidences = torch.max(probs, dim=-1)[0]  # [1, L]
+                self.tracing_context.record_predictions(predictions, confidences)
+            
             # Apply interventions if needed
             modified_transfer, modified_x0, intervention_applied = (
                 self.tracing_context.apply_interventions(

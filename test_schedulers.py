@@ -268,6 +268,8 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
             if use_wandb:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 trace_name = f"{name}_{timestamp}"
+                if intervention_mode is not None:
+                    trace_name = f"{name}_{intervention_mode}_{timestamp}"
             
             output, label = test_func(
                 model, input_ids, attention_mask, tokenizer, 

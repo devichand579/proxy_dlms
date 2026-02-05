@@ -7,8 +7,7 @@ import numpy as np
 
 def _is_tensor_like(obj):
     """Check if object is tensor-like without using isinstance to avoid recursion."""
-    # Simplified check - just verify type name and module
-    # Avoids hasattr, isinstance, and attribute access that could trigger recursion
+    # Avoid hasattr, isinstance, and attribute access that could trigger recursion
     try:
         obj_type_name = type(obj).__name__
         obj_module = type(obj).__module__
