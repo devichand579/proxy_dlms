@@ -2,16 +2,23 @@
     EB (Entropy-Based) sampler
     generate_EB(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=256, 
                 gamma=0.1, E='confidence', temperature=0., mask_id=126336, 
-                logits_eos_inf=False, confidence_eos_eot_inf=False)
+                logits_eos_inf=False, confidence_eos_eot_inf=False, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
 '''
 
-
+import os
 import torch
 import torch.nn.functional as F
+
 from schedulers.utils import add_gumbel_noise, get_mask_by_confidence, get_mask_by_entropy, check_eos_stop_condition
 
+if os.environ.get('TRACING_ENABLED', 'False') == 'True':
+    from traces.trace_wrapper import trace_scheduler
+else:
+    def trace_scheduler(*args, **kwargs):
+        return lambda x: x
 
 @ torch.no_grad()
+@trace_scheduler(mask_id=126336)  # tracing decorator
 def generate_EB(
     model,
     prompt,
@@ -25,6 +32,11 @@ def generate_EB(
     mask_id=126336,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
+    trace_name=None,  
+    upload_to_wandb=True,  
+    intervention_mode=None, 
+    intervention_steps=None, 
+    intervention_k=1  
 ):
     '''
     Args:
@@ -40,6 +52,11 @@ def generate_EB(
         mask_id: The token id of [MASK] is 126336.
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
+        trace_name: Optional trace name. If provided, trace will be saved to disk.
+        upload_to_wandb: If True and trace_name is provided, upload trace to wandb as artifact.
+        intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
+        intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
+        intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()

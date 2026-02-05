@@ -18,7 +18,7 @@ except ImportError:
     wandb = None
 
 
-def test_pure_diffusion(model, input_ids, attention_mask, tokenizer, trace_name=None, upload_to_wandb=False, 
+def test_pure_diffusion(model, input_ids, attention_mask, tokenizer, trace_name=None, 
                        intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test pure diffusion scheduler"""
     print("Generating with pure diffusion (block_length=256)...")
@@ -26,8 +26,7 @@ def test_pure_diffusion(model, input_ids, attention_mask, tokenizer, trace_name=
     out_pure_diffusion, steps_pure, blocks_pure = generate_llada(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=256, temperature=0., remasking='confidence',
-        trace_name=trace_name, upload_to_wandb=upload_to_wandb,
-        intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name,intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     pure_diffusion_time = time.time() - start_time
     print(f"Pure diffusion generation time: {pure_diffusion_time:.2f} seconds")
@@ -40,7 +39,7 @@ def test_pure_diffusion(model, input_ids, attention_mask, tokenizer, trace_name=
     return output, "Pure diffusion"
 
 
-def test_block_diffusion(model, input_ids, attention_mask, tokenizer, trace_name=None, upload_to_wandb=False,
+def test_block_diffusion(model, input_ids, attention_mask, tokenizer, trace_name=None, 
                         intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test block diffusion scheduler"""
     print("Generating with block diffusion (block_length=32)...")
@@ -48,8 +47,7 @@ def test_block_diffusion(model, input_ids, attention_mask, tokenizer, trace_name
     out_block_diffusion, steps_block, blocks_block = generate_llada(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=32, temperature=0., remasking='confidence',
-        trace_name=trace_name, upload_to_wandb=upload_to_wandb,
-        intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     block_diffusion_time = time.time() - start_time
     print(f"Block diffusion generation time: {block_diffusion_time:.2f} seconds")
@@ -62,7 +60,7 @@ def test_block_diffusion(model, input_ids, attention_mask, tokenizer, trace_name
     return output, "Block diffusion"
 
 
-def test_top_k_confidence(model, input_ids, attention_mask, tokenizer, trace_name=None, upload_to_wandb=False,
+def test_top_k_confidence(model, input_ids, attention_mask, tokenizer, trace_name=None,
                         intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test top-k scheduler with confidence metric"""
     print("Generating with top-k (confidence metric, block_length=256)...")
@@ -72,8 +70,7 @@ def test_top_k_confidence(model, input_ids, attention_mask, tokenizer, trace_nam
         model, input_ids, attention_mask, 
         steps=256, gen_length=256, 
         block_length=256, temperature=0., top_k=1, metric='confidence',
-        trace_name=trace_name, upload_to_wandb=upload_to_wandb,
-        intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     top_k_time = time.time() - start_time
     print(f"Top-k generation time: {top_k_time:.2f} seconds")
@@ -86,7 +83,7 @@ def test_top_k_confidence(model, input_ids, attention_mask, tokenizer, trace_nam
     return output, "Top-k (confidence)"
 
 
-def test_top_k_margin(model, input_ids, attention_mask, tokenizer, trace_name=None, upload_to_wandb=False,
+def test_top_k_margin(model, input_ids, attention_mask, tokenizer, trace_name=None,
                         intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test top-k scheduler with margin metric"""
     print("Generating with top-k (margin metric, block_length=256)...")
@@ -94,8 +91,7 @@ def test_top_k_margin(model, input_ids, attention_mask, tokenizer, trace_name=No
     out_top_k_margin, steps_top_k_margin, blocks_top_k_margin = generate_topk(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=256, temperature=0., top_k=1, metric='top_margin',
-        trace_name=trace_name, upload_to_wandb=upload_to_wandb,
-        intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     top_k_time = time.time() - start_time
     print(f"Top-k generation time: {top_k_time:.2f} seconds")
@@ -127,14 +123,15 @@ def test_fhs(model, input_ids, attention_mask, tokenizer, trace_name=None):
     return output, "FHS"
 
 
-def test_eb_sampler(model, input_ids, attention_mask, tokenizer, trace_name=None):
+def test_eb_sampler(model, input_ids, attention_mask, tokenizer, trace_name=None,
+                        intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test EB sampler scheduler"""
     print("Generating with EB_sampler (confidence metric, block_length=256)...")
     start_time = time.time()
-    # Note: trace_name not yet supported by generate_EB
     out_eb_sampler, steps_eb_sampler, blocks_eb_sampler = generate_EB(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
-        block_length=256, gamma=0.1, E='confidence', temperature=0.
+        block_length=256, gamma=0.1, E='confidence', temperature=0.,
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     eb_sampler_time = time.time() - start_time
     print(f"EB_sampler generation time: {eb_sampler_time:.2f} seconds")
@@ -264,16 +261,13 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
         try:
             # Generate trace name if wandb is enabled
             trace_name = None
-            upload_to_wandb = False
             if use_wandb:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 trace_name = f"{name}_{timestamp}"
-                upload_to_wandb = True
             
             output, label = test_func(
                 model, input_ids, attention_mask, tokenizer, 
-                trace_name=trace_name, upload_to_wandb=upload_to_wandb,
-                intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+                trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
             )
             results.append((label, output))
         except Exception as e:

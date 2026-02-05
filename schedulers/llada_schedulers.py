@@ -2,11 +2,11 @@
     LLaDA paper based schedulers
     1. Pure Diffusion
     generate_llada(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=256, temperature=0.,
-             remasking='confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False)
+             remasking='confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False,trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
 
     2. Block Diffusion LLADA
     generate_block_diffusion_llada(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=32, temperature=0.,
-             remasking='confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False)
+             remasking='confidence', mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False,trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
 '''
 
 
