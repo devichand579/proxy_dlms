@@ -62,6 +62,8 @@ checkpoints/
 logs/
 wandb/
 outputs/
+html/
+png/
 output*.txt
 
 

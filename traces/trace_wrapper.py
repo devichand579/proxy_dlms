@@ -6,8 +6,9 @@ from typing import Optional, Callable
 import functools
 import time
 import torch
+import numpy as np
 from traces.trace_generator import TracingContext, InterventionHook
-
+from traces.utils import is_negative_inf, was_position_masked, was_positions_masked, extract_tensor_value, get_value_item, value_matches_x0, build_transfer_index, build_x0_for_trace, ensure_2d_shape, shapes_match, get_x0_trace, _is_tensor_like
 
 class ModelTracer:
     """
@@ -125,6 +126,188 @@ class ModelTracer:
         
         return traced_topk
     
+    def _detect_block_boundary(self, key, value):
+        """Detect block boundary pattern: x0_p[:, block_end:] = -np.inf"""
+        if not (isinstance(key, tuple) and len(key) == 2):
+            return False
+        
+        first_slice, second_slice = key
+        if not (first_slice == slice(None) and 
+                isinstance(second_slice, slice) and 
+                second_slice.start is not None and 
+                second_slice.stop is None):
+            return False
+        
+        if not is_negative_inf(value):
+            return False
+        
+        # Extract block boundaries
+        block_end = second_slice.start
+        self.tracing_context._current_block_end = block_end
+        if self.tracing_context._block_length is not None:
+            block_start = block_end - self.tracing_context._block_length
+            self.tracing_context._current_block_start = block_start
+        return True
+    
+    def _detect_single_position_transfer(self, x, x0_trace, pos_val, value):
+        """Detect if single position assignment is a transfer."""
+        if pos_val < 0 or x.shape[1] <= pos_val:
+            return None
+        
+        # Check if position was masked
+        was_masked = was_position_masked(x, pos_val, self.mask_id)
+        is_real_token = get_value_item(value, self.mask_id) != self.mask_id
+        
+        if not (was_masked and is_real_token):
+            return None
+        
+        # Extract value
+        val_item, val_tensor = extract_tensor_value(value, device=x.device, dtype=torch.long)
+        if val_item is None or val_tensor is None:
+            return None
+        
+        # Check if matches x0 (for deterministic schedulers)
+        matches_x0 = value_matches_x0(x0_trace, pos_val, val_item)
+        
+        # Record if matches x0 OR was masked (for stochastic schedulers like FHS)
+        if matches_x0 or was_masked:
+            transfer_positions = torch.tensor([pos_val], device=x.device, dtype=torch.long)
+            # Update x0_trace with actual value
+            if x0_trace.shape[1] > pos_val:
+                x0_trace[0, pos_val] = int(val_item)
+            return transfer_positions, val_tensor
+        
+        return None
+    
+    def _detect_multiple_positions_transfer(self, x, x0_trace, pos_tensor, value):
+        """Detect if multiple positions assignment is a transfer."""
+        if (pos_tensor.numel() == 0 or 
+            not (pos_tensor >= 0).all() or 
+            not (pos_tensor < x.shape[1]).all()):
+            return None
+        
+        # Use duck typing to avoid isinstance recursion
+        if not (_is_tensor_like(value) and value.numel() == pos_tensor.numel()):
+            return None
+        
+        # Check which positions were masked
+        was_masked_mask = was_positions_masked(x, pos_tensor, self.mask_id)
+        
+        # Check if values match x0
+        matches_x0 = False
+        if x0_trace.shape[1] > pos_tensor.max().item():
+            x0_vals = x0_trace[0, pos_tensor]
+            matches_x0 = (torch.allclose(value.float(), x0_vals.float(), atol=1e-6) or 
+                         torch.equal(value, x0_vals))
+        
+        if matches_x0 or was_masked_mask.any():
+            return pos_tensor, value
+        
+        return None
+    
+    def _process_transfer(self, tensor_self, original_key, transfer_index, x0_trace, x):
+        """Common logic for processing a transfer: apply interventions, record, and apply."""
+        self._in_intervention = True
+        try:
+            # Apply interventions if needed
+            modified_transfer, modified_x0, intervention_applied = (
+                self.tracing_context.apply_interventions(
+                    transfer_index, x0_trace, x, self.mask_id
+                )
+            )
+            
+            # Record transfer
+            self.tracing_context.record_transfer(modified_transfer, modified_x0)
+            
+            # Apply intervention if it modified the transfer
+            if intervention_applied:
+                modified_positions = torch.nonzero(modified_transfer[0], as_tuple=False).squeeze(-1)
+                if modified_positions.numel() > 0:
+                    modified_values = modified_x0[0, modified_positions]
+                    
+                    # Handle different key types
+                    # Use type() for tuple (safe) and duck typing for tensor (avoids recursion)
+                    if isinstance(original_key, tuple):
+                        batch_idx, _ = original_key
+                        new_key = (batch_idx, modified_positions)
+                        self._original_setitem(tensor_self, new_key, modified_values)
+                        return "modified"
+                    elif _is_tensor_like(original_key):
+                        # Boolean tensor case
+                        modified_transfer_2d = ensure_2d_shape(modified_transfer)
+                        modified_x0_2d = ensure_2d_shape(modified_x0)
+                        if original_key.dim() == 1:
+                            new_key = modified_transfer_2d[0]
+                            new_value = modified_x0_2d[0, new_key]
+                        else:
+                            new_key = modified_transfer_2d
+                            new_value = modified_x0_2d[new_key]
+                        self._original_setitem(tensor_self, new_key, new_value)
+                        return "modified"
+            
+            return True  # Handled but not modified
+        finally:
+            self._in_intervention = False
+    
+    def _handle_boolean_tensor_transfer(self, tensor_self, key, value):
+        """Handle boolean tensor indexing: x[transfer_index] = x0[transfer_index]"""
+        # Use duck typing to avoid isinstance recursion
+        if not (_is_tensor_like(key) and hasattr(key, 'dtype') and key.dtype == torch.bool and 
+                _is_tensor_like(value)):
+            return False
+        
+        if self._last_x0 is None:
+            return False
+        
+        try:
+            transfer_index = ensure_2d_shape(key.clone())
+            x = ensure_2d_shape(tensor_self.clone())
+            x0_trace = ensure_2d_shape(self._last_x0.clone())
+            
+            if not shapes_match([transfer_index, x0_trace, x]):
+                return False
+            
+            return self._process_transfer(tensor_self, key, transfer_index, x0_trace, x)
+        except Exception as e:
+            if not self._in_intervention:
+                import warnings
+                warnings.warn(f"Tracing failed: {e}")
+            return False
+    
+    def _handle_integer_indexing_transfer(self, tensor_self, key, value):
+        """Handle integer indexing: x[0, pos] = value or x[0, positions] = values"""
+        if not (isinstance(key, tuple) and len(key) == 2):
+            return False
+        
+        batch_idx, pos_idx = key
+        if not ((isinstance(batch_idx, int) and batch_idx == 0) or batch_idx == slice(None)):
+            return False
+        
+        x = ensure_2d_shape(tensor_self.clone())
+        x0_trace = get_x0_trace(self, x)
+        
+        # Detect transfer based on position index type
+        # Use duck typing to avoid isinstance recursion
+        transfer_info = None
+        if isinstance(pos_idx, int):
+            transfer_info = self._detect_single_position_transfer(x, x0_trace, pos_idx, value)
+        elif _is_tensor_like(pos_idx) and hasattr(pos_idx, 'dtype') and pos_idx.dtype in (torch.long, torch.int64, torch.int32, torch.int):
+            transfer_info = self._detect_multiple_positions_transfer(x, x0_trace, pos_idx, value)
+        
+        if transfer_info is None:
+            return False
+        
+        transfer_positions, transfer_values = transfer_info
+        
+        # Build transfer_index and process
+        transfer_index = build_transfer_index(transfer_positions, x.shape[1], x.device)
+        x0_for_trace = build_x0_for_trace(x0_trace, transfer_positions, transfer_values)
+        
+        if not shapes_match([transfer_index, x0_for_trace, x]):
+            return False
+        
+        return self._process_transfer(tensor_self, key, transfer_index, x0_for_trace, x)
+    
     def _intercept_tensor_setitem(self, original_setitem):
         """Intercept tensor __setitem__ to detect transfers. Assumes batch size 1."""
         tracer_instance = self  
@@ -134,128 +317,24 @@ class ModelTracer:
             if tracer_instance._in_intervention:
                 return tracer_instance._original_setitem(tensor_self, key, value)
             
-            # Detect block boundary assignment: x0_p[:, block_end:] = -np.inf
-            # This pattern sets positions beyond block_end to -inf
-            if tracer_instance.tracing_context is not None:
-                # Check if this is a slice assignment like [:, block_end:] = -inf
-                if isinstance(key, tuple) and len(key) == 2:
-                    first_slice, second_slice = key
-                    # Pattern: [:, block_end:] where first slice is : and second is block_end:
-                    if (first_slice == slice(None) and 
-                        isinstance(second_slice, slice) and 
-                        second_slice.start is not None and 
-                        second_slice.stop is None):
-                        # Check if value is -inf (can be scalar, numpy, or tensor of -inf)
-                        is_neg_inf = False
-                        try:
-                            import numpy as np
-                            if isinstance(value, (int, float)):
-                                is_neg_inf = (value == float('-inf')) or (value == np.NINF) or (value < -1e10)
-                            elif isinstance(value, np.ndarray):
-                                # Check if all values are -inf
-                                is_neg_inf = np.all(np.isinf(value)) and np.all(value < 0) if value.size > 0 else False
-                            elif isinstance(value, torch.Tensor):
-                                # Check if all values are -inf
-                                is_neg_inf = torch.all(value == -torch.inf) if value.numel() > 0 else False
-                            elif hasattr(value, '__float__'):
-                                val_float = float(value)
-                                is_neg_inf = (val_float == float('-inf')) or (val_float < -1e10)
-                        except:
-                            # Fallback: check if it's a very large negative number
-                            try:
-                                if isinstance(value, (int, float)):
-                                    is_neg_inf = value < -1e10
-                            except:
-                                pass
-                        
-                        if is_neg_inf:
-                            # Extract block_end from slice
-                            block_end = second_slice.start
-                            tracer_instance.tracing_context._current_block_end = block_end
-                            # Calculate block_start from block_end and block_length
-                            if tracer_instance.tracing_context._block_length is not None:
-                                block_start = block_end - tracer_instance.tracing_context._block_length
-                                tracer_instance.tracing_context._current_block_start = block_start
-                
-                # Check if key is a boolean tensor (transfer_index pattern)
-                if isinstance(key, torch.Tensor) and key.dtype == torch.bool:
-                    # Check if value is also a tensor
-                    if isinstance(value, torch.Tensor):
-                        # This looks like a transfer!
-                        transfer_index = key.clone()
-                        x = tensor_self.clone()
-                        
-                        # Ensure [1, L] shape
-                        if transfer_index.dim() == 1:
-                            transfer_index = transfer_index.unsqueeze(0) 
-                        
-                        if x.dim() == 1:
-                            x = x.unsqueeze(0)
-                         
-                    
-                        if tracer_instance._last_x0 is not None:
-                            try:
-                                x0_full = tracer_instance._last_x0.clone()
-                                
-                                # Ensure [1, L] shape
-                                if x0_full.dim() == 1:
-                                    x0_trace = x0_full.unsqueeze(0)
-                                else:
-                                    x0_trace = x0_full  
-                                
-                                # Verify all shapes match [1, L] before tracing
-                                if (transfer_index.shape == x0_trace.shape == x.shape and 
-                                    len(transfer_index.shape) == 2 and transfer_index.shape[0] == 1):
-                                    # Guard tracing operations against recursive __setitem__ interception
-                                    tracer_instance._in_intervention = True
-                                    try:
-                                        # Apply interventions if needed
-                                        modified_transfer, modified_x0, intervention_applied = tracer_instance.tracing_context.apply_interventions(
-                                            transfer_index, x0_trace, x, tracer_instance.mask_id
-                                        )
-                                        
-                                        # Record transfer
-                                        tracer_instance.tracing_context.record_transfer(modified_transfer, modified_x0)
-                                        
-                                        # Actually apply the intervention by modifying key and value
-                                        if intervention_applied:
-                                            # Prepare key and value (flag will catch any __setitem__ calls)
-                                            # Use minimal operations to extract values
-                                            if key.dim() == 1:
-                                                # Extract 1D key
-                                                if modified_transfer.dim() == 2:
-                                                    new_key = modified_transfer[0]
-                                                else:
-                                                    new_key = modified_transfer
-                                                
-                                                # Extract corresponding values
-                                                if modified_x0.dim() == 2:
-                                                    # modified_x0 is [1, L], new_key is [L] bool
-                                                    # Extract values where new_key is True
-                                                    new_value = modified_x0[0, new_key]
-                                                else:
-                                                    # modified_x0 is [L], new_key is [L] bool
-                                                    new_value = modified_x0[new_key]
-                                            else:
-                                                # Key is 2D [1, L]
-                                                new_key = modified_transfer
-                                                # modified_x0 is [1, L], new_key is [1, L] bool
-                                                new_value = modified_x0[new_key]
-                                            
-                                            # This bypasses any method resolution that might hit our patched version
-                                            tracer_instance._original_setitem(tensor_self, new_key, new_value)
-                                            
-                                            return tensor_self
-                                    finally:
-                                        # Always clear flag
-                                        tracer_instance._in_intervention = False
-                            except Exception as e:
-                                if not tracer_instance._in_intervention:
-                                    import warnings
-                                    warnings.warn(f"Tracing failed (non-fatal): {e}")
-                                pass
+            if tracer_instance.tracing_context is None:
+                return original_setitem(tensor_self, key, value)
             
-            # Call original setitem with original key/value
+            # Try to detect and handle different patterns
+            # Detect block boundary first (doesn't return early)
+            tracer_instance._detect_block_boundary(key, value)
+            
+            # Try boolean tensor transfer
+            result = tracer_instance._handle_boolean_tensor_transfer(tensor_self, key, value)
+            if result:
+                return tensor_self if result == "modified" else original_setitem(tensor_self, key, value)
+            
+            # Try integer indexing transfer
+            result = tracer_instance._handle_integer_indexing_transfer(tensor_self, key, value)
+            if result:
+                return tensor_self if result == "modified" else original_setitem(tensor_self, key, value)
+            
+            # Fallback: call original setitem
             return original_setitem(tensor_self, key, value)
         
         return traced_setitem
@@ -263,6 +342,11 @@ class ModelTracer:
     def __call__(self, *args, **kwargs):
         """Execute scheduler with fully automated tracing."""
         start_time = time.time()
+        
+        # Extract mask_id from scheduler kwargs first (before it's used in record_step_start)
+        mask_id_from_kwargs = kwargs.get('mask_id', None)
+        if mask_id_from_kwargs is not None:
+            self.mask_id = mask_id_from_kwargs
         
         # Extract trace_name from scheduler kwargs if provided (takes precedence)
         trace_name_from_kwargs = kwargs.get('trace_name', None)
@@ -306,10 +390,6 @@ class ModelTracer:
         prompt = args[1] if len(args) > 1 else kwargs.get('prompt')
         if prompt is not None and self.tracing_context.trace.prompt is None:
             self.tracing_context.trace.prompt = prompt.clone()
-        
-        # Extract mask_id from kwargs or use default
-        mask_id = kwargs.get('mask_id', self.mask_id)
-        self.mask_id = mask_id
         
         # Extract block_length from scheduler kwargs (used for block boundary calculation)
         block_length = kwargs.get('block_length', None)

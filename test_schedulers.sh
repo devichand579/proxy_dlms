@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# Help function
+show_help() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Test different schedulers with configurable environment variables and options.
+
+ENVIRONMENT VARIABLE OPTIONS:
+  --tracing_enabled VALUE     Set TRACING_ENABLED (default: True)
+  --wandb_api_key KEY         Set WANDB_API_KEY (default: preset key)
+  --wandb_project PROJECT     Set WANDB_PROJECT (default: strace)
+
+SCHEDULER OPTIONS:
+  --scheduler SCHEDULER        Scheduler to test. Available schedulers:
+                              - pure_diffusion
+                              - block_diffusion
+                              - top_k_confidence
+                              - top_k_margin
+                              - fhs
+                              - eb_sampler
+                              - dus
+                              - fdm
+                              If not specified, all schedulers will be tested.
+
+WANDB OPTIONS:
+  --wandb                     Enable wandb logging and trace uploads
+  --wandb_name NAME           Custom wandb run name (default: auto-generated)
+  --wandb_project PROJECT     Wandb project name (default: strace)
+
+INTERVENTION OPTIONS:
+  --intervention_mode MODE    Intervention mode: "drop" or "swap"
+                              "drop": prevent tokens from being unmasked
+                              "swap": swap tokens
+
+OTHER OPTIONS:
+  --help, -h                  Show this help message
+
+EXAMPLES:
+  # Test pure_diffusion scheduler with drop intervention
+  $0 --scheduler pure_diffusion --intervention_mode drop
+
+  # Test FHS scheduler with wandb logging
+  $0 --scheduler fhs --wandb --wandb_project myproject
+
+  # Test with custom tracing disabled
+  $0 --scheduler top_k_confidence --tracing_enabled False
+
+  # Test all schedulers (default behavior)
+  $0
+
+EOF
+}
+
+# Default values
+TRACING_ENABLED="${TRACING_ENABLED:-True}"
+WANDB_API_KEY="${WANDB_API_KEY:-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}"
+WANDB_PROJECT="${WANDB_PROJECT:-strace}"
+
+# Parse arguments
+USE_WANDB=false
+WANDB_NAME=""
+SCHEDULER=""
+INTERVENTION_MODE=""
+PYTHON_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        --tracing_enabled)
+            TRACING_ENABLED="$2"
+            shift 2
+            ;;
+        --wandb_api_key)
+            WANDB_API_KEY="$2"
+            shift 2
+            ;;
+        --wandb_project)
+            WANDB_PROJECT="$2"
+            shift 2
+            ;;
+        --wandb)
+            USE_WANDB=true
+            shift
+            ;;
+        --wandb_name)
+            WANDB_NAME="$2"
+            shift 2
+            ;;
+        --scheduler)
+            SCHEDULER="$2"
+            shift 2
+            ;;
+        --intervention_mode)
+            INTERVENTION_MODE="$2"
+            shift 2
+            ;;
+        *)
+            # Pass through any other arguments to the Python script
+            PYTHON_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Export environment variables
+export TRACING_ENABLED
+export WANDB_API_KEY
+export WANDB_PROJECT
+
+# Build Python command array
+PYTHON_CMD_ARGS=("test_schedulers.py")
+
+if [ -n "$SCHEDULER" ]; then
+    PYTHON_CMD_ARGS+=("--scheduler" "$SCHEDULER")
+fi
+
+if [ "$USE_WANDB" = true ]; then
+    PYTHON_CMD_ARGS+=("--wandb")
+fi
+
+if [ -n "$WANDB_NAME" ]; then
+    PYTHON_CMD_ARGS+=("--wandb_name" "$WANDB_NAME")
+fi
+
+if [ -n "$WANDB_PROJECT" ]; then
+    PYTHON_CMD_ARGS+=("--wandb_project" "$WANDB_PROJECT")
+fi
+
+if [ -n "$INTERVENTION_MODE" ]; then
+    PYTHON_CMD_ARGS+=("--intervention_mode" "$INTERVENTION_MODE")
+fi
+
+# Add any additional arguments passed through
+if [ ${#PYTHON_ARGS[@]} -gt 0 ]; then
+    PYTHON_CMD_ARGS+=("${PYTHON_ARGS[@]}")
+fi
+
+# Run the Python script
+python "${PYTHON_CMD_ARGS[@]}"

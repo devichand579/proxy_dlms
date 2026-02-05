@@ -18,7 +18,7 @@ else:
         return lambda x: x
 
 @ torch.no_grad()
-@trace_scheduler(mask_id=126336)  # tracing decorator
+@trace_scheduler()  # tracing decorator
 def generate_EB(
     model,
     prompt,
