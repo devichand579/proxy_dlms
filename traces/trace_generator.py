@@ -240,6 +240,7 @@ class TracingContext:
 
         self._current_predictions = None
         self._current_confidences = None
+        self._current_logits = None  # Store logits for computing predictions on-demand
         
         # Block boundaries 
         self._current_block_start = None
@@ -355,7 +356,23 @@ class TracingContext:
             modified_transfer[0, removed] = False
 
             modified_transfer[0, added] = True
-            modified_x0[0, added] = self._current_predictions[0, added]
+            
+            # Get predictions for added positions
+            # For schedulers like FHS that don't use argmax, compute from logits
+            if self._current_predictions is not None:
+                modified_x0[0, added] = self._current_predictions[0, added]
+            elif self._current_logits is not None:
+                # Compute predictions from logits (for FHS-style schedulers)
+                predictions = torch.argmax(self._current_logits, dim=-1)  # [1, L]
+                modified_x0[0, added] = predictions[0, added]
+            else:
+                # Fallback: use x0 parameter if available
+                if x0.shape[1] > added.max().item():
+                    modified_x0[0, added] = x0[0, added]
+                else:
+                    # Can't swap - no predictions available
+                    modified_transfer[0, added] = False
+                    return modified_transfer, modified_x0, False
 
             intervention_applied = True
             step_trace.intervention_type = "swap"
