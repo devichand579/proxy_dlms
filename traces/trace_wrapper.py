@@ -94,7 +94,13 @@ class ModelTracer:
     def _intercept_topk(self, original_topk):
         """Intercept torch.topk to detect transfer_index creation."""
         def traced_topk(input, k, dim=None, largest=True, sorted=True, *, out=None):
-            values, indices = original_topk(
+            # Handle dim=None for 1D tensors 
+            # For 1D tensors, dim should be -1 (last dimension)
+            if dim is None and isinstance(input, torch.Tensor) and input.dim() == 1:
+                dim = -1
+            
+            # Call original topk - preserve the named tuple return type
+            result = original_topk(
                 input, k, dim=dim, largest=largest, sorted=sorted, out=out
             )
             
@@ -102,6 +108,8 @@ class ModelTracer:
             if self.tracing_context is not None:
                 # Check if input looks like confidence (1D or 2D, float values)
                 if isinstance(input, torch.Tensor) and input.dim() <= 2:
+                    # Access indices from the named tuple
+                    indices = result.indices
                     # Create boolean mask from indices 
                     if input.dim() == 1:
                         transfer_mask = torch.zeros_like(input, dtype=torch.bool)
@@ -112,7 +120,8 @@ class ModelTracer:
                         transfer_mask[0, indices] = True
                         self._pending_transfer_index = transfer_mask
             
-            return values, indices
+            # Return the original named tuple 
+            return result
         
         return traced_topk
     
@@ -178,12 +187,11 @@ class ModelTracer:
                         
                         # Ensure [1, L] shape
                         if transfer_index.dim() == 1:
-                            transfer_index = transfer_index.unsqueeze(0)
-                        # If already 2D, assume it's [1, L]
+                            transfer_index = transfer_index.unsqueeze(0) 
                         
                         if x.dim() == 1:
                             x = x.unsqueeze(0)
-                        # If already 2D, assume it's [1, L]
+                         
                     
                         if tracer_instance._last_x0 is not None:
                             try:
