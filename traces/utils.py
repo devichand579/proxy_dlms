@@ -7,17 +7,15 @@ import numpy as np
 
 def _is_tensor_like(obj):
     """Check if object is tensor-like without using isinstance to avoid recursion."""
-    # Use duck typing - try to access tensor attributes
+    # Simplified check - just verify type name and module
+    # Avoids hasattr, isinstance, and attribute access that could trigger recursion
     try:
-        # Quick check: tensors have these attributes
-        has_numel = hasattr(obj, 'numel')
-        has_dim = hasattr(obj, 'dim')
-        has_device = hasattr(obj, 'device')
-        # Also check it's not a numpy array (which also has some of these)
-        is_not_numpy = not isinstance(obj, np.ndarray)
-        return has_numel and has_dim and has_device and is_not_numpy
+        obj_type_name = type(obj).__name__
+        obj_module = type(obj).__module__
+        return obj_type_name == 'Tensor' and obj_module == 'torch'
     except:
         return False
+
 
 
 def extract_tensor_value(value, device=None, dtype=torch.long):
@@ -42,7 +40,7 @@ def extract_tensor_value(value, device=None, dtype=torch.long):
                 val_tensor = val_tensor.to(device)
         else:
             return None, None
-    elif isinstance(value, (int, float, np.integer, np.floating)):
+    elif (isinstance(value, (int, float)) or (hasattr(type(value), '__module__') and type(value).__module__ == 'numpy')):
         val_item = int(value)
         val_tensor = torch.tensor([val_item], device=device, dtype=dtype) if device is not None else torch.tensor([val_item], dtype=dtype)
     else:
@@ -68,7 +66,7 @@ def get_value_item(value, mask_id):
             elif value.numel() > 0:
                 return value[0].item() if value[0].dim() == 0 else value[0].item()
             return mask_id
-        elif isinstance(value, (int, float, np.integer, np.floating)):
+        elif (isinstance(value, (int, float)) or (hasattr(type(value), '__module__') and type(value).__module__ == 'numpy')):
             return int(value)
         return mask_id
     except:
@@ -79,7 +77,7 @@ def is_negative_inf(value):
     try:
         if isinstance(value, (int, float)):
             return (value == float('-inf')) or (value == np.NINF) or (value < -1e10)
-        elif isinstance(value, np.ndarray):
+        elif type(value).__name__ == 'ndarray':
             return np.all(np.isinf(value)) and np.all(value < 0) if value.size > 0 else False
         elif _is_tensor_like(value):
             return torch.all(value == -torch.inf) if value.numel() > 0 else False
