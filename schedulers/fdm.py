@@ -3,15 +3,22 @@
     generate_fdm(model, prompt, attention_mask=None, steps=128, gen_length=128,
                  K1=8, N=8, eta1=0.8, eta2=0.7, gamma=0.2, temperature=0.,
                  mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False,
-                 global_scale=1.0)
+                 global_scale=1.0, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
 '''
 
 
 import math
+import os
 import torch
 import torch.nn.functional as F
 import numpy as np
 from schedulers.utils import add_gumbel_noise, check_eos_stop_condition
+
+if os.environ.get('TRACING_ENABLED', 'False') == 'True':
+    from traces.trace_wrapper import trace_scheduler
+else:
+    def trace_scheduler(*args, **kwargs):
+        return lambda x: x
 
 
 @ torch.no_grad()
@@ -149,6 +156,7 @@ def _fdm_single_step(
 
 
 @ torch.no_grad()
+@trace_scheduler()  # tracing decorator
 def generate_fdm(
     model,
     prompt,
@@ -165,6 +173,11 @@ def generate_fdm(
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     global_scale=1.0,
+    trace_name=None,
+    upload_to_wandb=True,
+    intervention_mode=None,
+    intervention_steps=None,
+    intervention_k=1,
 ):
     '''
     Args:
@@ -183,6 +196,11 @@ def generate_fdm(
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
         global_scale: Weight for global confidence in combined score.
+        trace_name: Optional trace name. If provided, trace will be saved to disk.
+        upload_to_wandb: If True and trace_name is provided, upload trace to wandb as artifact.
+        intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
+        intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
+        intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()

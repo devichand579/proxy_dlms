@@ -23,7 +23,7 @@ else:
 
 
 @ torch.no_grad()
-@trace_scheduler(mask_id=126336)  # tracing decorator
+@trace_scheduler()  # tracing decorator
 def generate_llada(
     model,
     prompt,

@@ -104,14 +104,15 @@ def test_top_k_margin(model, input_ids, attention_mask, tokenizer, trace_name=No
     return output, "Top-k (margin)"
 
 
-def test_fhs(model, input_ids, attention_mask, tokenizer, trace_name=None):
+def test_fhs(model, input_ids, attention_mask, tokenizer, trace_name=None,
+                        intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test FHS scheduler"""
     print("Generating with FHS (steps=256)...")
     start_time = time.time()
-    # Note: trace_name not yet supported by generate_fhs
     out_fhs, steps_fhs = generate_fhs(
         model, input_ids, attention_mask=attention_mask, steps=256, 
-        gen_length=256, temperature=1.0, pass_time_to_model=True
+        gen_length=256, temperature=1.0, pass_time_to_model=True,
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     fhs_time = time.time() - start_time
     print(f"FHS generation time: {fhs_time:.2f} seconds")
@@ -144,14 +145,15 @@ def test_eb_sampler(model, input_ids, attention_mask, tokenizer, trace_name=None
     return output, "EB_sampler (confidence)"
 
 
-def test_dus(model, input_ids, attention_mask, tokenizer, trace_name=None):
+def test_dus(model, input_ids, attention_mask, tokenizer, trace_name=None,
+                        intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test DUS scheduler"""
-    print("Generating with DUS (dilated search schedule, block_length=32)...")
+    print("Generating with DUS (dilated schedule, block_length=32)...")
     start_time = time.time()
-    # Note: trace_name not yet supported by generate_dus
     out_dus, steps_dus, blocks_dus = generate_dus(
         model, input_ids, attention_mask, gen_length=256, 
-        block_length=32, temperature=0., remasking='confidence', scheduler='dilated'
+        block_length=32, temperature=0., remasking='confidence', scheduler='dilated',
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     dus_time = time.time() - start_time
     print(f"DUS generation time: {dus_time:.2f} seconds")
@@ -164,13 +166,14 @@ def test_dus(model, input_ids, attention_mask, tokenizer, trace_name=None):
     return output, "DUS (dilated)"
 
 
-def test_fdm(model, input_ids, attention_mask, tokenizer, trace_name=None):
+def test_fdm(model, input_ids, attention_mask, tokenizer, trace_name=None,
+                        intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test FDM scheduler"""
     print("Generating with FDM (steps=256)...")
     start_time = time.time()
-    # Note: trace_name not yet supported by generate_fdm
     out_fdm, steps_fdm = generate_fdm(
-        model, input_ids, attention_mask, steps=256, gen_length=256
+        model, input_ids, attention_mask, steps=256, gen_length=256,
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     fdm_time = time.time() - start_time
     print(f"FDM generation time: {fdm_time:.2f} seconds")

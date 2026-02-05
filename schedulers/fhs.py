@@ -2,21 +2,28 @@
     FHS (First-Hitting Sampling) schedulers
     1. Extrapolation Method (N <= 128)
     generate_fhs_extrapolation(model, prompt, attention_mask=None, gen_length=128, steps=128, temperature=1.0,
-                               mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True)
+                               mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
     
     2. Predictor-Corrector Method (N > 128)
     generate_fhs_predictor_corrector(model, prompt, attention_mask=None, gen_length=256, steps=256, temperature=1.0,
-                                     mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True)
+                                     mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
     
     3. Auto-selector (chooses method based on steps)
     generate_fhs(model, prompt, attention_mask=None, gen_length=128, steps=128, temperature=1.0,
-                 mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True)
+                 mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
 '''
 
 
 import torch
 import torch.nn.functional as F
 from schedulers.utils import  check_eos_stop_condition
+import os
+
+if os.environ.get('TRACING_ENABLED', 'False') == 'True':
+    from traces.trace_wrapper import trace_scheduler
+else:
+    def trace_scheduler(*args, **kwargs):
+        return lambda x: x
 
 
 def _model_logits(model, x, attention_mask=None, t_cond=None):
@@ -80,6 +87,7 @@ def make_equal_schedule(L, N):
 
 
 @ torch.no_grad()
+@trace_scheduler()  # tracing decorator
 def generate_fhs_extrapolation(
     model,
     prompt,
@@ -91,6 +99,11 @@ def generate_fhs_extrapolation(
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     pass_time_to_model=True,
+    trace_name=None,
+    upload_to_wandb=True,
+    intervention_mode=None,
+    intervention_steps=None,
+    intervention_k=1,
 ):
     '''
     Args:
@@ -104,6 +117,11 @@ def generate_fhs_extrapolation(
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
         pass_time_to_model: Whether to pass time conditioning to the model.
+        trace_name: Optional trace name. If provided, trace will be saved to disk.
+        upload_to_wandb: If True and trace_name is provided, upload trace to wandb as artifact.
+        intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
+        intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
+        intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -196,6 +214,7 @@ def generate_fhs_extrapolation(
 
 
 @ torch.no_grad()
+@trace_scheduler()  # tracing decorator
 def generate_fhs_predictor_corrector(
     model,
     prompt,
@@ -207,6 +226,11 @@ def generate_fhs_predictor_corrector(
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     pass_time_to_model=True,
+    trace_name=None,
+    upload_to_wandb=True,
+    intervention_mode=None,
+    intervention_steps=None,
+    intervention_k=1,
 ):
     '''
     Args:
@@ -220,6 +244,11 @@ def generate_fhs_predictor_corrector(
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
         pass_time_to_model: Whether to pass time conditioning to the model.
+        trace_name: Optional trace name. If provided, trace will be saved to disk.
+        upload_to_wandb: If True and trace_name is provided, upload trace to wandb as artifact.
+        intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
+        intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
+        intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -323,6 +352,7 @@ def generate_fhs_predictor_corrector(
 
 
 @ torch.no_grad()
+@trace_scheduler()  # tracing decorator
 def generate_fhs(
     model,
     prompt,
@@ -334,6 +364,11 @@ def generate_fhs(
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     pass_time_to_model=True,
+    trace_name=None,
+    upload_to_wandb=True,
+    intervention_mode=None,
+    intervention_steps=None,
+    intervention_k=1,
 ):
     '''
     Matches paper recommendation:
@@ -351,6 +386,11 @@ def generate_fhs(
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
         pass_time_to_model: Whether to pass time conditioning to the model.
+        trace_name: Optional trace name. If provided, trace will be saved to disk.
+        upload_to_wandb: If True and trace_name is provided, upload trace to wandb as artifact.
+        intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
+        intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
+        intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
     '''
     if steps <= 128:
         return generate_fhs_extrapolation(

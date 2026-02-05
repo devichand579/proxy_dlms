@@ -94,7 +94,6 @@ class GenerationTrace:
     final_sequence: torch.Tensor
     step_traces: List[StepTrace] = field(default_factory=list)
     unmasking_order: Dict[int, int] = field(default_factory=dict)  # position -> step when unmasked, use this to calculate Kendall's tau
-    interventions: List[Dict] = field(default_factory=list)  # List of interventions applied
     start_time: Optional[float] = None
     end_time: Optional[float] = None
     
@@ -126,7 +125,6 @@ class GenerationTrace:
             "final_sequence": _tensor_to_list(self.final_sequence) if self.final_sequence is not None else None,
             "step_traces": [st.to_dict() for st in self.step_traces],
             "unmasking_order": self.unmasking_order,
-            "interventions": self.interventions,
             "start_time": self.start_time,
             "end_time": self.end_time
         }
@@ -201,7 +199,6 @@ class GenerationTrace:
             final_sequence=_list_to_tensor(trace_dict.get("final_sequence"), dtype=torch.long) if trace_dict.get("final_sequence") is not None else None,
             step_traces=[StepTrace.from_dict(st) for st in trace_dict.get("step_traces", [])],
             unmasking_order=trace_dict.get("unmasking_order", {}),
-            interventions=trace_dict.get("interventions", []),
             start_time=trace_dict.get("start_time"),
             end_time=trace_dict.get("end_time")
         )

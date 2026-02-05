@@ -3,12 +3,12 @@
     1. Binary Search Schedule
     generate_dus(model, prompt, attention_mask=None, gen_length=256, block_length=32,
                       temperature=0., remasking='confidence', mask_id=126336, scheduler='binary',
-                      logits_eos_inf=False, confidence_eos_eot_inf=False)
+                      logits_eos_inf=False, confidence_eos_eot_inf=False, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
     
     2. Dilated Schedule
     generate_dus(model, prompt, attention_mask=None, gen_length=256, block_length=32,
                       temperature=0., remasking='confidence', mask_id=126336, scheduler='dilated',
-                      base=2, base_skip=1, logits_eos_inf=False, confidence_eos_eot_inf=False)
+                      base=2, base_skip=1, logits_eos_inf=False, confidence_eos_eot_inf=False, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
     
     Note: Number of steps is determined automatically by the schedule (binary/dilated),
     not by a steps parameter. The schedule creates hierarchical levels of unmasking.
@@ -18,6 +18,13 @@
 import torch
 from typing import Optional, List
 from schedulers.utils import add_gumbel_noise, get_mask_by_confidence, get_mask_by_entropy, check_eos_stop_condition
+import os
+
+if os.environ.get('TRACING_ENABLED', 'False') == 'True':
+    from traces.trace_wrapper import trace_scheduler
+else:
+    def trace_scheduler(*args, **kwargs):
+        return lambda x: x
 
 
 def dilated_unmask_levels(start: int, end: int, base: int = 2, skip_exp: int = 1) -> List[List[int]]:
@@ -121,6 +128,7 @@ def merge_last_level(levels: List[List[int]]) -> List[List[int]]:
 
 
 @ torch.no_grad()
+@trace_scheduler()  # tracing decorator
 def generate_dus(
     model,
     prompt,
@@ -136,6 +144,11 @@ def generate_dus(
     confidence_threshold=0.1,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
+    trace_name=None,
+    upload_to_wandb=True,
+    intervention_mode=None,
+    intervention_steps=None,
+    intervention_k=1,
 ):
     '''
     Args:
@@ -153,6 +166,11 @@ def generate_dus(
         confidence_threshold: Threshold below which tokens are remasked.
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
         confidence_eos_eot_inf: Whether to set the confidence of EOS and EoT token to -inf. See Appendix B.4 of LLaDA for details
+        trace_name: Optional trace name. If provided, trace will be saved to disk.
+        upload_to_wandb: If True and trace_name is provided, upload trace to wandb as artifact.
+        intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
+        intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
+        intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
     
     Note: Number of steps is determined automatically by the schedule algorithm,
     not by a parameter. Binary search and dilated schedules create hierarchical
