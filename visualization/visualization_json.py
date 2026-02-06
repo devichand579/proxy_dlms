@@ -131,29 +131,59 @@ def convert_html_to_png_for_gif(html_dir: str, output_dir: str, size: tuple = (1
         except Exception as e:
             print(f"Error converting step {step}: {e}")
 
-MASK_ID = 126336  # Mask token ID
+# Default mask token ID (LLaDA); overridden by get_mask_token_id(tokenizer) when model is loaded
+DEFAULT_MASK_ID = 126336
+
+def get_mask_token_id(tokenizer) -> int:
+    """
+    Get mask token ID from the tokenizer for the chosen model.
+    Tries known mask token strings, then falls back to DEFAULT_MASK_ID.
+    """
+    if tokenizer is None:
+        return DEFAULT_MASK_ID
+    try:
+        unk_id = getattr(tokenizer, "unk_token_id", None)
+        if unk_id is None:
+            unk_id = tokenizer.convert_tokens_to_ids(["<unk>"])
+            unk_id = unk_id[0] if unk_id else -1
+    except (IndexError, TypeError, KeyError):
+        unk_id = -1
+    for token_str in ["<|mdm_mask|>", "[MASK]", "<mask>", "<|mask|>"]:
+        try:
+            tid = tokenizer.convert_tokens_to_ids(token_str)
+            if isinstance(tid, list):
+                tid = tid[0] if tid else None
+            if tid is not None and tid != unk_id:
+                return int(tid)
+        except (IndexError, TypeError, KeyError):
+            continue
+    return DEFAULT_MASK_ID
 
 def load_trace_json(json_path: str) -> Dict:
     """Load trace JSON file."""
     with open(json_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-def reconstruct_tokens_at_step(trace: Dict, step: int, tokenizer) -> List[str]:
+def reconstruct_tokens_at_step(trace: Dict, step: int, tokenizer, mask_id: Optional[int] = None) -> List[str]:
     """
     Reconstruct the token sequence at a specific step.
     At each step:
     - Positions that are still masked (mask_index[i] == True) show predictions
     - Positions that are unmasked (mask_index[i] == False) show the final token
+
+    mask_id: Mask token ID for the chosen model. If None, derived from tokenizer via get_mask_token_id().
     """
+    if mask_id is None:
+        mask_id = get_mask_token_id(tokenizer)
     prompt = trace['prompt'][0]  # Get first batch
     final_sequence = trace['final_sequence'][0]  # Get first batch
-    
+
     # Get all step traces
     step_traces = trace.get('step_traces', [])
-    
+
     # Initialize mask_state
     mask_state = []
-    
+
     if step >= len(step_traces):
         # Use final sequence if step is beyond available traces
         token_ids = final_sequence
@@ -162,13 +192,13 @@ def reconstruct_tokens_at_step(trace: Dict, step: int, tokenizer) -> List[str]:
         step_trace = step_traces[step]
         mask_index = step_trace.get('mask_index', [])
         predictions = step_trace.get('predictions', None)
-        
+
         mask_state = mask_index[0] if mask_index else []
-        
+
         # Build token sequence: use predictions where masked, final_sequence where unmasked
         token_ids = []
         preds = predictions[0] if predictions else None
-        
+
         seq_len = len(final_sequence)
         for i in range(seq_len):
             if i < len(mask_state) and mask_state[i]:
@@ -176,22 +206,27 @@ def reconstruct_tokens_at_step(trace: Dict, step: int, tokenizer) -> List[str]:
                 if preds and i < len(preds):
                     token_ids.append(preds[i])
                 else:
-                    token_ids.append(MASK_ID)
+                    token_ids.append(mask_id)
             else:
                 # Unmasked: show final token
                 token_ids.append(final_sequence[i])
-    
-    # Convert token IDs to text tokens
+
+    # Convert token IDs to text tokens (mask display string from tokenizer when possible)
+    try:
+        mask_display = tokenizer.convert_ids_to_tokens([mask_id])[0] if tokenizer else '<|mdm_mask|>'
+    except (IndexError, TypeError, KeyError):
+        mask_display = '<|mdm_mask|>'
+
     tokens = []
     for i, token_id in enumerate(token_ids):
         # Check if this position is still masked
         is_masked = (i < len(mask_state) and mask_state[i])
-        
+
         if is_masked:
             # Still masked at this step - show as mask
-            tokens.append('<|mdm_mask|>')
-        elif token_id == MASK_ID:
-            tokens.append('<|mdm_mask|>')
+            tokens.append(mask_display)
+        elif token_id == mask_id:
+            tokens.append(mask_display)
         else:
             try:
                 # Convert token ID to token text
@@ -369,7 +404,12 @@ def main(json_path: str, model_dir: str = "./models/llada", output_dir: Optional
     
     print(f"Loading tokenizer from {model_dir}...")
     tokenizer = load_tokenizer(model_dir)
-    
+    mask_id = get_mask_token_id(tokenizer)
+    try:
+        mask_display = tokenizer.convert_ids_to_tokens([mask_id])[0]
+    except (IndexError, TypeError, KeyError):
+        mask_display = '<|mdm_mask|>'
+
     # Determine number of steps
     step_traces = trace.get('step_traces', [])
     num_steps = len(step_traces)
@@ -401,14 +441,14 @@ def main(json_path: str, model_dir: str = "./models/llada", output_dir: Optional
         if (step + 1) % 10 == 0:
             print(f"  Processing step {step + 1}/{num_steps}...")
         
-        # Reconstruct tokens at this step
-        tokens = reconstruct_tokens_at_step(trace, step, tokenizer)
-        
+        # Reconstruct tokens at this step (mask_id from chosen model)
+        tokens = reconstruct_tokens_at_step(trace, step, tokenizer, mask_id=mask_id)
+
         # Truncate or pad to sequence length
         if len(tokens) > seq_length:
             tokens = tokens[:seq_length]
         elif len(tokens) < seq_length:
-            tokens.extend(['<|mdm_mask|>'] * (seq_length - len(tokens)))
+            tokens.extend([mask_display] * (seq_length - len(tokens)))
         
         # Get drop/swap positions for this step (from step_traces[step] = state after this step)
         intervention = get_intervention_at_step(trace, step)
