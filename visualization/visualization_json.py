@@ -26,7 +26,13 @@ def convert_png_to_gif(png_dir: str, output_gif: str = None, duration: int = 100
     if not png_dir.exists():
         raise FileNotFoundError(f"PNG directory not found: {png_dir}")
     
-    png_files = sorted(png_dir.glob('visualization_step_*.png'))
+    def _step_number(p: Path) -> int:
+        try:
+            return int(p.stem.split("_")[-1])
+        except (ValueError, IndexError):
+            return -1
+
+    png_files = sorted(png_dir.glob("visualization_step_*.png"), key=_step_number)
     if not png_files:
         raise ValueError(f"No PNG files found in {png_dir}")
     
@@ -54,6 +60,17 @@ def convert_png_to_gif(png_dir: str, output_gif: str = None, duration: int = 100
         loop=loop
     )
     print(f"GIF saved to {output_gif}")
+
+
+def _png_height_for_sequence(seq_length: int, width: int = 1200) -> int:
+    """Compute PNG height so all token rows fit. Token box ~123px wide, ~40px tall per row."""
+    token_width_with_margin = 123
+    tokens_per_row = max(1, width // token_width_with_margin)
+    rows = (seq_length + tokens_per_row - 1) // tokens_per_row
+    row_height_px = 42
+    header_legend_padding = 280  # h2, legend, body padding
+    return header_legend_padding + rows * row_height_px
+
 
 def convert_html_to_png_for_gif(html_dir: str, output_dir: str, size: tuple = (1200, 800), 
                                  start_step: int = 0, end_step: int = None):
@@ -85,6 +102,17 @@ def convert_html_to_png_for_gif(html_dir: str, output_dir: str, size: tuple = (1
     hti = Html2Image()
     hti.browser.use_new_headless = None
     hti.output_path = output_dir
+    # Reduce Chrome GPU/overlay stderr noise when running headless (SharedImageManager etc.)
+    extra_flags = [
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--disable-dev-shm-usage",
+        "--disable-gpu-compositing",
+        "--disable-features=VizDisplayCompositor",
+    ]
+    for flag in extra_flags:
+        if flag not in hti.browser.flags:
+            hti.browser.flags.append(flag)
     
     for step in range(start_step, end_step + 1):
         html_path = html_dir / f'visualization_step_{step}.html'
@@ -174,6 +202,27 @@ def reconstruct_tokens_at_step(trace: Dict, step: int, tokenizer) -> List[str]:
     
     return tokens
 
+def get_intervention_at_step(trace: Dict, step: int) -> Dict[str, set]:
+    """
+    Get drop/swap positions for a given step from step_traces.
+    Returns dict with keys: dropped_positions, swapped_out, swapped_in (sets of position indices).
+    """
+    result = {"dropped_positions": set(), "swapped_out": set(), "swapped_in": set()}
+    step_traces = trace.get("step_traces", [])
+    if step < 0 or step >= len(step_traces):
+        return result
+    st = step_traces[step]
+    if not st.get("intervention_applied"):
+        return result
+    meta = st.get("metadata", {})
+    if st.get("intervention_type") == "drop":
+        result["dropped_positions"] = set(meta.get("dropped_positions", []))
+    elif st.get("intervention_type") == "swap":
+        result["swapped_out"] = set(meta.get("swapped_out", []))
+        result["swapped_in"] = set(meta.get("swapped_in", []))
+    return result
+
+
 def track_unmasking_order(trace: Dict) -> Dict[int, int]:
     """
     Track when each position was first unmasked.
@@ -225,11 +274,21 @@ def generate_background_color(step: int, max_step: int) -> str:
     
     return f"#{r:02x}{g:02x}{b:02x}"
 
-def generate_step_visualization(current_step: int, current_tokens: List[str], 
-                               token_steps: Dict[int, int], max_step: int) -> str:
-    """Generate visualization HTML for specific step."""
+def generate_step_visualization(
+    current_step: int,
+    current_tokens: List[str],
+    token_steps: Dict[int, int],
+    max_step: int,
+    dropped_positions: Optional[set] = None,
+    swapped_out: Optional[set] = None,
+    swapped_in: Optional[set] = None,
+) -> str:
+    """Generate visualization HTML for specific step. Optionally highlight drop/swap tokens."""
+    dropped_positions = dropped_positions or set()
+    swapped_out = swapped_out or set()
+    swapped_in = swapped_in or set()
+
     html = []
-    
     for idx, token in enumerate(current_tokens):
         style = [
             "color: #000000",
@@ -249,31 +308,50 @@ def generate_step_visualization(current_step: int, current_tokens: List[str],
             "white-space: nowrap",
             "overflow: hidden",
             "text-overflow: ellipsis",
-            "box-sizing: border-box"
+            "box-sizing: border-box",
         ]
 
-        if token == '<|mdm_mask|>':
+        if token == "<|mdm_mask|>":
             style.extend([
                 "background: #f8fafc",
-                "border: 2px solid #ffffff",
+                "border: 2px solid #e2e8f0",
                 "font-weight: 800",
                 "text-transform: uppercase",
-                "padding: 4px 6px"
+                "padding: 4px 6px",
             ])
-            display_text = "Mask"
+            if idx in dropped_positions:
+                style.extend([
+                    "background: #fff7ed",
+                    "border: 2px solid #ea580c",
+                    "box-shadow: 0 0 0 1px #ea580c",
+                ])
+                display_text = "Dropped"
+            elif idx in swapped_out:
+                style.extend([
+                    "background: #faf5ff",
+                    "border: 2px solid #7c3aed",
+                    "box-shadow: 0 0 0 1px #7c3aed",
+                ])
+                display_text = "Swapped out"
+            else:
+                display_text = "Mask"
         else:
             # Get the step when this token was unmasked
             unmask_step = token_steps.get(idx, max_step + 1)
             bg_color = generate_background_color(unmask_step, max_step)
             style.append(f"background-color: {bg_color}")
+            if idx in swapped_in:
+                style.extend([
+                    "border: 2px solid #059669",
+                    "box-shadow: 0 0 0 1px #059669",
+                ])
             # Clean up token text for display
-            display_text = token.replace('Ġ', ' ').strip()
-            if not display_text or display_text == '':
+            display_text = token.replace("Ġ", " ").strip()
+            if not display_text or display_text == "":
                 display_text = "␣"
-            
+
         html.append(f'<span style="{"; ".join(style)}">{display_text}</span>')
-    
-    return '\n'.join(html)
+    return "\n".join(html)
 
 def main(json_path: str, model_dir: str = "./models/llada", output_dir: Optional[str] = None,
          convert_to_gif: bool = False, gif_duration: int = 100, gif_loop: int = 0,
@@ -332,18 +410,33 @@ def main(json_path: str, model_dir: str = "./models/llada", output_dir: Optional
         elif len(tokens) < seq_length:
             tokens.extend(['<|mdm_mask|>'] * (seq_length - len(tokens)))
         
-        # Generate HTML
+        # Get drop/swap positions for this step (from step_traces[step] = state after this step)
+        intervention = get_intervention_at_step(trace, step)
+        
+        # Generate HTML (with drop/swap highlighting when present)
         html_content = generate_step_visualization(
-            step, tokens, unmasking_order, num_steps - 1
+            step,
+            tokens,
+            unmasking_order,
+            num_steps - 1,
+            dropped_positions=intervention["dropped_positions"],
+            swapped_out=intervention["swapped_out"],
+            swapped_in=intervention["swapped_in"],
         )
         
-        # Create legend
+        # Create legend: step colors + intervention labels
         example_steps = [0, num_steps // 4, num_steps // 2, 3 * num_steps // 4, num_steps - 1]
         example_steps = [s for s in example_steps if s < num_steps]
         example_colors = [generate_background_color(s, num_steps - 1) for s in example_steps]
         legend_html = ''.join(
             f'<div style="background-color: {color}; color: black; padding: 10px; border-radius: 5px; min-width: 80px; text-align: center;">Step {s}</div>'
             for s, color in zip(example_steps, example_colors)
+        )
+        # Intervention legend (drop / swap)
+        legend_html += (
+            '<div style="background: #fff7ed; border: 2px solid #ea580c; color: black; padding: 10px; border-radius: 5px; min-width: 90px; text-align: center;">Dropped</div>'
+            '<div style="background: #faf5ff; border: 2px solid #7c3aed; color: black; padding: 10px; border-radius: 5px; min-width: 90px; text-align: center;">Swapped out</div>'
+            '<div style="background: #ecfdf5; border: 2px solid #059669; color: black; padding: 10px; border-radius: 5px; min-width: 90px; text-align: center;">Swapped in</div>'
         )
         
         # Write HTML file
@@ -376,7 +469,7 @@ def main(json_path: str, model_dir: str = "./models/llada", output_dir: Optional
         <h2>Generation Step {step}</h2>
         <div>{html_content}</div>
         
-        <h3>Color Legend</h3>
+        <h3>Color Legend (step order + drop/swap)</h3>
         <div class="legend">{legend_html}</div>
     </div>
 </body>
@@ -398,15 +491,20 @@ def main(json_path: str, model_dir: str = "./models/llada", output_dir: Optional
         print("Converting HTML to PNG, then to GIF...")
         print("="*50)
         
-        # First convert HTML to PNG
+        # First convert HTML to PNG (auto-size height so all token rows fit)
         png_output_dir = output_dir.replace('html/', 'png/')
         html_to_png_success = False
+        png_w, png_h = png_size
+        auto_height = _png_height_for_sequence(seq_length, png_w)
+        effective_height = max(png_h, auto_height)
+        if effective_height > png_h:
+            print(f"  Using height {effective_height}px so all {seq_length} tokens fit (~{effective_height // 42} rows).")
         
         try:
             convert_html_to_png_for_gif(
                 output_dir,
                 png_output_dir,
-                size=png_size,
+                size=(png_w, effective_height),
                 start_step=0,
                 end_step=num_steps - 1
             )
@@ -440,7 +538,7 @@ def main(json_path: str, model_dir: str = "./models/llada", output_dir: Optional
                     duration=gif_duration,
                     loop=gif_loop
                 )
-                print(f"\n✓ GIF saved to {gif_output}")
+                print(f"\n GIF saved to {gif_output}")
             except Exception as e:
                 print(f"Error during PNG to GIF conversion: {e}")
                 print(f"\nYou can manually convert PNG to GIF using:")
@@ -457,7 +555,7 @@ if __name__ == "__main__":
                        help='Output directory for HTML files (default: html/{filename})')
     parser.add_argument('--convert_to_gif', action='store_true',
                        help='Convert HTML visualizations to animated GIF (requires html2image)')
-    parser.add_argument('--gif_duration', type=int, default=100,
+    parser.add_argument('--gif_duration', type=int, default=300,
                        help='GIF frame duration in milliseconds (default: 100)')
     parser.add_argument('--gif_loop', type=int, default=0,
                        help='GIF loop count (0 = infinite, default: 0)')
