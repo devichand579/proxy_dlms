@@ -12,9 +12,9 @@ from schedulers.fdm import generate_fdm
 
 
 @ torch.no_grad()
-def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion", strategy="confidence"):
+def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion", strategy="confidence",trace_name=None, upload_to_wandb=True, intervention_mode=None, intervention_steps=None, intervention_k=1):
     '''
-        modes - pure_diffusion, block_diffusion, top_k, FHS, EB_sampler, Dilated Scheduling
+        modes - pure_diffusion, block_diffusion, top_k_confidence, top_k_margin, FHS, EB_sampler, Dilated Scheduling, FDM
         strategies - confidence, random, top_margin, entropy
     '''
     
@@ -25,26 +25,33 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
     total_blocks = 0
 
     # Helper function for single generation call
-    def run_single_generation(prompt, mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion", strategy="confidence"):
+    def run_single_generation(prompt, mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion", strategy="confidence",trace_name=None, upload_to_wandb=True, intervention_mode=None, intervention_steps=None, intervention_k=1):
         if mode == "pure_diffusion":
             assert strategy == "confidence" or strategy == "random", "strategy must be confidence or random"
-            return generate_llada(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy)
+            assert block_length == gen_length, "Block length must be equal to gen_length"
+            return generate_llada(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy, trace_name=trace_name, upload_to_wandb=upload_to_wandb, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k)
         elif mode == "block_diffusion":
+            assert block_length < gen_length, "Block length must be less than gen_length"
             assert strategy == "confidence" or strategy == "random", "strategy must be confidence or random"
-            return generate_llada(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy)
+            return generate_llada(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy, trace_name=trace_name, upload_to_wandb=upload_to_wandb, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k)
         elif mode == "top_k":
+            assert block_length == gen_length, "Block length must be equal to gen_length"
             assert strategy == "confidence" or strategy == "top_margin" or strategy == "entropy" or strategy == "random", "strategy must be confidence, top_margin, entropy, or random"
-            return generate_topk(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy)
+            return generate_topk(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy, trace_name=trace_name, upload_to_wandb=upload_to_wandb, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k)
         elif mode == "fhs":
-            return generate_fhs(model, prompt, mask, steps=steps, gen_length=gen_length, temperature=1.0, pass_time_to_model=True)
+            assert block_length == None, "Block length must be None"
+            return generate_fhs(model, prompt, mask, steps=steps, gen_length=gen_length, temperature=1.0, pass_time_to_model=True, trace_name=trace_name, upload_to_wandb=upload_to_wandb, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k)
         elif mode == "eb_sampler":
+            assert block_length == gen_length, "Block length must be equal to gen_length"
             assert strategy == "confidence" or strategy == "margin" or strategy == "entropy" , "strategy must be confidence, top_margin, entropy, or random"
-            return generate_EB(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, gamma=0.1, E=strategy, temperature=0.)
+            return generate_EB(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, gamma=0.1, E=strategy, temperature=0., trace_name=trace_name, upload_to_wandb=upload_to_wandb, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k)
         elif mode == "dus":
+            assert block_length <= gen_length, "Block length must be less than or equal to gen_length"
             assert strategy == "confidence" or strategy == "entropy" ,"strategy must be confidence, entropy"
-            return generate_dus(model, prompt, mask, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy, scheduler="dilated", base=2, base_skip=1, confidence_threshold=0.1)
+            return generate_dus(model, prompt, mask, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy, scheduler="dilated", base=2, base_skip=1, confidence_threshold=0.1, trace_name=trace_name, upload_to_wandb=upload_to_wandb, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k)
         elif mode == "fdm":
-            return generate_fdm(model, prompt, mask, steps=steps, gen_length=gen_length, K1=8, N=8, eta1=0.8, eta2=0.7, gamma=0.2, temperature=0., mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, global_scale=1.0)
+            assert block_length == None, "Block length must be None"
+            return generate_fdm(model, prompt, mask, steps=steps, gen_length=gen_length, K1=2, N=4, eta1=0.8, eta2=0.7, gamma=0.5, temperature=0., mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, global_scale=1.0, trace_name=trace_name, upload_to_wandb=upload_to_wandb, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
@@ -57,12 +64,12 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
             prompt = input_ids[i:i+1]
             mask = attention_mask[i:i+1] if attention_mask is not None else None
             
-            future = executor.submit(run_single_generation, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, mode=mode, strategy=strategy)
+            future = executor.submit(run_single_generation, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, mode=mode, strategy=strategy, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k)
             futures.append(future)
 
     # Collect results for all samples
     for f in futures:
-        if mode == "FHS":
+        if mode == "fhs" or mode == "fdm":
             gen, steps_taken = f.result()
             all_generated.append(gen)
             total_steps += steps_taken
@@ -77,7 +84,7 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
     
     end_time = time.time()
     total_time = end_time - start_time
-    if mode == "FHS":
+    if mode == "fhs" or mode == "fdm":
         return final_generated, total_steps, total_time
     else:
         return final_generated, total_steps, total_blocks, total_time

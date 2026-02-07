@@ -1,7 +1,7 @@
 '''
     FDM (Foreseeing Decoding Method) scheduler
-    generate_fdm(model, prompt, attention_mask=None, steps=128, gen_length=128,
-                 K1=8, N=8, eta1=0.8, eta2=0.7, gamma=0.2, temperature=0.,
+    generate_fdm(model, prompt, attention_mask=None, steps=128, gen_length=256,
+                 K1=2, N=4, eta1=0.8, eta2=0.7, gamma=0.5, temperature=0.,
                  mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False,
                  global_scale=1.0, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
 '''
@@ -162,12 +162,12 @@ def generate_fdm(
     prompt,
     attention_mask=None,
     steps=128,
-    gen_length=128,
-    K1=8,
-    N=8,
+    gen_length=256,
+    K1=2,
+    N=4,
     eta1=0.8,
     eta2=0.7,
-    gamma=0.2,
+    gamma=0.5,
     temperature=0.,
     mask_id=126336,
     logits_eos_inf=False,
