@@ -103,6 +103,9 @@ class LLaDAEvalHarness(LM):
         mode='pure_diffusion',
         strategy='confidence',
         compile_model=False,
+        intervention_mode=None,
+        intervention_steps=None,
+        intervention_k=1,
         device="cuda",
         task_name=None,
     ):
@@ -126,6 +129,9 @@ class LLaDAEvalHarness(LM):
             mode: 'pure_diffusion' or 'block_diffusion' or 'top_k'.
             strategy: 'confidence' or 'random' or 'top_margin' or 'entropy'.
             compile_model: Whether to compile model with torch.compile for faster inference
+            intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
+            intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
+            intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
         '''
         super().__init__()
 
@@ -136,7 +142,10 @@ class LLaDAEvalHarness(LM):
         self.model.eval()
         self.mode = str(mode)
         self.strategy = str(strategy)
-
+        self.intervention_mode = str(intervention_mode)
+        self.intervention_steps = list(intervention_steps) if intervention_steps is not None else None
+        self.intervention_k = int(intervention_k)
+        
         self.mask_id = int(mask_id)
         if self.tokenizer.padding_side != 'left':
             self.tokenizer.padding_side = 'left'

@@ -10,7 +10,6 @@ MODE=""
 TASK_NAME=""
 MODEL=""
 COMPILE_MODEL=""
-N_DEVICES=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --batch_size)
@@ -80,6 +79,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0  # UNSET if are runni
 # Wandb configuration 
 export WANDB_API_KEY=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
 export WANDB_PROJECT=strace
+export TRACING_ENABLED=FALSE
 
 # Set gen_length and steps based on task
 # For humaneval and mbpp: gen_length=512, steps=512
@@ -137,5 +137,5 @@ echo "  Block Length: $BLOCK_LENGTH"
 echo "  Compile Model: $COMPILE_MODEL"
 echo "  Num Fewshot: $NUM_FEWSHOT"
 echo ""
-accelerate launch eval_llada.py -L 4 --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME} --wandb_args project=${WANDB_PROJECT},name=${WANDB_NAME} --write_out --output_path outputs/${MODEL}_${TASK_NAME}_${MODE}_${TIMESTAMP}.json --log_samples --cache_requests
+accelerate launch eval.py -L 4 --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME} --wandb_args project=${WANDB_PROJECT},name=${WANDB_NAME} --write_out --output_path outputs/${MODEL}_${TASK_NAME}_${MODE}_${TIMESTAMP}.json --log_samples --cache_requests
 
