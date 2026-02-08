@@ -3,7 +3,6 @@
 #SBATCH --output=job_outputs/strace_job_out_%j.out
 #SBATCH --error=job_outputs/strace_job_err_%j.err
 #SBATCH --ntasks=1
-#SBATCH --ntasks-per-nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=72:00:00
