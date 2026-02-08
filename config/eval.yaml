@@ -22,8 +22,8 @@ intervention:
   k: 1
 
 # Logging
-wandb: false
-tracing_enabled: false
+wandb: true
+tracing_enabled: true
 
 # Env / paths (optional overrides)
 cuda_visible_devices: "1"

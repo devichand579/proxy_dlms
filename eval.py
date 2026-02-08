@@ -19,7 +19,6 @@ from traces.trace_wrapper import _task_trace_list_ctx
 import warnings
 import json
 from dill._dill import PicklingWarning
-import time
 import logging
 import os
 from datetime import datetime

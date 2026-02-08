@@ -40,14 +40,14 @@ def get_num_fewshot(task_name: str) -> int:
         return 4
     if "mbpp" in task_name:
         return 4
-    if "bbh" in task_name:
-        return 3
     if "truthfulqa" in task_name:
         return 0
     return 0
 
 
 def get_gen_length_steps(task_name: str) -> tuple[int, int]:
+    if "truthfulqa" in task_name:
+        return 128, 128
     if "humaneval" in task_name or "mbpp" in task_name:
         return 512, 512
     return 256, 256
@@ -126,7 +126,7 @@ def main():
             steps_arg = re.sub(r",", "_", str(intervention_steps or "0"))
         model_args += f",intervention_mode={intervention_mode},intervention_steps={steps_arg},intervention_k={intervention_k}"
 
-    # Env
+    # Env (match eval.sh)
     env = os.environ.copy()
     env.setdefault("HF_ALLOW_CODE_EVAL", "1")
     env.setdefault("HF_DATASETS_TRUST_REMOTE_CODE", "true")
@@ -135,8 +135,8 @@ def main():
     env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
     env["CUDA_VISIBLE_DEVICES"] = str(cfg.get("cuda_visible_devices", "1"))
     env["TRACING_ENABLED"] = "TRUE" if tracing_enabled else "FALSE"
-    if cfg.get("wandb_project"):
-        env.setdefault("WANDB_PROJECT", str(cfg.wandb_project))
+    env.setdefault("WANDB_API_KEY", "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")
+    env.setdefault("WANDB_PROJECT", str(cfg.get("wandb_project", "strace")))
 
     # Print config
     print("Configuration:")
@@ -160,7 +160,7 @@ def main():
         "--write_out",
         "--output_path", f"outputs/{output_suffix}.json",
         "--log_samples",
-        "--cache_requests",
+        "--cache_requests", "true",
     ]
     if wandb:
         cmd += ["--wandb_args", f"project={env.get('WANDB_PROJECT', 'strace')},name={wandb_name}"]
