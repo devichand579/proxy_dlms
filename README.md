@@ -89,6 +89,29 @@ The script automatically sets:
 - **Logs**: `logs/{model}_{task_name}_{mode}_{timestamp}.log`
 - **Samples**: Included in output JSON when using `--log_samples`
 
+### Hydra launcher (SLURM multirun)
+
+For running many eval configs on a SLURM cluster, use the Hydra entry point and the submitit launcher.
+
+**Install:** `pip install hydra-core hydra-submitit-launcher` (or use `requirements.txt`).
+
+**Single run (local, same as run_eval.py):**
+```bash
+python launch_eval.py task_name=gsm8k mode=pd
+```
+
+**Multirun locally (multiple configs, sequential):**
+```bash
+python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun
+```
+
+**Multirun on SLURM (one SLURM job per config combination):**
+```bash
+python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
+```
+
+Config: `config/config.yaml`. Launcher defaults to local; use `launcher=slurm` for cluster. SLURM defaults (partition, time, mem, GPUs) are in `config/launcher/slurm.yaml` and match `sample_slurm.sh` (dgx2, 72h, 96G, 1 GPU). Override from CLI if needed, e.g. `hydra.launcher.partition=other`.
+
 
 
 

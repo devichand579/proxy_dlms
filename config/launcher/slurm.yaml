@@ -1,0 +1,15 @@
+# Use Submitit SLURM launcher. Requires: --multirun (e.g. task_name=gsm8k,humaneval --multirun launcher=slurm)
+# Cluster params match sample_slurm.sh (partition=dgx2, 72h, 96G, 1 GPU, 8 CPUs).
+defaults:
+  - override hydra/launcher: submitit_slurm
+
+hydra:
+  launcher:
+    partition: dgx2
+    qos: dgx2
+    timeout_min: 4320   # 72h
+    mem_gb: 48
+    gres: gpu:1
+    cpus_per_task: 8
+    nodes: 1
+    tasks_per_node: 1

@@ -1,12 +1,16 @@
 """
-Launch eval with Hydra config. Config is in config/eval.yaml; override any key from CLI.
+Launch eval with Hydra. Supports local runs and SLURM multirun via submitit launcher.
 
-  python run_eval.py                          # use config defaults
-  python run_eval.py task_name=gsm8k batch_size=4
-  python run_eval.py mode=pd task_name=humaneval wandb=true tracing_enabled=true
-  python run_eval.py intervention.mode=drop intervention.steps=0,128,256
+  # Single run (local, same as run_eval.py)
+  python launch_eval.py task_name=gsm8k mode=pd
 
-Then: accelerate launch eval.py ... is run with the composed config.
+  # Multirun locally (multiple configs, sequential)
+  python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun
+
+  # Multirun on SLURM (one job per combination)
+  python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
+
+Config: config/config.yaml. Launcher defaults: config/launcher/local.yaml; use launcher=slurm for cluster.
 """
 
 import os
@@ -16,7 +20,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from omegaconf import OmegaConf
+import hydra
+from omegaconf import DictConfig
 
 # Mode shortcut -> (full_mode, strategy)
 MODE_MAP = {
@@ -48,51 +53,41 @@ def get_num_fewshot(task_name: str) -> int:
 def get_gen_length_steps(task_name: str) -> tuple[int, int]:
     if "truthfulqa" in task_name:
         return 128, 128
-    if "humaneval" in task_name or "mbpp" in task_name:
-        return 512, 512
-    return 256, 256
+    return 512, 512
 
 
-def main():
-    # Load config: config/eval.yaml, with CLI overrides
-    config_path = Path(__file__).parent / "config"
-    if not (config_path / "eval.yaml").exists():
-        print(f"Config not found: {config_path / 'eval.yaml'}", file=sys.stderr)
-        sys.exit(1)
+def _to_bool(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.lower() in ("true", "1", "yes")
+    return bool(val)
 
-    cli_overrides = [a for a in sys.argv[1:] if "=" in a and not a.startswith("-")]
-    cfg = OmegaConf.load(config_path / "eval.yaml")
-    if cli_overrides:
-        overrides = OmegaConf.from_dotlist(cli_overrides)
-        cfg = OmegaConf.merge(cfg, overrides)
 
-    batch_size = cfg.get("batch_size", 2)
+def run(cfg: DictConfig) -> int:
+    """Build and run the accelerate eval command from Hydra config."""
+    # Use script dir as project root so SLURM jobs (which may run from sweep dir) still find eval.py
+    project_root = Path(__file__).resolve().parent
+    batch_size = int(cfg.get("batch_size", 2))
     mode_input = str(cfg.get("mode", "pd")).strip().lower()
     task_name = str(cfg.get("task_name", "gsm8k"))
     model = str(cfg.get("model", "llada"))
-    compile_model = cfg.get("compile_model", False)
-    if isinstance(compile_model, str):
-        compile_model = compile_model.lower() in ("true", "1", "yes")
-    wandb = cfg.get("wandb", False)
-    if isinstance(wandb, str):
-        wandb = wandb.lower() in ("true", "1", "yes")
-    tracing_enabled = cfg.get("tracing_enabled", False)
-    if isinstance(tracing_enabled, str):
-        tracing_enabled = tracing_enabled.lower() in ("true", "1", "yes")
+    compile_model = _to_bool(cfg.get("compile_model", False))
+    wandb = _to_bool(cfg.get("wandb", False))
+    tracing_enabled = _to_bool(cfg.get("tracing_enabled", False))
 
     intervention = cfg.get("intervention") or {}
     if isinstance(intervention, dict):
         intervention_mode = intervention.get("mode")
         intervention_steps = intervention.get("steps")
-        intervention_k = intervention.get("k", 1)
+        intervention_k = int(intervention.get("k", 1))
     else:
         intervention_mode = None
         intervention_steps = None
         intervention_k = 1
 
-    # Resolve mode
     if mode_input in MODE_MAP:
-        mode, _ = MODE_MAP[mode_input]
+        mode, strategy = MODE_MAP[mode_input]
     else:
         mode = mode_input
 
@@ -102,7 +97,6 @@ def main():
     model_path = f"./models/{model}"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Output / wandb naming
     output_suffix = f"{model}_{task_name}_{mode}_{timestamp}"
     if intervention_mode:
         steps_raw = intervention_steps if intervention_steps is not None else "0"
@@ -113,10 +107,9 @@ def main():
         output_suffix = f"{model}_{task_name}_{mode}_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}_{timestamp}"
     wandb_name = output_suffix
 
-    # Model args for lm_eval (comma-separated; use _ for intervention_steps to avoid breaking parsing)
     model_args = (
         f"model_path={model_path},gen_length={gen_length},steps={steps},"
-        f"block_length={block_length},mode={mode},compile_model={str(compile_model).lower()},"
+        f"block_length={block_length},mode={mode},strategy={str(strategy)},compile_model={str(compile_model).lower()},"
         f"task_name={task_name},trace_name={output_suffix}"
     )
     if intervention_mode:
@@ -126,19 +119,17 @@ def main():
             steps_arg = re.sub(r",", "_", str(intervention_steps or "0"))
         model_args += f",intervention_mode={intervention_mode},intervention_steps={steps_arg},intervention_k={intervention_k}"
 
-    # Env (match eval.sh)
     env = os.environ.copy()
     env.setdefault("HF_ALLOW_CODE_EVAL", "1")
     env.setdefault("HF_DATASETS_TRUST_REMOTE_CODE", "true")
     env.setdefault("LMEVAL_LOG_LEVEL", "INFO")
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
-    env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-    env["CUDA_VISIBLE_DEVICES"] = str(cfg.get("cuda_visible_devices", "1"))
     env["TRACING_ENABLED"] = "TRUE" if tracing_enabled else "FALSE"
+    env.setdefault("CUDA_VISIBLE_DEVICES", "0")
+    env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
     env.setdefault("WANDB_API_KEY", "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")
     env.setdefault("WANDB_PROJECT", str(cfg.get("wandb_project", "strace")))
 
-    # Print config
     print("Configuration:")
     print(f"  batch_size={batch_size} mode={mode} task_name={task_name} model={model}")
     print(f"  compile_model={compile_model} gen_length={gen_length} steps={steps} block_length={block_length}")
@@ -148,8 +139,8 @@ def main():
     print(f"  output: outputs/{output_suffix}.json")
     print()
 
-    # Build command
     cmd = [
+        "env", f"TRACING_ENABLED={'TRUE' if tracing_enabled else 'FALSE'}",
         "accelerate", "launch", "eval.py",
         "-L", "4",
         "--tasks", task_name,
@@ -165,7 +156,12 @@ def main():
     if wandb:
         cmd += ["--wandb_args", f"project={env.get('WANDB_PROJECT', 'strace')},name={wandb_name}"]
 
-    sys.exit(subprocess.run(cmd, env=env, cwd=Path(__file__).parent).returncode)
+    return subprocess.run(cmd, env=env, cwd=project_root).returncode
+
+
+@hydra.main(version_base="1.2", config_path="config", config_name="config")
+def main(cfg: DictConfig) -> None:
+    sys.exit(run(cfg))
 
 
 if __name__ == "__main__":

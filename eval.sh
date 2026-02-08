@@ -1,9 +1,32 @@
 #!/bin/bash
+#SBATCH --job-name=eval_strace
+#SBATCH --output=job_outputs/strace_job_out_%j.out
+#SBATCH --error=job_outputs/strace_job_err_%j.err
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-nodes=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#SBATCH --time=72:00:00
+#SBATCH --partition=dgx2
+#SBATCH --gres=gpu:1
+#SBATCH --qos=dgx2
 
+
+########################################################################################
+# Single eval job via sbatch: run this script with your args and --slurm, e.g.:
+#   sbatch eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --slurm
+# Alternative (Hydra): sbatch --wrap "conda run -n strace python launch_eval.py task_name=gsm8k mode=pd"
+# Multirun on SLURM (one job per config): python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
+
+
+
+########################################################################################
 # Parse command-line arguments
-# Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [--compile_model False] [--intervention_mode drop] [--intervention_steps 0,128,256] [--intervention_k 1] [--wandb True] [--tracing_enabled True]
+# Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [--compile_model False] [--intervention_mode drop] [--intervention_steps 0,128,256] [--intervention_k 1] [--wandb True] [--tracing_enabled True] [--slurm]
 # Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)
 # Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, truthfulqa
+# --slurm: run the eval command under srun (use when script is submitted via sbatch so the job uses the allocated GPU).
+# Local GPU: run without --slurm; optionally export CUDA_VISIBLE_DEVICES=0 before running.
 
 BATCH_SIZE=""
 MODE=""
@@ -16,6 +39,7 @@ INTERVENTION_STEPS=""
 INTERVENTION_K=""
 WANDB=""
 TRACING_ENABLED_ARG=""
+SLURM_MODE=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --batch_size)
@@ -58,9 +82,13 @@ while [[ $# -gt 0 ]]; do
             TRACING_ENABLED_ARG="$2"
             shift 2
             ;;
+        --slurm)
+            SLURM_MODE=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>]"
+            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
             exit 1
             ;;
     esac
@@ -69,11 +97,12 @@ done
 # Check required arguments (intervention and wandb are optional)
 if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "Error: Missing required arguments"
-    echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>]"
+    echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
     echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)"
     echo "  Optional - Intervention: --intervention_mode drop|swap, --intervention_steps 0,128,256, --intervention_k 1"
     echo "  Optional - Wandb: --wandb True to log to wandb"
     echo "  Optional - Tracing: --tracing_enabled True to enable scheduler tracing (writes trace_outputs/<trace_name>.json)"
+    echo "  Optional - SLURM: --slurm to run the eval under srun (for sbatch submissions)"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
     echo "Example with intervention: $0 --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True"
     exit 1
@@ -126,7 +155,12 @@ export HF_DATASETS_TRUST_REMOTE_CODE=true
 export LMEVAL_LOG_LEVEL=INFO
 export TOKENIZERS_PARALLELISM=false
 export HF_TOKEN=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
-export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1  # UNSET if are running with SLURM
+
+# When running locally (not --slurm), you can set CUDA_VISIBLE_DEVICES; when --slurm, leave to SLURM allocation.
+if [[ "$SLURM_MODE" != "true" ]]; then
+    export CUDA_DEVICE_ORDER=PCI_BUS_ID
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
+fi
 
 # Wandb configuration 
 export WANDB_API_KEY=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
@@ -217,6 +251,7 @@ if [[ -n "$INTERVENTION_MODE" ]]; then
 fi
 echo "  Wandb: ${WANDB:-False}"
 echo "  Tracing enabled: ${TRACING_ENABLED_ARG:-False}"
+echo "  SLURM mode (srun): ${SLURM_MODE}"
 if [[ -n "$WANDB_NAME" ]]; then
     echo "  Wandb Name: $WANDB_NAME"
 fi
@@ -228,5 +263,11 @@ ACCEL_CMD="accelerate launch eval.py -L 4 --tasks ${TASK_NAME} --batch_size ${BA
 if [[ "${WANDB,,}" == "true" ]]; then
     ACCEL_CMD="${ACCEL_CMD} --wandb_args project=${WANDB_PROJECT},name=${WANDB_NAME}"
 fi
-eval $ACCEL_CMD
+
+# Run: under srun when --slurm (for sbatch), else directly (local GPU)
+if [[ "$SLURM_MODE" == "true" ]]; then
+    srun bash -c "$ACCEL_CMD"
+else
+    eval $ACCEL_CMD
+fi
 
