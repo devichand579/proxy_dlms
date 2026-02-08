@@ -2,7 +2,8 @@
  Tracing wrapper for schedulers.
 """
 
-from typing import Optional, Callable
+from typing import Optional, Callable, List
+import contextvars
 import functools
 import time
 import torch
@@ -10,6 +11,10 @@ import torch.nn.functional as F
 import numpy as np
 from traces.trace_generator import TracingContext, InterventionHook
 from traces.utils import is_negative_inf, was_position_masked, was_positions_masked, extract_tensor_value, get_value_item, value_matches_x0, build_transfer_index, build_x0_for_trace, ensure_2d_shape, shapes_match, get_x0_trace, _is_tensor_like
+
+# When set by eval.py, sample traces are appended here and written as one file per task. No per-sample save/upload.
+_task_trace_list_ctx: contextvars.ContextVar[Optional[List]] = contextvars.ContextVar("task_trace_list", default=None)
+
 
 class ModelTracer:
     """
@@ -380,7 +385,7 @@ class ModelTracer:
         upload_to_wandb_from_kwargs = kwargs.get('upload_to_wandb', None)
         if upload_to_wandb_from_kwargs is not None:
             self.tracing_context.upload_to_wandb = upload_to_wandb_from_kwargs
-        
+
         # Extract intervention parameters from scheduler kwargs and create hook if provided
         intervention_mode = kwargs.get('intervention_mode', None)
         intervention_steps = kwargs.get('intervention_steps', None)
@@ -455,33 +460,42 @@ class ModelTracer:
         # Record timestamps
         end_time = time.time()
         self.tracing_context.record_timestamps(start_time, end_time)
-        
-        # Upload to wandb if enabled
-        if self.tracing_context.upload_to_wandb and self.tracing_context.trace_name is not None:
+
+        # If eval.py set the task trace list (context var), append here and skip per-sample save/upload
+        task_trace_list = _task_trace_list_ctx.get()
+        if task_trace_list is not None:
             try:
-                self.tracing_context.trace.upload_to_wandb(
-                    self.tracing_context.trace_name,
-                    base_dir=self.tracing_context.base_dir
-                )
+                task_trace_list.append(self.tracing_context.trace.to_dict())
             except Exception as e:
                 import warnings
-                warnings.warn(f"Failed to upload trace to wandb: {e}")
-        
-        # Automatically save trace to disk if trace_name is provided
-        # Skip if uploading to wandb (file already saved during upload)
-        should_save_to_disk = (
-            self.tracing_context.trace_name is not None 
-            and self.tracing_context.save_to_disk
-            and not self.tracing_context.upload_to_wandb
-        )
-        if should_save_to_disk:
-            try:
-                self.tracing_context.save_trace()
-            except Exception as e:
-                import warnings
-                warnings.warn(f"Failed to save trace: {e}")
-        
-        # Return original result 
+                warnings.warn(f"Failed to append trace to task list: {e}")
+        else:
+            # Upload to wandb if enabled
+            if self.tracing_context.upload_to_wandb and self.tracing_context.trace_name is not None:
+                try:
+                    self.tracing_context.trace.upload_to_wandb(
+                        self.tracing_context.trace_name,
+                        base_dir=self.tracing_context.base_dir
+                    )
+                except Exception as e:
+                    import warnings
+                    warnings.warn(f"Failed to upload trace to wandb: {e}")
+
+            # Automatically save trace to disk if trace_name is provided
+            # Skip if uploading to wandb (file already saved during upload)
+            should_save_to_disk = (
+                self.tracing_context.trace_name is not None
+                and self.tracing_context.save_to_disk
+                and not self.tracing_context.upload_to_wandb
+            )
+            if should_save_to_disk:
+                try:
+                    self.tracing_context.save_trace()
+                except Exception as e:
+                    import warnings
+                    warnings.warn(f"Failed to save trace: {e}")
+
+        # Return original result
         return result
 
 

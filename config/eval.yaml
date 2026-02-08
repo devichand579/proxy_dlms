@@ -1,0 +1,31 @@
+# Eval config. Override any key from CLI (key=value).
+#
+# Examples:
+#   python run_eval.py
+#   python run_eval.py task_name=gsm8k batch_size=4
+#   python run_eval.py mode=pd task_name=humaneval wandb=true tracing_enabled=true
+#   python run_eval.py intervention.mode=drop intervention.steps=0,128,256 intervention.k=1
+#
+# Mode: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)
+# Tasks: gsm8k, minerva_math500, humaneval, mbpp, truthfulqa, bbh, gpqa_main_zeroshot, etc.
+
+batch_size: 2
+mode: pd
+task_name: gsm8k
+model: llada
+compile_model: false
+
+# Optional intervention
+intervention:
+  mode: null   # null | drop | swap
+  steps: null # e.g. [0, 128, 256] or "0_128_256"
+  k: 1
+
+# Logging
+wandb: false
+tracing_enabled: false
+
+# Env / paths (optional overrides)
+cuda_visible_devices: "1"
+wandb_project: strace
+# model_path is derived: ./models/${model}

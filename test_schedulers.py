@@ -203,6 +203,7 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
                 wandb_name = f"test_schedulers{scheduler_suffix}_{timestamp}"
             
             wandb.init(
+                settings=wandb.Settings(init_timeout=120),
                 project=wandb_project or "strace",
                 name=wandb_name,
                 config={
@@ -290,6 +291,10 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
                 print(f"{label}:")
                 print(o)
                 print('-' * 50)
+    
+    # Finish wandb run if it was initialized
+    if use_wandb and WANDB_AVAILABLE and wandb.run is not None:
+        wandb.finish()
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test different schedulers')
     parser.add_argument(
