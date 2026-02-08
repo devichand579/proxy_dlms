@@ -6,10 +6,10 @@ defaults:
 hydra:
   launcher:
     partition: dgx2
-    qos: dgx2
-    timeout_min: 4320   # 72h
+    qos: gpu2
+    timeout_max: 4320   # 72h
     mem_gb: 48
     gres: gpu:1
     cpus_per_task: 8
     nodes: 1
-    tasks_per_node: 1
+    ntasks: 1
