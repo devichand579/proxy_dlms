@@ -1,0 +1,2 @@
+# Default: run locally (no SLURM). Use launcher=slurm for cluster.
+# No overrides needed — Hydra uses the basic launcher and runs in the current process.

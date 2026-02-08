@@ -1,5 +1,5 @@
 #!/bin/bash
-
+# ONLY FOR TESTING
 # Help function
 show_help() {
     cat << EOF
@@ -106,6 +106,10 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Initialize conda for this shell session
+eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
+conda activate strace
 
 # Export environment variables
 export TRACING_ENABLED

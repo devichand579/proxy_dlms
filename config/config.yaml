@@ -1,0 +1,33 @@
+# Hydra main config for launch_eval.py
+# Override from CLI: task_name=gsm8k mode=pd batch_size=4
+# Multirun (one job per combination): task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
+
+defaults:
+  - launcher: local
+
+# Eval parameters 
+batch_size: 2
+mode: pd
+task_name: gsm8k
+model: llada
+compile_model: false
+wandb: true
+tracing_enabled: true
+
+# Optional intervention
+intervention:
+  mode: null
+  steps: null
+  k: 1
+
+# Env / paths
+cuda_visible_devices: "1"
+wandb_project: strace
+
+# Hydra: run in project root so outputs/ and trace_outputs/ are in repo
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.override_dirname}
