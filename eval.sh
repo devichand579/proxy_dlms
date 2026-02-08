@@ -8,7 +8,7 @@
 #SBATCH --time=72:00:00
 #SBATCH --partition=dgx2
 #SBATCH --gres=gpu:1
-#SBATCH --qos=dgx2
+#SBATCH --qos=gpu2
 
 
 ########################################################################################
