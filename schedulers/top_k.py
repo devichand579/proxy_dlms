@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import numpy as np
 from schedulers.utils import add_gumbel_noise, get_mask_by_confidence, get_mask_by_entropy, check_eos_stop_condition
 
-if os.environ.get('TRACING_ENABLED', 'False') == 'True':
+if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
     from traces.trace_wrapper import trace_scheduler
 else:
     def trace_scheduler(*args, **kwargs):

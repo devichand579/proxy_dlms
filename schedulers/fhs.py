@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from schedulers.utils import  check_eos_stop_condition
 import os
 
-if os.environ.get('TRACING_ENABLED', 'False') == 'True':
+if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
     from traces.trace_wrapper import trace_scheduler
 else:
     def trace_scheduler(*args, **kwargs):

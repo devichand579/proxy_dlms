@@ -252,7 +252,7 @@ class TracingContext:
         self.trace_name = trace_name
         self.base_dir = base_dir
         self._saved_steps = 0  # Track how many steps have been saved
-        
+
         # Performance options
         self.save_predictions = save_predictions
         self.save_confidences = save_confidences

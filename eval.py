@@ -14,8 +14,10 @@ from tqdm import tqdm
 
 from load_model import load_model_and_tokenizer
 from schedulers.generate import generate
+from traces.trace_wrapper import _task_trace_list_ctx
 
 import warnings
+import json
 from dill._dill import PicklingWarning
 import time
 import logging
@@ -88,6 +90,44 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
+class StreamingTraceWriter:
+    """
+    Writes trace dicts to a JSON file incrementally (one sample at a time) to avoid
+    holding all traces in memory. Thread-safe for use from concurrent scheduler workers.
+    """
+    def __init__(self, filepath: str, task_name: str):
+        self._path = filepath
+        self._task_name = task_name
+        self._count = 0
+        self._lock = threading.Lock()
+        self._f = open(filepath, "w")
+        self._f.write('{"task": ')
+        json.dump(task_name, self._f)
+        self._f.write(', "samples": [')
+        self._f.flush()
+
+    def append(self, trace_dict: dict):
+        with self._lock:
+            if self._count > 0:
+                self._f.write(",")
+            json.dump(trace_dict, self._f)
+            self._count += 1
+            self._f.flush()
+
+    def close(self):
+        with self._lock:
+            if self._f is not None:
+                self._f.write('], "num_samples": ')
+                self._f.write(str(self._count))
+                self._f.write("}")
+                self._f.close()
+                self._f = None
+
+    @property
+    def count(self):
+        return self._count
+
+
 @register_model("llada")
 class LLaDAEvalHarness(LM):
     def __init__(
@@ -107,6 +147,7 @@ class LLaDAEvalHarness(LM):
         intervention_steps=None,
         intervention_k=1,
         device="cuda",
+        trace_name=None,
         task_name=None,
     ):
         '''
@@ -131,6 +172,7 @@ class LLaDAEvalHarness(LM):
             compile_model: Whether to compile model with torch.compile for faster inference
             intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
             intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
+            trace_name: Optional trace name. If provided, trace will be saved to disk and uploaded to wandb as artifact.
             intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
         '''
         super().__init__()
@@ -142,10 +184,17 @@ class LLaDAEvalHarness(LM):
         self.model.eval()
         self.mode = str(mode)
         self.strategy = str(strategy)
-        self.intervention_mode = str(intervention_mode)
-        self.intervention_steps = list(intervention_steps) if intervention_steps is not None else None
+        self.intervention_mode = str(intervention_mode) if intervention_mode is not None else None  # keep None when not set
+        if intervention_steps is None:
+            self.intervention_steps = None
+        elif isinstance(intervention_steps, str):
+            # Parse "0,128,256" or "0_128_256" from CLI
+            self.intervention_steps = [int(x.strip()) for x in re.split(r'[,_]', intervention_steps) if x.strip()]
+        else:
+            self.intervention_steps = list(intervention_steps)
         self.intervention_k = int(intervention_k)
-        
+        self.trace_name = str(trace_name) if trace_name is not None else None
+        self.task_name = task_name if task_name is not None else os.environ.get("TASK_NAME", "unknown")
         self.mask_id = int(mask_id)
         if self.tokenizer.padding_side != 'left':
             self.tokenizer.padding_side = 'left'
@@ -171,28 +220,8 @@ class LLaDAEvalHarness(LM):
         # Lock for thread-safe updates to global statistics
         self._stats_lock = threading.Lock()
         
-        # Extract model name from model_path (e.g., "llada" from "./models/llada")
-        model_name = Path(model_path).name if model_path else "unknown"
-        
-        # Get task name from parameter or environment variable
-        if task_name is None:
-            task_name = os.environ.get("TASK_NAME", "unknown")
-        
-        # Sanitize names for filesystem (replace special chars with underscores)
-        def sanitize_name(name):
-            return re.sub(r'[^a-zA-Z0-9_-]', '_', str(name))
-        
-        model_name = sanitize_name(model_name)
-        task_name = sanitize_name(task_name)
-        
-        # Create logger name: model_task_mode_timestamp
-        # Mode: use short form (pd for pure_diffusion, bd for block_diffusion)
-        mode_short = "pd" if mode == "pure_diffusion" else ("bd" if mode == "block_diffusion" else mode[:2])
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        logger_name = f"{model_name}_{task_name}_{mode_short}_{timestamp}"
-        
         # Set up logger
-        self.logger = setup_logger(logger_name)
+        self.logger = setup_logger(trace_name)
         
         # Initialize wandb if available (check if already initialized by lm-eval)
         self.use_wandb = WANDB_AVAILABLE
@@ -214,6 +243,7 @@ class LLaDAEvalHarness(LM):
 
         self.logger.info(f"Model path: {model_path}")
         self.logger.info(f"Mode: {self.mode}")
+        self.logger.info(f"Strategy: {self.strategy}")
         self.logger.info(f"Batch size: {self.batch_size}")
         self.logger.info(f"MC num: {self.mc_num}")
         self.logger.info(f"Steps: {self.steps}")
@@ -222,6 +252,10 @@ class LLaDAEvalHarness(LM):
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Compile model: {compile_model}")
         self.logger.info(f"Mask id: {self.mask_id}")
+        self.logger.info(f"Trace name: {self.trace_name}")
+        self.logger.info(f"Intervention mode: {self.intervention_mode}")
+        self.logger.info(f"Intervention steps: {self.intervention_steps}")
+        self.logger.info(f"Intervention k: {self.intervention_k}")
     
     @property
     def rank(self):
@@ -367,76 +401,114 @@ class LLaDAEvalHarness(LM):
         total_requests = len(requests)
         if total_requests == 0:
             return []
-        
+
         gen_cfg = requests[0].args[1]
         stop_tokens = gen_cfg.get("until", [])
-        
+
+        # When tracing is enabled, stream each sample's trace to disk (avoids holding all in memory)
+        trace_writer = None
+        if self.trace_name is not None:
+            trace_base_dir = "trace_outputs"
+            os.makedirs(trace_base_dir, exist_ok=True)
+            trace_name_safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', str(self.trace_name))
+            task_trace_path = os.path.join(trace_base_dir, f"{trace_name_safe}.json")
+            trace_writer = StreamingTraceWriter(task_trace_path, getattr(self, "task_name", "unknown"))
+            _task_trace_list_ctx.set(trace_writer)
+
         all_gen_texts = []
         total_steps_taken = 0
         total_blocks_processed = 0
         total_gen_time = 0.0
-        
-        # Split requests into chunks based on batch_size
-        for chunk_start in range(0, total_requests, self.batch_size):
-            chunk_end = min(chunk_start + self.batch_size, total_requests)
-            chunk_requests = requests[chunk_start:chunk_end]
-            chunk_size = len(chunk_requests)
-            
-            # Extract question texts for this chunk
-            chunk_question_texts = [req.args[0] for req in chunk_requests]
-            
-            # Tokenize chunk
-            encoded_outputs = self.tokenizer(
-                chunk_question_texts,
-                add_special_tokens=False,
-                padding=True,
-                return_tensors="pt"
-            )
-            input_ids = encoded_outputs['input_ids'].to(self.device)
-            attention_mask = encoded_outputs['attention_mask'].to(self.device)
-            
-            # Process chunk
-            generated, steps_taken, blocks, gen_time = generate(
-                self.model, 
-                input_ids, 
-                attention_mask, 
-                steps=self.steps,
-                gen_length=self.gen_length,
-                block_length=self.block_length,
-                mode=self.mode,
-                strategy=self.strategy
-            )
-            
-            # Extract generated parts (excluding prompts) and batch decode
-            chunk_gen_texts = self.tokenizer.batch_decode(generated[:, input_ids.shape[1]:], skip_special_tokens=True)
-            
-            # Apply stop tokens
-            for i, gen_text in enumerate(chunk_gen_texts):
-                for stop in stop_tokens:
-                    if stop in gen_text:
-                        chunk_gen_texts[i] = gen_text.split(stop)[0]
-            
-            all_gen_texts.extend(chunk_gen_texts)
-            total_steps_taken += steps_taken
-            total_blocks_processed += blocks
-            total_gen_time += gen_time
-            
-            self.logger.info(f"Processed chunk: {chunk_start}-{chunk_end-1} of {total_requests} requests (chunk size: {chunk_size}, gen time: {gen_time:.4f}s)")
-            
-            # Log chunk metrics to wandb
-            if self.use_wandb and wandb.run is not None:
+
+        try:
+            # Split requests into chunks based on batch_size
+            for chunk_start in range(0, total_requests, self.batch_size):
+                chunk_end = min(chunk_start + self.batch_size, total_requests)
+                chunk_requests = requests[chunk_start:chunk_end]
+                chunk_size = len(chunk_requests)
+
+                # Extract question texts for this chunk
+                chunk_question_texts = [req.args[0] for req in chunk_requests]
+
+                # Tokenize chunk
+                encoded_outputs = self.tokenizer(
+                    chunk_question_texts,
+                    add_special_tokens=False,
+                    padding=True,
+                    return_tensors="pt"
+                )
+                input_ids = encoded_outputs['input_ids'].to(self.device)
+                attention_mask = encoded_outputs['attention_mask'].to(self.device)
+
+                # Process chunk (wrapper appends to task list via context when trace_name is set)
+                generated, steps_taken, blocks, gen_time = generate(
+                    self.model,
+                    input_ids,
+                    attention_mask,
+                    steps=self.steps,
+                    gen_length=self.gen_length,
+                    block_length=self.block_length,
+                    mode=self.mode,
+                    strategy=self.strategy,
+                    trace_name=self.trace_name,
+                    upload_to_wandb=self.use_wandb,
+                    intervention_mode=self.intervention_mode,
+                    intervention_steps=self.intervention_steps,
+                    intervention_k=self.intervention_k,
+                )
+
+                # Extract generated parts (excluding prompts) and batch decode
+                chunk_gen_texts = self.tokenizer.batch_decode(generated[:, input_ids.shape[1]:], skip_special_tokens=True)
+
+                # Apply stop tokens
+                for i, gen_text in enumerate(chunk_gen_texts):
+                    for stop in stop_tokens:
+                        if stop in gen_text:
+                            chunk_gen_texts[i] = gen_text.split(stop)[0]
+
+                all_gen_texts.extend(chunk_gen_texts)
+                total_steps_taken += steps_taken
+                total_blocks_processed += blocks
+                total_gen_time += gen_time
+
+                self.logger.info(f"Processed chunk: {chunk_start}-{chunk_end-1} of {total_requests} requests (chunk size: {chunk_size}, gen time: {gen_time:.4f}s)")
+
+                # Log chunk metrics to wandb
+                if self.use_wandb and wandb.run is not None:
+                    try:
+                        wandb.log({
+                            "chunk/size": chunk_size,
+                            "chunk/gen_time": gen_time,
+                            "chunk/steps_taken": steps_taken,
+                            "chunk/blocks_processed": blocks,
+                            "chunk/throughput_samples_per_sec": chunk_size / gen_time if gen_time > 0 else 0,
+                            "chunk/chunk_index": chunk_start // self.batch_size,
+                        })
+                    except Exception as e:
+                        self.logger.warning(f"Failed to log chunk metrics to wandb: {e}")
+
+            # Close the trace file (footer already written by writer) and optionally upload artifact
+            if trace_writer is not None:
                 try:
-                    wandb.log({
-                        "chunk/size": chunk_size,
-                        "chunk/gen_time": gen_time,
-                        "chunk/steps_taken": steps_taken,
-                        "chunk/blocks_processed": blocks,
-                        "chunk/throughput_samples_per_sec": chunk_size / gen_time if gen_time > 0 else 0,
-                        "chunk/chunk_index": chunk_start // self.batch_size,
-                    })
+                    trace_writer.close()
+                    n = trace_writer.count
+                    if n > 0:
+                        self.logger.info(f"Wrote {n} trace(s) to {trace_writer._path}")
+                        if self.use_wandb and WANDB_AVAILABLE and wandb.run is not None:
+                            try:
+                                trace_name_safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', str(self.trace_name))
+                                artifact = wandb.Artifact(name=f"trace_{trace_name_safe}", type="trace", description=f"All sample traces for task (trace_name={trace_name_safe})")
+                                artifact.add_file(trace_writer._path, name=os.path.basename(trace_writer._path))
+                                wandb.log_artifact(artifact)
+                            except Exception as e:
+                                self.logger.warning(f"Failed to upload task traces to wandb: {e}")
                 except Exception as e:
-                    self.logger.warning(f"Failed to log chunk metrics to wandb: {e}")
-        
+                    self.logger.warning(f"Failed to close trace file: {e}")
+
+        finally:
+            if trace_writer is not None:
+                _task_trace_list_ctx.set(None)
+
         # Update global statistics (thread-safe)
         with self._stats_lock:
             self.total_samples_global += total_requests
