@@ -1,6 +1,7 @@
 '''
 This file is inspired by the code from https://github.com/ML-GSAI/SMDM
 '''
+import sys
 import torch
 import re
 from pathlib import Path
@@ -43,7 +44,7 @@ def setup_logger(name="llada_eval", log_dir="logs"):
     """
     # Create logs directory if it doesn't exist
     os.makedirs(log_dir, exist_ok=True)
-    
+
     # Create log filename - if name already looks like it has timestamp, use as-is
     # Otherwise add timestamp
     if re.match(r'.*_\d{8}_\d{6}$', name):
@@ -53,30 +54,30 @@ def setup_logger(name="llada_eval", log_dir="logs"):
         # Add timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = os.path.join(log_dir, f"{name}_{timestamp}.log")
-    
+
     # Create logger
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
-    
+
     # Remove existing handlers to avoid duplicates
     logger.handlers = []
-    
+
     # File handler
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(logging.INFO)
     file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_format)
-    
+
     # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     console_format = logging.Formatter('%(levelname)s - %(message)s')
     console_handler.setFormatter(console_format)
-    
+
     # Add handlers to logger
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
-    
+
     return logger
 
 
@@ -155,13 +156,13 @@ class LLaDAEvalHarness(LM):
             mask_id: The token id of [MASK] is 126336.
             batch_size: mini batch size.
             mc_num: Monte Carlo estimation iterations
-            is_check_greedy: For certain metrics like LAMBADA, the evaluation requires the model to verify whether the answer 
+            is_check_greedy: For certain metrics like LAMBADA, the evaluation requires the model to verify whether the answer
                              is generated through greedy sampling conditioned on the prompt (note that this differs from conditional
-                             generation). We implement this verification through the suffix_greedy_prediction() function, which 
-                             returns a True/False judgment used for accuracy calculation. 
-                             When is_check_greedy is set to True, the lm-evaluation-harness library automatically invokes this function. 
-                             However, since none of the metrics in the LLaDA paper (https://arxiv.org/abs/2502.09992) require this functionality, 
-                             we recommend setting is_check_greedy to False. This configuration causes suffix_greedy_prediction() to return False 
+                             generation). We implement this verification through the suffix_greedy_prediction() function, which
+                             returns a True/False judgment used for accuracy calculation.
+                             When is_check_greedy is set to True, the lm-evaluation-harness library automatically invokes this function.
+                             However, since none of the metrics in the LLaDA paper (https://arxiv.org/abs/2502.09992) require this functionality,
+                             we recommend setting is_check_greedy to False. This configuration causes suffix_greedy_prediction() to return False
                              by default, significantly accelerating the evaluation process.
             steps: Sampling steps, less than or equal to gen_length.
             gen_length: Generated answer length.
@@ -208,8 +209,11 @@ class LLaDAEvalHarness(LM):
 
         self.steps = int(steps)
         self.gen_length = int(gen_length)
-        self.block_length = int(block_length)
-        
+        if self.mode in ("fhs", "fdm"):
+            self.block_length = None
+        else:
+            self.block_length = int(block_length)
+
         # Global statistics tracking across all generate_until calls
         self.total_samples_global = 0
         self.total_steps_global = 0
@@ -218,10 +222,10 @@ class LLaDAEvalHarness(LM):
         self.generate_until_call_count = 0
         # Lock for thread-safe updates to global statistics
         self._stats_lock = threading.Lock()
-        
+
         # Set up logger
         self.logger = setup_logger(trace_name)
-        
+
         # Initialize wandb if available (check if already initialized by lm-eval)
         self.use_wandb = WANDB_AVAILABLE
         if self.use_wandb:
@@ -255,11 +259,11 @@ class LLaDAEvalHarness(LM):
         self.logger.info(f"Intervention mode: {self.intervention_mode}")
         self.logger.info(f"Intervention steps: {self.intervention_steps}")
         self.logger.info(f"Intervention k: {self.intervention_k}")
-    
+
     @property
     def rank(self):
         return self._rank
-    
+
     @property
     def world_size(self):
         return self._world_size
@@ -396,7 +400,7 @@ class LLaDAEvalHarness(LM):
         # Increment call counter (thread-safe)
         with self._stats_lock:
             self.generate_until_call_count += 1
-        
+
         total_requests = len(requests)
         if total_requests == 0:
             return []
@@ -514,7 +518,7 @@ class LLaDAEvalHarness(LM):
             self.total_steps_global += total_steps_taken
             self.total_gen_time_global += total_gen_time
             self.total_blocks_global += total_blocks_processed
-        
+
         if total_requests > 0:
             self.logger.info(f"Total requests in this call: {total_requests} (processed in chunks of {self.batch_size})")
             self.logger.info(f"Total steps taken in this call: {total_steps_taken}")
@@ -533,7 +537,7 @@ class LLaDAEvalHarness(LM):
             self.logger.info(f"Total generation time (global): {total_gen_time_global:.4f} seconds")
             self.logger.info(f"Total blocks (global): {total_blocks}")
             self.logger.info(f"Number of generate_until calls: {call_count}")
-            
+
             # Log global statistics to wandb
             if self.use_wandb and wandb.run is not None:
                 try:
@@ -549,11 +553,14 @@ class LLaDAEvalHarness(LM):
                     })
                 except Exception as e:
                     self.logger.warning(f"Failed to log global metrics to wandb: {e}")
-        
+
         torch.cuda.empty_cache()
         return all_gen_texts
 
 if __name__ == "__main__":
     set_seed(1234)
+    # lm-eval-harness marks some tasks (e.g., Humaneval) as unsafe because they execute model-generated code.
+    if "--confirm_run_unsafe_code" not in sys.argv:
+        sys.argv.append("--confirm_run_unsafe_code")
+
     cli_evaluate()
-    
