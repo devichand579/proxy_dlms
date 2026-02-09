@@ -101,7 +101,8 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
     
     end_time = time.time()
     total_time = end_time - start_time
+    # Always return (generated, steps_taken, blocks, gen_time) for consistent unpacking in eval.py
     if mode == "fhs" or mode == "fdm":
-        return final_generated, total_steps, total_time
+        return final_generated, total_steps, 0, total_time
     else:
         return final_generated, total_steps, total_blocks, total_time
