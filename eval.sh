@@ -258,7 +258,7 @@ echo "  Output: outputs/${OUTPUT_SUFFIX}.json"
 echo ""
 
 # Build accelerate launch command (add --wandb_args only when --wandb True)
-ACCEL_CMD="accelerate launch eval.py -L 4 --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path outputs/${OUTPUT_SUFFIX}.json --log_samples --cache_requests true"
+ACCEL_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path outputs/${OUTPUT_SUFFIX}.json --log_samples --cache_requests true"
 if [[ "${WANDB,,}" == "true" ]]; then
     ACCEL_CMD="${ACCEL_CMD} --wandb_args project=${WANDB_PROJECT},name=${WANDB_NAME}"
 fi
