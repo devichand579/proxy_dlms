@@ -1,12 +1,15 @@
 # Hydra main config for launch_eval.py
 # Override from CLI: task_name=gsm8k mode=pd batch_size=4
 # Multirun (one job per combination): task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
+#
+# Launchers: launcher=local | launcher=slurm_dgx | launcher=slurm_h100 | launcher=slurm_l40 | launcher=slurm_a40 | launcher=slurm_v100
+# Override at runtime: hydra.launcher.partition=X hydra.launcher.mem_gb=N hydra.launcher.timeout_max=M ...
 
 defaults:
   - launcher: local
 
 # Eval parameters 
-batch_size: 2
+batch_size: 4
 mode: pd
 task_name: gsm8k
 model: llada
