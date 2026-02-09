@@ -15,3 +15,7 @@ hydra:
     cpus_per_task: 8
     nodes: 1
     ntasks: 1
+
+  setup:
+      - source $(conda info --base)/etc/profile.d/conda.sh
+      - conda activate strace
