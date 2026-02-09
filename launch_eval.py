@@ -159,7 +159,10 @@ def run(cfg: DictConfig) -> int:
     return subprocess.run(cmd, env=env, cwd=project_root).returncode
 
 
-@hydra.main(version_base="1.2", config_path="config", config_name="config")
+_CONFIG_DIR = Path(__file__).resolve().parent / "config"
+
+
+@hydra.main(version_base="1.2", config_path=str(_CONFIG_DIR), config_name="config")
 def main(cfg: DictConfig) -> None:
     sys.exit(run(cfg))
 
