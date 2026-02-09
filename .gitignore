@@ -94,3 +94,7 @@ visualization/*.jpeg
 Thumbs.db
 .DS_Store
 
+
+# Hydra/Submitit sweeps & job logs
+multirun/
+job_outputs/

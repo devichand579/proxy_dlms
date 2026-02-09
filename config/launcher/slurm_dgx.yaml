@@ -1,21 +1,23 @@
+# @package _global_
 # SLURM launcher 
 # Use: launcher=slurm. Requires --multirun for multirun.
 
 
 defaults:
-  - override hydra/launcher: submitit_slurm
+  - override /hydra/launcher: submitit_slurm
 
 hydra:
   launcher:
+    submitit_folder: job_outputs/%j
     partition: dgx2
     qos: gpu2
-    timeout_max: 4320   # 72h (override: hydra.launcher.timeout_max=N)
+    timeout_min: 4320   # 72h (override: hydra.launcher.timeout_max=N)
     mem_gb: 64
     gres: gpu:1
     cpus_per_task: 8
     nodes: 1
-    ntasks: 1
+    tasks_per_node: 1
 
-  setup:
+    setup:
       - source $(conda info --base)/etc/profile.d/conda.sh
       - conda activate strace
