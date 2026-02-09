@@ -169,7 +169,7 @@ def _normalize_hydra_cli(argv: list[str]) -> list[str]:
 
     This function reorders argv so flags come first and overrides come last.
 
-    It also supports the common (but incorrect for this repo) pattern:
+    It also supports the common pattern:
       hydra.launcher=slurm_a40
     by rewriting it to our config-group override:
       launcher=slurm_a40

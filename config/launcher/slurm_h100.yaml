@@ -11,7 +11,7 @@ hydra:
     submitit_folder: job_outputs/%j
     partition: gpu_h100       
     qos: null              # set if required
-    timeout_min: 1440       # 12 hours
+    timeout_min: 720       # 12 hours
     mem_gb: 64
     gres: gpu:1
     cpus_per_task: 8
