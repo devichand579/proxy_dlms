@@ -6,9 +6,9 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=72:00:00
-#SBATCH --partition=dgx2
+#SBATCH --partition=dgx2  # gpupart_v100, gpupart_a40, gpu_h100
 #SBATCH --gres=gpu:1
-#SBATCH --qos=gpu2
+#SBATCH --qos=gpu2  # ignore if your cluster doesn't have a qos for GPUs
 
 
 ########################################################################################
