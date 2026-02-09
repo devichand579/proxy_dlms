@@ -142,7 +142,6 @@ def run(cfg: DictConfig) -> int:
     cmd = [
         "env", f"TRACING_ENABLED={'TRUE' if tracing_enabled else 'FALSE'}",
         "accelerate", "launch", "eval.py",
-        "-L", "4",
         "--tasks", task_name,
         "--batch_size", str(batch_size),
         "--num_fewshot", str(num_fewshot),
