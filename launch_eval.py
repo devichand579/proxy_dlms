@@ -8,9 +8,9 @@ Launch eval with Hydra. Supports local runs and SLURM multirun via submitit laun
   python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun
 
   # Multirun on SLURM (one job per combination)
-  python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
+  python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm_a40
 
-Config: config/config.yaml. Launcher defaults: config/launcher/local.yaml; use launcher=slurm for cluster.
+Config: config/config.yaml. Launcher defaults: config/launcher/local.yaml; use launcher=slurm_* for cluster (e.g. launcher=slurm_a40).
 """
 
 import os
@@ -159,6 +159,74 @@ def run(cfg: DictConfig) -> int:
     return subprocess.run(cmd, env=env, cwd=project_root).returncode
 
 
+def _normalize_hydra_cli(argv: list[str]) -> list[str]:
+    """Normalize CLI args for Hydra.
+
+    Hydra expects all flags (e.g. --multirun, --cfg, --resolve) to come before
+    positional overrides (key=value). Users often interleave them, e.g.:
+      python launch_eval.py task_name=humaneval mode=bd --multirun launcher=slurm_a40
+    which Hydra will reject with 'unrecognized arguments'.
+
+    This function reorders argv so flags come first and overrides come last.
+
+    It also supports the common (but incorrect for this repo) pattern:
+      hydra.launcher=slurm_a40
+    by rewriting it to our config-group override:
+      launcher=slurm_a40
+    when the requested launcher exists in config/launcher/*.yaml.
+    """
+    if len(argv) <= 1:
+        return argv
+
+    # Discover valid launcher names from config group.
+    launcher_dir = Path(__file__).resolve().parent / "config" / "launcher"
+    valid_launchers: set[str] = set()
+    if launcher_dir.is_dir():
+        valid_launchers = {p.stem for p in launcher_dir.glob("*.yaml")}
+
+    # Hydra options that take a value as the next argv token.
+    opts_with_value = {
+        "--cfg",
+        "--info",
+        "--config-path",
+        "--config-name",
+        "--config-dir",
+        "--package",
+        "--experimental-rerun",
+    }
+
+    flags: list[str] = []
+    overrides: list[str] = []
+
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+
+        # Map 'hydra.launcher=slurm_a40' -> 'launcher=slurm_a40' when it matches our launcher group.
+        if a.startswith("hydra.launcher="):
+            val = a.split("=", 1)[1]
+            if val in valid_launchers:
+                overrides.append(f"launcher={val}")
+            else:
+                overrides.append(a)
+            i += 1
+            continue
+
+        if a.startswith("-"):
+            flags.append(a)
+            if a in opts_with_value and i + 1 < len(argv):
+                flags.append(argv[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+
+        overrides.append(a)
+        i += 1
+
+    return [argv[0], *flags, *overrides]
+
+
 _CONFIG_DIR = Path(__file__).resolve().parent / "config"
 
 
@@ -168,4 +236,5 @@ def main(cfg: DictConfig) -> None:
 
 
 if __name__ == "__main__":
+    sys.argv = _normalize_hydra_cli(sys.argv)
     main()
