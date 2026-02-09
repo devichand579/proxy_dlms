@@ -30,6 +30,7 @@ ENV/
 env.bak/
 venv.bak/
 .venv/
+.hydra/
 
 # PyTorch
 *.pth
@@ -62,6 +63,7 @@ checkpoints/
 logs/
 wandb/
 outputs/
+trace_outputs/
 html/
 png/
 output*.txt

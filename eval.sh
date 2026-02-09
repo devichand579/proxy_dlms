@@ -4,7 +4,7 @@
 #SBATCH --error=job_outputs/strace_job_err_%j.err
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --mem=48gb
 #SBATCH --time=72:00:00
 #SBATCH --partition=dgx2  # gpupart_v100, gpupart_a40, gpu_h100
 #SBATCH --gres=gpu:1
