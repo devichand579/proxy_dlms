@@ -19,11 +19,26 @@ from traces.trace_wrapper import _task_trace_list_ctx
 
 import warnings
 import json
+from collections import defaultdict
 from dill._dill import PicklingWarning
 import logging
 import os
 from datetime import datetime
 import threading
+
+# Length bucket boundaries (token count): prompts in the same bucket are batched together.
+# Uses the upper bound of each bucket, e.g. (0, 32], (32, 64], (64, 128], ...
+LENGTH_BUCKET_BOUNDARIES = [32, 64, 128, 256, 384, 512, 640, 768, 896, 1024, float("inf")]
+
+
+def _bucket_for_length(length: int, boundaries=None):
+    """Return the bucket key (upper bound) for a given prompt length."""
+    if boundaries is None:
+        boundaries = LENGTH_BUCKET_BOUNDARIES
+    for b in boundaries:
+        if length <= b:
+            return b
+    return boundaries[-1]
 
 # Optional wandb import
 try:
@@ -418,32 +433,43 @@ class LLaDAEvalHarness(LM):
             trace_writer = StreamingTraceWriter(task_trace_path, getattr(self, "task_name", "unknown"))
             _task_trace_list_ctx.set(trace_writer)
 
-        all_gen_texts = []
+        # Get prompt lengths and group request indices by length bucket for better batching
+        question_texts = [req.args[0] for req in requests]
+        enc_no_pad = self.tokenizer(question_texts, add_special_tokens=False, padding=False)
+        lengths = [len(ids) for ids in enc_no_pad["input_ids"]]
+        bucket_to_indices = defaultdict(list)
+        for i, L in enumerate(lengths):
+            bucket_to_indices[_bucket_for_length(L)].append(i)
+        for bucket_key in bucket_to_indices:
+            bucket_to_indices[bucket_key].sort(key=lambda idx: lengths[idx])
+
+        # Build chunks: each chunk is a list of request indices from the same bucket
+        chunks = []
+        for bucket_key in sorted(bucket_to_indices.keys(), key=lambda x: x if x != float("inf") else 1e9):
+            indices = bucket_to_indices[bucket_key]
+            for chunk_start in range(0, len(indices), self.batch_size):
+                chunks.append(indices[chunk_start : chunk_start + self.batch_size])
+
+        all_gen_texts = [None] * total_requests
         total_steps_taken = 0
         total_blocks_processed = 0
         total_gen_time = 0.0
 
         try:
-            # Split requests into chunks based on batch_size
-            for chunk_start in range(0, total_requests, self.batch_size):
-                chunk_end = min(chunk_start + self.batch_size, total_requests)
-                chunk_requests = requests[chunk_start:chunk_end]
+            for chunk_index, chunk_indices in enumerate(chunks):
+                chunk_requests = [requests[i] for i in chunk_indices]
                 chunk_size = len(chunk_requests)
-
-                # Extract question texts for this chunk
                 chunk_question_texts = [req.args[0] for req in chunk_requests]
 
-                # Tokenize chunk
                 encoded_outputs = self.tokenizer(
                     chunk_question_texts,
                     add_special_tokens=False,
                     padding=True,
-                    return_tensors="pt"
+                    return_tensors="pt",
                 )
-                input_ids = encoded_outputs['input_ids'].to(self.device)
-                attention_mask = encoded_outputs['attention_mask'].to(self.device)
+                input_ids = encoded_outputs["input_ids"].to(self.device)
+                attention_mask = encoded_outputs["attention_mask"].to(self.device)
 
-                # Process chunk (wrapper appends to task list via context when trace_name is set)
                 generated, steps_taken, blocks, gen_time = generate(
                     self.model,
                     input_ids,
@@ -460,23 +486,25 @@ class LLaDAEvalHarness(LM):
                     intervention_k=self.intervention_k,
                 )
 
-                # Extract generated parts (excluding prompts) and batch decode
-                chunk_gen_texts = self.tokenizer.batch_decode(generated[:, input_ids.shape[1]:], skip_special_tokens=True)
-
-                # Apply stop tokens
+                chunk_gen_texts = self.tokenizer.batch_decode(
+                    generated[:, input_ids.shape[1] :], skip_special_tokens=True
+                )
                 for i, gen_text in enumerate(chunk_gen_texts):
                     for stop in stop_tokens:
                         if stop in gen_text:
                             chunk_gen_texts[i] = gen_text.split(stop)[0]
 
-                all_gen_texts.extend(chunk_gen_texts)
+                for j, orig_idx in enumerate(chunk_indices):
+                    all_gen_texts[orig_idx] = chunk_gen_texts[j]
+
                 total_steps_taken += steps_taken
                 total_blocks_processed += blocks
                 total_gen_time += gen_time
 
-                self.logger.info(f"Processed chunk: {chunk_start}-{chunk_end-1} of {total_requests} requests (chunk size: {chunk_size}, gen time: {gen_time:.4f}s)")
+                self.logger.info(
+                    f"Processed chunk {chunk_index + 1}/{len(chunks)} (indices {chunk_indices}, size {chunk_size}, gen time: {gen_time:.4f}s)"
+                )
 
-                # Log chunk metrics to wandb
                 if self.use_wandb and wandb.run is not None:
                     try:
                         wandb.log({
@@ -485,7 +513,7 @@ class LLaDAEvalHarness(LM):
                             "chunk/steps_taken": steps_taken,
                             "chunk/blocks_processed": blocks,
                             "chunk/throughput_samples_per_sec": chunk_size / gen_time if gen_time > 0 else 0,
-                            "chunk/chunk_index": chunk_start // self.batch_size,
+                            "chunk/chunk_index": chunk_index,
                         })
                     except Exception as e:
                         self.logger.warning(f"Failed to log chunk metrics to wandb: {e}")
