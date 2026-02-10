@@ -68,13 +68,13 @@ def run(cfg: DictConfig) -> int:
     """Build and run the accelerate eval command from Hydra config."""
     # Use script dir as project root so SLURM jobs (which may run from sweep dir) still find eval.py
     project_root = Path(__file__).resolve().parent
-    batch_size = int(cfg.get("batch_size", 2))
+    batch_size = int(cfg.get("batch_size", 4))
     mode_input = str(cfg.get("mode", "pd")).strip().lower()
     task_name = str(cfg.get("task_name", "gsm8k"))
     model = str(cfg.get("model", "llada"))
     compile_model = _to_bool(cfg.get("compile_model", False))
-    wandb = _to_bool(cfg.get("wandb", False))
-    tracing_enabled = _to_bool(cfg.get("tracing_enabled", False))
+    wandb = _to_bool(cfg.get("wandb", True))
+    tracing_enabled = _to_bool(cfg.get("tracing_enabled", True))
 
     intervention = cfg.get("intervention") or {}
     if isinstance(intervention, dict):

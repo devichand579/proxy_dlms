@@ -27,7 +27,7 @@ intervention:
 # Env / paths
 wandb_project: strace
 
-# Hydra: run in project root so outputs/ and trace_outputs/ are in repo
+# Hydra: run in project root so outputs/ and trace_outputs/ are in same directory
 hydra:
   run:
     dir: .
