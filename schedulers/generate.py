@@ -39,7 +39,7 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
         elif mode == "top_k":
             assert block_length == gen_length, "Block length must be equal to gen_length"
             assert strategy == "confidence" or strategy == "top_margin" or strategy == "entropy" or strategy == "random", "strategy must be confidence, top_margin, entropy, or random"
-            return generate_topk(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., remasking=strategy, **common_trace_kw)
+            return generate_topk(model, prompt, mask, steps=steps, gen_length=gen_length, block_length=block_length, temperature=0., metric=strategy, **common_trace_kw)
         elif mode == "fhs":
             assert block_length == None, "Block length must be None"
             return generate_fhs(model, prompt, mask, steps=steps, gen_length=gen_length, temperature=1.0, pass_time_to_model=True, **common_trace_kw)
