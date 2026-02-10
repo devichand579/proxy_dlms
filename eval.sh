@@ -158,7 +158,7 @@ export HF_TOKEN=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
 # When running locally (not --slurm), you can set CUDA_VISIBLE_DEVICES; when --slurm, leave to SLURM allocation.
 if [[ "$SLURM_MODE" != "true" ]]; then
     export CUDA_DEVICE_ORDER=PCI_BUS_ID
-    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 fi
 
 # Wandb configuration 
