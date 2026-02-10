@@ -125,8 +125,6 @@ def run(cfg: DictConfig) -> int:
     env.setdefault("LMEVAL_LOG_LEVEL", "INFO")
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     env["TRACING_ENABLED"] = "TRUE" if tracing_enabled else "FALSE"
-    env.setdefault("CUDA_VISIBLE_DEVICES", "0")
-    env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
     env.setdefault("WANDB_API_KEY", "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")
     env.setdefault("WANDB_PROJECT", str(cfg.get("wandb_project", "strace")))
 
