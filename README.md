@@ -1,146 +1,152 @@
-# STrace (DONT FOLLOW NOT UPDATED)
+# STrace
 
-## Usage
+Diffusion-based text generation with LLaDA-style schedulers. Supports evaluation on lm-eval tasks, batched generation, tracing, and optional interventions.
 
-### Environment Setup
-Run the following command to create a new environment and install the dependencies.
+---
+
+## Environment Setup
+
 ```bash
 conda create -n strace -f environment.yaml
 conda activate strace
 pip install -r requirements.txt
 ```
 
-### Downloading the Model
-Please download the model configuration and safetensors files before running any scheduler or evaluation scripts.
+---
+
+## Model
+
+Download the LLaDA model before running evaluation or scheduler tests:
 
 ```bash
 python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='GSAI-ML/LLaDA-8B-Base', local_dir='./models/llada', local_dir_use_symlinks=False)"
 ```
 
-### Running Evaluation
+---
 
-We provide a convenient shell script `eval.sh` for running evaluations with proper configuration.
+## Running Evaluation
 
-#### Basic Usage
+### Using `eval.sh`
 
+Convenient wrapper that sets generation length, steps, few-shot count, and output paths from the task name.
+
+**Basic:**
 ```bash
 ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --compile_model False
 ```
 
-#### Arguments
+**Arguments:**
 
-- `--batch_size`: Batch size for processing requests (e.g., 2, 4, 8)
-- `--mode`: Generation mode
-  - `pd` or `pure_diffusion`: Pure diffusion mode
-  - `bd` or `block_diffusion`: Block diffusion mode
-- `--task_name`: Name of the evaluation task
-  - Supported tasks: `gsm8k`, `minerva_math500`, `humaneval`, `mbpp`, `logiqa`, `bbh`, `truthfulqa`
-- `--model`: Model name (should match the directory name in `./models/`)
-- `--compile_model`: Whether to compile model with `torch.compile` (`True` or `False`)
+| Argument | Description |
+|----------|-------------|
+| `--batch_size` | Max requests per chunk (e.g. 2, 4, 8). Chunks may be smaller when a length bucket has fewer samples. |
+| `--mode` | Scheduler: `pd`, `bd`, `eb`, `fdm`, `fhs`, `top_k_c`, `top_k_m`, `dus` (see below). |
+| `--task_name` | Eval task: `gsm8k`, `humaneval`, `mbpp`, `minerva_math500`, `bbh`, `truthfulqa`, etc. |
+| `--model` | Model dir under `./models/` (e.g. `llada`). |
+| `--compile_model` | `True` / `False` for `torch.compile`. |
+| `--wandb` | `True` to log to Weights & Biases. |
+| `--tracing_enabled` | `True` to write per-task traces to `trace_outputs/`. |
+| `--intervention_mode` | Optional: `drop` or `swap`. |
+| `--intervention_steps` | Optional: comma-separated step indices (e.g. `0,128,256`). |
+| `--intervention_k` | Optional: tokens per intervention step (default 1). |
+| `--slurm` | Use when submitting via `sbatch` so the command runs under `srun`. |
 
-#### Automatic Configuration
+**Mode shortcuts:**
 
-The script automatically sets:
+- `pd` — pure diffusion  
+- `bd` — block diffusion  
+- `eb` — EB sampler  
+- `fdm` — FDM  
+- `fhs` — FHS  
+- `top_k_c` — top-k (confidence)  
+- `top_k_m` — top-k (top margin)  
+- `dus` — dilated unmasking scheduler  
 
-1. **Generation Length & Steps**:
-   - `humaneval` and `mbpp`: 512 tokens, 512 steps
-   - Other tasks: 256 tokens, 256 steps
+**Auto-configured from task:**
 
-2. **Block Length**:
-   - `block_diffusion` mode: 32
-   - `pure_diffusion` mode: Same as generation length
+- **Length & steps:** HumanEval/MBPP use 512 tokens and 512 steps; others use 256.
+- **Block length:** Block diffusion uses 32; pure diffusion uses full generation length.
+- **Few-shot:** HumanEval/TruthfulQA 0; GSM8K, Minerva Math500, MBPP 4; BBH 3.
 
-3. **Few-shot Examples** (`num_fewshot`):
-   - `humaneval`: 0 shot
-   - `gsm8k`: 4 shot
-   - `minerva_math500`: 4 shot
-   - `mbpp`: 4 shot
-   - `bbh`: 3 shot
-   - `truthfulqa`: 0 shot
-
-4. **Wandb Name**: Automatically generated as `{model}_{task_name}_{mode}_{timestamp}`
-
-5. **Output Path**: `outputs/{model}_{task_name}_{mode}_{timestamp}.json`
-
-#### Example Commands
+**Examples:**
 
 ```bash
-# Evaluate on GSM8K with pure diffusion
+# GSM8K, pure diffusion
 ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --compile_model False
 
-# Evaluate on HumanEval with block diffusion
+# HumanEval, block diffusion
 ./eval.sh --batch_size 1 --mode bd --task_name humaneval --model llada --compile_model False
 
-# Evaluate on BBH with pure diffusion
-./eval.sh --batch_size 4 --mode pd --task_name bbh --model llada --compile_model True
+# With intervention and wandb
+./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True
 ```
 
-#### Logging
+**Batching:** Requests are grouped by **prompt length buckets** (e.g. 0–32, 32–64, …, 512+ tokens). Chunks are formed within each bucket with size up to `batch_size`. So you may see chunk sizes smaller than `batch_size` when a bucket has fewer samples; this keeps similar-length prompts together and reduces padding and wasted steps.
 
-- **File Logs**: Saved to `logs/{model}_{task_name}_{mode}_{timestamp}.log`
-- **Wandb Logging**: Automatically logs metrics including:
-  - Per-chunk metrics (size, generation time, steps, blocks, throughput)
-  - Global statistics (total samples, steps, time, blocks, averages)
-  - Generation metrics (steps per generation, early stopping)
+**Outputs:**
 
-#### Output Files
+- **Results:** `outputs/{model}_{task_name}_{mode}_{timestamp}.json`
+- **Logs:** `logs/{model}_{task_name}_{mode}_{timestamp}.log`
+- **Traces:** If tracing is enabled, one file per task: `trace_outputs/{trace_name}.json` (contains all samples for that run in a single JSON structure).
 
-- **Results**: `outputs/{model}_{task_name}_{mode}_{timestamp}.json`
-- **Logs**: `logs/{model}_{task_name}_{mode}_{timestamp}.log`
-- **Samples**: Included in output JSON when using `--log_samples`
+---
 
-### Hydra launcher (SLURM multirun)
+## Hydra / `launch_eval.py` (single and multirun)
 
-For running many eval configs on a SLURM cluster, use the Hydra entry point and the submitit launcher.
+Config lives in `config/config.yaml`. Override from CLI: `task_name=gsm8k mode=pd batch_size=4`.
 
-**Install:** `pip install hydra-core hydra-submitit-launcher` (or use `requirements.txt`).
-
-**Single run (local, same as run_eval.py):**
+**Single run (local):**
 ```bash
 python launch_eval.py task_name=gsm8k mode=pd
 ```
 
-**Multirun locally (multiple configs, sequential):**
+**Multirun locally (sequential):**
 ```bash
 python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun
 ```
 
-**Multirun on SLURM (one SLURM job per config combination):**
+**Multirun on SLURM (one job per config):**
+
+Launchers are in `config/launcher/`: `local`, `slurm_a40`, `slurm_dgx`, `slurm_h100`, `slurm_l40`, `slurm_v100`.
+
 ```bash
-python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
+python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm_a40
 ```
 
-Config: `config/config.yaml`. Launcher defaults to local; use `launcher=slurm` for cluster. SLURM defaults (partition, time, mem, GPUs) are in `config/launcher/slurm.yaml` and match `sample_slurm.sh` (dgx2, 72h, 96G, 1 GPU). Override from CLI if needed, e.g. `hydra.launcher.partition=other`.
+Install for SLURM: `pip install hydra-core hydra-submitit-launcher` (or use `requirements.txt`).
 
+---
 
+## Testing Schedulers
 
+Use `test_schedulers.py` or `test_schedulers.sh` to run one or all schedulers on a fixed prompt (no full eval harness).
 
+**Single scheduler, default (single-sample) tests:**
+```bash
+python test_schedulers.py --scheduler pure_diffusion
+python test_schedulers.py   # run all schedulers
+```
 
+**Batched generation tests (shape checks + optional tracing):**
+```bash
+python test_schedulers.py --batch --batch_size 2
+python test_schedulers.py --batch --scheduler pure_diffusion --batch_size 4
+```
 
+**With wandb and tracing:**
+```bash
+python test_schedulers.py --batch --wandb
+```
 
+**Using the shell script** (sets env, conda, and forwards flags):
 
+```bash
+./test_schedulers.sh --scheduler pure_diffusion
+./test_schedulers.sh --batch --batch_size 2
+./test_schedulers.sh --batch --wandb
+```
 
+Script options: `--scheduler`, `--wandb`, `--wandb_project`, `--wandb_name`, `--intervention_mode`, `--batch`, `--batch_size`, `--tracing_enabled`. Run `./test_schedulers.sh --help` for the full list.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+---
 
