@@ -122,12 +122,17 @@ def value_matches_x0(x0_trace, pos, val_item):
     return (abs(x0_pred - val_item) < 1e-6 or 
             (isinstance(val_item, int) and int(x0_pred) == val_item))
 
-def get_x0_trace(tracer_instance, x):
-    """Get x0_trace, creating empty one if _last_x0 is None."""
+def get_x0_trace(tracer_instance, x, batch_index=None):
+    """Get x0_trace, creating empty one if _last_x0 is None.
+    When batch_index is not None and _last_x0 has batch dim > 1, returns that row only [1, L]."""
     if tracer_instance._last_x0 is not None:
-        return ensure_2d_shape(tracer_instance._last_x0.clone())
+        out = ensure_2d_shape(tracer_instance._last_x0.clone())
+        if batch_index is not None and out.shape[0] > 1 and batch_index < out.shape[0]:
+            out = out[batch_index : batch_index + 1]
+        return out
     seq_len = x.shape[1] if x.dim() == 2 else x.shape[0]
-    return torch.zeros((1, seq_len), dtype=torch.long, device=x.device)
+    batch_dim = x.shape[0] if x.dim() >= 2 and x.shape[0] > 0 else 1
+    return torch.zeros((batch_dim, seq_len), dtype=torch.long, device=x.device)
 
 def build_transfer_index(transfer_positions, seq_len, device):
     """Build boolean transfer_index from integer positions."""

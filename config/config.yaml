@@ -25,7 +25,6 @@ intervention:
   k: 1
 
 # Env / paths
-cuda_visible_devices: "1"
 wandb_project: strace
 
 # Hydra: run in project root so outputs/ and trace_outputs/ are in repo

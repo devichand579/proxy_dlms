@@ -38,13 +38,16 @@ class ModelTracer:
         
         # State tracking
         self._step_counter = 0
-        self._last_x0 = None  
+        self._last_x0 = None
         self._last_confidence = None
         self._last_x = None
         self._last_logits = None  # Store logits for FHS-style schedulers
         self._pending_transfer_index = None
         self._in_intervention = False  # Flag to prevent recursion during intervention
         self._in_setitem = False  # Additional reentrant guard
+        # Batch tracing: when prompt has batch_size > 1, one context per sample
+        self._batch_contexts = None
+        self._batch_size = 1
         
         # Store original 
         self._original_setitem = None
@@ -58,24 +61,32 @@ class ModelTracer:
         
         def traced_forward(*args, **kwargs):
             output = original_forward(*args, **kwargs)
-            
-            if self.tracing_context is not None:
-                # Track step: each model call typically represents a step
-                if len(args) > 0:
-                    x = args[0] if _is_tensor_like(args[0]) else None
-                    if x is not None and x.dim() == 2:
-                        self._last_x = x
-                        # Store logits for FHS-style schedulers that don't use argmax
-                        if hasattr(output, 'logits') and output.logits is not None:
-                            self._last_logits = output.logits.clone()
-                            # Also store in tracing context for on-demand prediction computation
-                            self.tracing_context._current_logits = output.logits.clone()
-                        # Record step start
-                        self.tracing_context.record_step_start(
-                            self._step_counter, x, self.mask_id
-                        )
-                        self._step_counter += 1
-            
+
+            if len(args) > 0:
+                x = args[0] if _is_tensor_like(args[0]) else None
+            else:
+                x = None
+            if x is not None and x.dim() == 2:
+                self._last_x = x
+                batch_size = x.shape[0]
+                if self._batch_contexts is not None and batch_size == len(self._batch_contexts):
+                    # Batched: record step and logits per sample
+                    if hasattr(output, 'logits') and output.logits is not None:
+                        self._last_logits = output.logits.clone()
+                    for b in range(batch_size):
+                        ctx = self._batch_contexts[b]
+                        if output.logits is not None:
+                            ctx._current_logits = output.logits[b : b + 1].clone()
+                        ctx.record_step_start(self._step_counter, x[b : b + 1], self.mask_id)
+                    self._step_counter += 1
+                elif self.tracing_context is not None and batch_size == 1:
+                    if hasattr(output, 'logits') and output.logits is not None:
+                        self._last_logits = output.logits.clone()
+                        self.tracing_context._current_logits = output.logits.clone()
+                    self.tracing_context.record_step_start(
+                        self._step_counter, x, self.mask_id
+                    )
+                    self._step_counter += 1
             return output
         
         return original_forward, traced_forward
@@ -86,20 +97,24 @@ class ModelTracer:
             result = original_argmax(input, dim=dim, keepdim=keepdim, out=out)
             
             # If this is called on logits (or logits_with_noise), it's likely x0
-            if self.tracing_context is not None:
-                # Check if input looks like logits (3D tensor) or logits_with_noise
-                if _is_tensor_like(input) and input.dim() >= 2:
-                    if dim == -1 or (dim is None and input.dim() == 3):
-                        # Store the full x0 tensor for later use in setitem
-                        self._last_x0 = result.clone() if _is_tensor_like(result) else result
-                        # Compute confidence from input (logits or logits_with_noise)
-                        if input.dim() == 3:  # [batch, length, vocab] - logits
-                            with torch.no_grad():
-                                probs = torch.softmax(input, dim=-1)
-                                confidence = torch.max(probs, dim=-1)[0]
-                                self._last_confidence = confidence
-                                self.tracing_context.record_predictions(result, confidence)
-            
+            if _is_tensor_like(input) and input.dim() >= 2 and (dim == -1 or (dim is None and input.dim() == 3)):
+                self._last_x0 = result.clone() if _is_tensor_like(result) else result
+                if input.dim() == 3:
+                    with torch.no_grad():
+                        probs = torch.softmax(input, dim=-1)
+                        confidence = torch.max(probs, dim=-1)[0]
+                        self._last_confidence = confidence
+                else:
+                    confidence = None
+                if self._batch_contexts is not None and result.shape[0] == len(self._batch_contexts):
+                    for b in range(result.shape[0]):
+                        conf_b = confidence[b : b + 1] if confidence is not None else None
+                        if conf_b is not None:
+                            self._batch_contexts[b].record_predictions(
+                                result[b : b + 1], conf_b
+                            )
+                elif self.tracing_context is not None and result.shape[0] == 1 and confidence is not None:
+                    self.tracing_context.record_predictions(result, confidence)
             return result
         
         return traced_argmax
@@ -153,12 +168,18 @@ class ModelTracer:
         if not is_negative_inf(value):
             return False
         
-        # Extract block boundaries
         block_end = second_slice.start
-        self.tracing_context._current_block_end = block_end
-        if self.tracing_context._block_length is not None:
-            block_start = block_end - self.tracing_context._block_length
-            self.tracing_context._current_block_start = block_start
+        if self._batch_contexts is not None:
+            for ctx in self._batch_contexts:
+                ctx._current_block_end = block_end
+                if ctx._block_length is not None:
+                    ctx._current_block_start = block_end - ctx._block_length
+        elif self.tracing_context is not None:
+            self.tracing_context._current_block_end = block_end
+            if self.tracing_context._block_length is not None:
+                self.tracing_context._current_block_start = (
+                    block_end - self.tracing_context._block_length
+                )
         return True
     
     def _detect_single_position_transfer(self, x, x0_trace, pos_val, value):
@@ -217,56 +238,116 @@ class ModelTracer:
         
         return None
     
-    def _process_transfer(self, tensor_self, original_key, transfer_index, x0_trace, x):
-        """Common logic for processing a transfer: apply interventions, record, and apply."""
+    def _process_transfer(self, tensor_self, original_key, transfer_index, x0_trace, x, batch_index=None):
+        """Common logic for processing a transfer: apply interventions, record, and apply.
+        When batch_index is not None, use that context only (for integer-indexed x[b, pos] = value)."""
         self._in_intervention = True
         try:
-            # For FHS-style schedulers: if predictions haven't been recorded yet, compute from logits
-            if (self.tracing_context._current_predictions is None and 
-                self.tracing_context._current_logits is not None):
-                # Compute predictions and confidences from logits
-                predictions = torch.argmax(self.tracing_context._current_logits, dim=-1)  # [1, L]
-                probs = F.softmax(self.tracing_context._current_logits, dim=-1)
-                confidences = torch.max(probs, dim=-1)[0]  # [1, L]
-                self.tracing_context.record_predictions(predictions, confidences)
-            
-            # Apply interventions if needed
-            modified_transfer, modified_x0, intervention_applied = (
-                self.tracing_context.apply_interventions(
+            B = transfer_index.shape[0] if transfer_index.dim() >= 1 else 1
+            contexts = self._batch_contexts if self._batch_contexts is not None else (
+                [self.tracing_context] if self.tracing_context is not None else []
+            )
+            if not contexts or (self._batch_contexts is not None and B != len(contexts) and batch_index is None):
+                return False
+
+            if batch_index is not None and self._batch_contexts is not None:
+                # Single-row update from integer indexing (e.g. FHS x[b, k] = value)
+                ctx = contexts[batch_index]
+                if ctx._current_predictions is None and ctx._current_logits is not None:
+                    pred = torch.argmax(ctx._current_logits, dim=-1)
+                    probs = F.softmax(ctx._current_logits, dim=-1)
+                    conf = torch.max(probs, dim=-1)[0]
+                    ctx.record_predictions(pred, conf)
+                modified_transfer, modified_x0, intervention_applied = ctx.apply_interventions(
                     transfer_index, x0_trace, x, self.mask_id
                 )
-            )
-            
-            # Record transfer
-            self.tracing_context.record_transfer(modified_transfer, modified_x0)
-            
-            # Apply intervention if it modified the transfer
-            if intervention_applied:
-                modified_positions = torch.nonzero(modified_transfer[0], as_tuple=False).squeeze(-1)
-                if modified_positions.numel() > 0:
-                    modified_values = modified_x0[0, modified_positions]
-                    
-                    # Handle different key types
-                    # Use type() for tuple (safe) and duck typing for tensor (avoids recursion)
-                    if isinstance(original_key, tuple):
-                        batch_idx, _ = original_key
-                        new_key = (batch_idx, modified_positions)
-                        self._original_setitem(tensor_self, new_key, modified_values)
+                ctx.record_transfer(modified_transfer, modified_x0)
+                if intervention_applied and isinstance(original_key, tuple):
+                    batch_idx, _ = original_key
+                    mod_pos = torch.nonzero(modified_transfer[0], as_tuple=False).squeeze(-1)
+                    if mod_pos.numel() > 0:
+                        self._original_setitem(
+                            tensor_self, (batch_idx, mod_pos), modified_x0[0, mod_pos]
+                        )
                         return "modified"
-                    elif _is_tensor_like(original_key):
-                        # Boolean tensor case
-                        modified_transfer_2d = ensure_2d_shape(modified_transfer)
-                        modified_x0_2d = ensure_2d_shape(modified_x0)
-                        if original_key.dim() == 1:
-                            new_key = modified_transfer_2d[0]
-                            new_value = modified_x0_2d[0, new_key]
-                        else:
-                            new_key = modified_transfer_2d
-                            new_value = modified_x0_2d[new_key]
-                        self._original_setitem(tensor_self, new_key, new_value)
-                        return "modified"
-            
-            return True  # Handled but not modified
+                return True
+            if self._batch_contexts is not None and B > 1:
+                # Batched: apply interventions and record per sample, then combine
+                modified_list = []
+                modified_x0_list = []
+                any_intervention = False
+                for b in range(B):
+                    # FHS-style: ensure predictions recorded for this batch index
+                    ctx = contexts[b]
+                    if ctx._current_predictions is None and ctx._current_logits is not None:
+                        pred_b = torch.argmax(ctx._current_logits, dim=-1)
+                        probs_b = F.softmax(ctx._current_logits, dim=-1)
+                        conf_b = torch.max(probs_b, dim=-1)[0]
+                        ctx.record_predictions(pred_b, conf_b)
+                    mod_t, mod_x0, applied = ctx.apply_interventions(
+                        transfer_index[b : b + 1],
+                        x0_trace[b : b + 1],
+                        x[b : b + 1],
+                        self.mask_id,
+                    )
+                    ctx.record_transfer(mod_t, mod_x0)
+                    modified_list.append(mod_t)
+                    modified_x0_list.append(mod_x0)
+                    if applied:
+                        any_intervention = True
+                modified_transfer = torch.cat(modified_list, dim=0)
+                modified_x0 = torch.cat(modified_x0_list, dim=0)
+                if any_intervention and _is_tensor_like(original_key) and original_key.dtype == torch.bool:
+                    self._original_setitem(
+                        tensor_self, modified_transfer, modified_x0[modified_transfer]
+                    )
+                    return "modified"
+                if any_intervention and isinstance(original_key, tuple):
+                    for b in range(B):
+                        mod_pos = torch.nonzero(modified_transfer[b], as_tuple=False).squeeze(-1)
+                        if mod_pos.numel() > 0:
+                            self._original_setitem(
+                                tensor_self,
+                                (b, mod_pos),
+                                modified_x0[b, mod_pos],
+                            )
+                    return "modified"
+                return True
+            else:
+                # Single sample
+                ctx = contexts[0]
+                if ctx._current_predictions is None and ctx._current_logits is not None:
+                    predictions = torch.argmax(ctx._current_logits, dim=-1)
+                    probs = F.softmax(ctx._current_logits, dim=-1)
+                    confidences = torch.max(probs, dim=-1)[0]
+                    ctx.record_predictions(predictions, confidences)
+                modified_transfer, modified_x0, intervention_applied = (
+                    ctx.apply_interventions(
+                        transfer_index, x0_trace, x, self.mask_id
+                    )
+                )
+                ctx.record_transfer(modified_transfer, modified_x0)
+                if intervention_applied:
+                    modified_positions = torch.nonzero(modified_transfer[0], as_tuple=False).squeeze(-1)
+                    if modified_positions.numel() > 0:
+                        modified_values = modified_x0[0, modified_positions]
+                        if isinstance(original_key, tuple):
+                            batch_idx, _ = original_key
+                            new_key = (batch_idx, modified_positions)
+                            self._original_setitem(tensor_self, new_key, modified_values)
+                            return "modified"
+                        elif _is_tensor_like(original_key):
+                            modified_transfer_2d = ensure_2d_shape(modified_transfer)
+                            modified_x0_2d = ensure_2d_shape(modified_x0)
+                            if original_key.dim() == 1:
+                                new_key = modified_transfer_2d[0]
+                                new_value = modified_x0_2d[0, new_key]
+                            else:
+                                new_key = modified_transfer_2d
+                                new_value = modified_x0_2d[new_key]
+                            self._original_setitem(tensor_self, new_key, new_value)
+                            return "modified"
+                return True
         finally:
             self._in_intervention = False
     
@@ -296,41 +377,50 @@ class ModelTracer:
             return False
     
     def _handle_integer_indexing_transfer(self, tensor_self, key, value):
-        """Handle integer indexing: x[0, pos] = value or x[0, positions] = values"""
+        """Handle integer indexing: x[0, pos] = value or x[b, pos] = value (batch), or x[0, positions] = values"""
         if not (isinstance(key, tuple) and len(key) == 2):
             return False
-        
+
         batch_idx, pos_idx = key
-        if not ((isinstance(batch_idx, int) and batch_idx == 0) or batch_idx == slice(None)):
+        allow_batch_idx = (
+            batch_idx == slice(None)
+            or (isinstance(batch_idx, int) and (
+                batch_idx == 0
+                or (self._batch_contexts is not None and 0 <= batch_idx < len(self._batch_contexts))
+            ))
+        )
+        if not allow_batch_idx:
             return False
-        
+
         x = ensure_2d_shape(tensor_self.clone())
-        x0_trace = get_x0_trace(self, x)
-        
-        # Detect transfer based on position index type
-        # Use duck typing to avoid isinstance recursion
+        # For batched integer indexing (x[b, pos]), slice to that row first so get_x0_trace returns [1, L]
+        if isinstance(batch_idx, int) and self._batch_contexts is not None and x.shape[0] > 1:
+            x = x[batch_idx : batch_idx + 1]
+        x0_trace = get_x0_trace(self, x, batch_index=batch_idx if isinstance(batch_idx, int) and self._batch_contexts is not None else None)
+        if isinstance(batch_idx, int) and self._batch_contexts is not None and x0_trace.shape[0] > 1:
+            x0_trace = x0_trace[batch_idx : batch_idx + 1]
+
         transfer_info = None
         if isinstance(pos_idx, int):
             transfer_info = self._detect_single_position_transfer(x, x0_trace, pos_idx, value)
         elif _is_tensor_like(pos_idx) and hasattr(pos_idx, 'dtype') and pos_idx.dtype in (torch.long, torch.int64, torch.int32, torch.int):
             transfer_info = self._detect_multiple_positions_transfer(x, x0_trace, pos_idx, value)
-        
+
         if transfer_info is None:
             return False
-        
+
         transfer_positions, transfer_values = transfer_info
-        
-        # Build transfer_index and process
         transfer_index = build_transfer_index(transfer_positions, x.shape[1], x.device)
         x0_for_trace = build_x0_for_trace(x0_trace, transfer_positions, transfer_values)
-        
+
         if not shapes_match([transfer_index, x0_for_trace, x]):
             return False
-        
-        return self._process_transfer(tensor_self, key, transfer_index, x0_for_trace, x)
+
+        batch_index = batch_idx if isinstance(batch_idx, int) and self._batch_contexts is not None else None
+        return self._process_transfer(tensor_self, key, transfer_index, x0_for_trace, x, batch_index=batch_index)
     
     def _intercept_tensor_setitem(self, original_setitem):
-        """Intercept tensor __setitem__ to detect transfers. Assumes batch size 1."""
+        """Intercept tensor __setitem__ to detect transfers. Supports batch and single-sample."""
         tracer_instance = self  
         
         def traced_setitem(tensor_self, key, value):
@@ -380,7 +470,7 @@ class ModelTracer:
         trace_name_from_kwargs = kwargs.get('trace_name', None)
         if trace_name_from_kwargs is not None:
             self.tracing_context.trace_name = trace_name_from_kwargs
-        
+
         # Extract upload_to_wandb from scheduler kwargs if provided (takes precedence)
         upload_to_wandb_from_kwargs = kwargs.get('upload_to_wandb', None)
         if upload_to_wandb_from_kwargs is not None:
@@ -390,39 +480,55 @@ class ModelTracer:
         intervention_mode = kwargs.get('intervention_mode', None)
         intervention_steps = kwargs.get('intervention_steps', None)
         intervention_k = kwargs.get('intervention_k', 1)
-        
+
+        from traces.trace_generator import InterventionHook, TracingContext
         if intervention_mode is not None:
-            from traces.trace_generator import InterventionHook
             if intervention_steps is None:
                 intervention_steps = set()
             elif isinstance(intervention_steps, (list, tuple)):
                 intervention_steps = set(intervention_steps)
             elif isinstance(intervention_steps, set):
-                pass  # Already a set
+                pass
             else:
-                intervention_steps = {intervention_steps}  # Single step
-            
+                intervention_steps = {intervention_steps}
             intervention_hook = InterventionHook(
                 mode=intervention_mode,
                 steps=intervention_steps,
                 k=intervention_k
             )
             self.tracing_context.intervention_hook = intervention_hook
-        
+
         # Extract model (usually first arg)
         model = args[0] if len(args) > 0 else kwargs.get('model')
         if model is None:
             raise ValueError("Model must be provided as first argument or 'model' kwarg")
-        
-        # Extract prompt (usually second arg)
+
+        # Extract prompt (usually second arg) and set up batch contexts when batch_size > 1
         prompt = args[1] if len(args) > 1 else kwargs.get('prompt')
-        if prompt is not None and self.tracing_context.trace.prompt is None:
-            self.tracing_context.trace.prompt = prompt.clone()
-        
-        # Extract block_length from scheduler kwargs (used for block boundary calculation)
         block_length = kwargs.get('block_length', None)
-        if block_length is not None:
-            self.tracing_context._block_length = block_length
+        if prompt is not None:
+            batch_size = prompt.shape[0]
+            if batch_size > 1 and self.tracing_context.trace_name is not None:
+                base_name = self.tracing_context.trace_name
+                self._batch_size = batch_size
+                self._batch_contexts = []
+                for b in range(batch_size):
+                    ctx = TracingContext(
+                        intervention_hook=getattr(self.tracing_context, 'intervention_hook', None),
+                        trace_name=f"{base_name}_b{b}",
+                        upload_to_wandb=self.tracing_context.upload_to_wandb,
+                        save_to_disk=self.tracing_context.save_to_disk,
+                        base_dir=self.tracing_context.base_dir,
+                    )
+                    ctx.trace.prompt = prompt[b : b + 1].clone()
+                    if block_length is not None:
+                        ctx._block_length = block_length
+                    self._batch_contexts.append(ctx)
+            else:
+                if self.tracing_context.trace.prompt is None:
+                    self.tracing_context.trace.prompt = prompt.clone()
+                if block_length is not None:
+                    self.tracing_context._block_length = block_length
         
         # Patch model forward
         original_forward, traced_forward = self._intercept_model_forward(model)
@@ -454,48 +560,64 @@ class ModelTracer:
         else:
             final_seq = result
         
-        if final_seq is not None and self.tracing_context.trace.final_sequence is None:
-            self.tracing_context.trace.final_sequence = final_seq.clone()
-        
-        # Record timestamps
         end_time = time.time()
-        self.tracing_context.record_timestamps(start_time, end_time)
-
-        # If eval.py set the task trace list (context var), append here and skip per-sample save/upload
         task_trace_list = _task_trace_list_ctx.get()
-        if task_trace_list is not None:
-            try:
-                task_trace_list.append(self.tracing_context.trace.to_dict())
-            except Exception as e:
-                import warnings
-                warnings.warn(f"Failed to append trace to task list: {e}")
+
+        if self._batch_contexts is not None and final_seq is not None:
+            for b, ctx in enumerate(self._batch_contexts):
+                ctx.trace.final_sequence = final_seq[b : b + 1].clone()
+                ctx.record_timestamps(start_time, end_time)
+                if task_trace_list is not None:
+                    try:
+                        task_trace_list.append(ctx.trace.to_dict())
+                    except Exception as e:
+                        import warnings
+                        warnings.warn(f"Failed to append batch trace {b} to task list: {e}")
+                else:
+                    if ctx.upload_to_wandb and ctx.trace_name is not None:
+                        try:
+                            ctx.trace.upload_to_wandb(ctx.trace_name, base_dir=ctx.base_dir)
+                        except Exception as e:
+                            import warnings
+                            warnings.warn(f"Failed to upload batch trace {b} to wandb: {e}")
+                    if ctx.trace_name is not None and ctx.save_to_disk and not ctx.upload_to_wandb:
+                        try:
+                            ctx.save_trace()
+                        except Exception as e:
+                            import warnings
+                            warnings.warn(f"Failed to save batch trace {b} to disk: {e}")
         else:
-            # Upload to wandb if enabled
-            if self.tracing_context.upload_to_wandb and self.tracing_context.trace_name is not None:
+            if final_seq is not None and self.tracing_context.trace.final_sequence is None:
+                self.tracing_context.trace.final_sequence = final_seq.clone()
+            self.tracing_context.record_timestamps(start_time, end_time)
+            if task_trace_list is not None:
                 try:
-                    self.tracing_context.trace.upload_to_wandb(
-                        self.tracing_context.trace_name,
-                        base_dir=self.tracing_context.base_dir
-                    )
+                    task_trace_list.append(self.tracing_context.trace.to_dict())
                 except Exception as e:
                     import warnings
-                    warnings.warn(f"Failed to upload trace to wandb: {e}")
+                    warnings.warn(f"Failed to append trace to task list: {e}")
+            else:
+                if self.tracing_context.upload_to_wandb and self.tracing_context.trace_name is not None:
+                    try:
+                        self.tracing_context.trace.upload_to_wandb(
+                            self.tracing_context.trace_name,
+                            base_dir=self.tracing_context.base_dir
+                        )
+                    except Exception as e:
+                        import warnings
+                        warnings.warn(f"Failed to upload trace to wandb: {e}")
+                should_save_to_disk = (
+                    self.tracing_context.trace_name is not None
+                    and self.tracing_context.save_to_disk
+                    and not self.tracing_context.upload_to_wandb
+                )
+                if should_save_to_disk:
+                    try:
+                        self.tracing_context.save_trace()
+                    except Exception as e:
+                        import warnings
+                        warnings.warn(f"Failed to save trace: {e}")
 
-            # Automatically save trace to disk if trace_name is provided
-            # Skip if uploading to wandb (file already saved during upload)
-            should_save_to_disk = (
-                self.tracing_context.trace_name is not None
-                and self.tracing_context.save_to_disk
-                and not self.tracing_context.upload_to_wandb
-            )
-            if should_save_to_disk:
-                try:
-                    self.tracing_context.save_trace()
-                except Exception as e:
-                    import warnings
-                    warnings.warn(f"Failed to save trace: {e}")
-
-        # Return original result
         return result
 
 

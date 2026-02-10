@@ -9,6 +9,7 @@ from schedulers.fhs import generate_fhs
 from schedulers.eb_sampler import generate_EB
 from schedulers.dus import generate_dus
 from schedulers.fdm import generate_fdm
+from schedulers.generate import generate as generate_batch
 
 # Optional wandb import
 try:
@@ -185,9 +186,136 @@ def test_fdm(model, input_ids, attention_mask, tokenizer, trace_name=None,
     output = tokenizer.batch_decode(out_fdm[:, input_ids.shape[1]:], skip_special_tokens=True)
     return output, "FDM"
 
+# (mode, strategy, block_length) for batch tests via schedulers.generate.generate()
+BATCH_TEST_MODES = {
+    "pure_diffusion": ("pure_diffusion", "confidence", 256),
+    "block_diffusion": ("block_diffusion", "confidence", 32),
+    "top_k_confidence": ("top_k", "confidence", 256),
+    "top_k_margin": ("top_k", "top_margin", 256),
+    "fhs": ("fhs", None, None),
+    "eb_sampler": ("eb_sampler", "confidence", 256),
+    "dus": ("dus", "confidence", 32),
+    "fdm": ("fdm", None, None),
+}
+
+
+def run_batch_tests(model, tokenizer, device, batch_size=2, scheduler_name=None, trace_name_base=None, upload_to_wandb=False):
+    """Run batched generation via schedulers.generate.generate() and assert shapes/outputs.
+    When upload_to_wandb is True, traces are uploaded to wandb."""
+    prompts = [
+        "Joy can read 8 pages of a book in 20 minutes. How many hours will it take her to read 120 pages?",
+        "A store sells 5 apples for $2. How much do 15 apples cost?",
+        "What is 17 times 23?",
+        "If 3x + 5 = 20, what is x?",
+    ]
+    prompts = (prompts * ((batch_size // len(prompts)) + 1))[:batch_size]
+    encoded = tokenizer(
+        prompts,
+        add_special_tokens=False,
+        padding=True,
+        return_tensors="pt",
+    )
+    input_ids = encoded["input_ids"].to(device)
+    attention_mask = encoded["attention_mask"].to(device)
+    assert input_ids.shape[0] == batch_size, f"Expected batch {batch_size}, got {input_ids.shape[0]}"
+
+    modes_to_run = (
+        {scheduler_name: BATCH_TEST_MODES[scheduler_name]}
+        if scheduler_name
+        else BATCH_TEST_MODES
+    )
+    failures = []
+    for name, (mode, strategy, block_length) in modes_to_run.items():
+        try:
+            steps = 256
+            gen_length = 256
+            if mode == "fdm":
+                steps = 128
+            bl = None if mode in ("fhs", "fdm") else (block_length or gen_length)
+            trace_name = f"{trace_name_base}_{name}" if trace_name_base else None
+            kwargs = dict(
+                steps=steps,
+                gen_length=gen_length,
+                block_length=bl,
+                mode=mode,
+                trace_name=trace_name,
+                upload_to_wandb=upload_to_wandb,
+            )
+            if strategy is not None:
+                kwargs["strategy"] = strategy
+
+            generated, steps_taken, blocks, gen_time = generate_batch(
+                model, input_ids, attention_mask, **kwargs
+            )
+            assert generated.shape[0] == batch_size, (
+                f"{name}: expected generated.shape[0] == {batch_size}, got {generated.shape[0]}"
+            )
+            assert generated.shape[1] == input_ids.shape[1] + gen_length, (
+                f"{name}: expected seq_len == prompt_len + gen_length, "
+                f"got {generated.shape[1]} vs {input_ids.shape[1]} + {gen_length}"
+            )
+            decoded = tokenizer.batch_decode(
+                generated[:, input_ids.shape[1]:], skip_special_tokens=True
+            )
+            assert len(decoded) == batch_size, (
+                f"{name}: expected {batch_size} decoded strings, got {len(decoded)}"
+            )
+            print(f"  [batch] {name}: shape={generated.shape}, steps={steps_taken}, blocks={blocks}, time={gen_time:.2f}s")
+            for i, text in enumerate(decoded):
+                print(f"    [{name}] sample {i}:")
+                print(f"      {text}")
+        except Exception as e:
+            failures.append((name, e))
+            print(f"  [batch] {name}: FAILED - {e}")
+            traceback.print_exc()
+
+    if failures:
+        raise AssertionError(f"Batch tests failed for: {[f[0] for f in failures]}")
+    print(f"Batch tests passed for {len(modes_to_run)} scheduler(s).")
+
+
 def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=None,
-         intervention_mode=None, intervention_steps=None, intervention_k=1):
-    device = 'cuda'
+         intervention_mode=None, intervention_steps=None, intervention_k=1, run_batch_tests_only=False, batch_size=2):
+    device = "cuda"
+
+    # Batch tests: run batched generation 
+    if run_batch_tests_only:
+        if use_wandb:
+            if not WANDB_AVAILABLE:
+                print("Warning: wandb not available. Install with: pip install wandb")
+                print("Continuing without wandb logging...")
+                use_wandb = False
+            elif wandb.run is None:
+                if wandb_name is None:
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    suffix = f"_{scheduler_name}" if scheduler_name else "_all"
+                    wandb_name = f"test_schedulers_batch{suffix}_{timestamp}"
+                wandb.init(
+                    settings=wandb.Settings(init_timeout=120),
+                    project=wandb_project or "strace",
+                    name=wandb_name,
+                    config={"scheduler": scheduler_name or "all", "device": device, "batch_size": batch_size},
+                )
+                print(f"Initialized wandb run: {wandb_name}")
+        # Enable tracing for batch tests (saves to trace_outputs/; one trace per sample, suffixed _b0, _b1, ...)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        trace_name_base = f"batch_{timestamp}"
+        model_dir = "./models/llada"
+        model, tokenizer = load_model_and_tokenizer(model_dir, device=device, compile_model=False)
+        if tokenizer.padding_side != "left":
+            tokenizer.padding_side = "left"
+        assert tokenizer.pad_token_id != 126336
+        print(f"Running batch tests (batch_size={batch_size}, tracing={'on' if trace_name_base else 'off'})...")
+        run_batch_tests(
+            model, tokenizer, device,
+            batch_size=batch_size,
+            scheduler_name=scheduler_name,
+            trace_name_base=trace_name_base,
+            upload_to_wandb=use_wandb,
+        )
+        if use_wandb and WANDB_AVAILABLE and wandb.run is not None:
+            wandb.finish()
+        return
 
     # Initialize wandb if requested
     if use_wandb:
@@ -328,26 +456,48 @@ if __name__ == "__main__":
         choices=['drop', 'swap'],
         help='Intervention mode: "drop" to prevent tokens from being unmasked, "swap" to swap tokens'
     )
+    parser.add_argument(
+        '--batch',
+        action='store_true',
+        help='Run batch execution tests only (batched generation via schedulers.generate)'
+    )
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        default=2,
+        help='Batch size for --batch tests (default: 2)'
+    )
     args = parser.parse_args()
-    
+
     # Set default intervention parameters (steps=[0], k=1 when mode is specified)
     intervention_steps = [0] if args.intervention_mode is not None else None
     intervention_k = 1
-    
-    print("... Testing scheduler ...")
-    if args.scheduler:
-        print(f"Running scheduler: {args.scheduler}")
+
+    if args.batch:
+        print("... Running batch tests ...")
+        main(
+            scheduler_name=args.scheduler,
+            run_batch_tests_only=True,
+            batch_size=args.batch_size,
+            use_wandb=args.wandb,
+            wandb_project=args.wandb_project,
+            wandb_name=args.wandb_name,
+        )
     else:
-        print("Running all schedulers")
-    if args.wandb:
-        print("Wandb logging enabled")
-    if args.intervention_mode:
-        print(f"Intervention mode: {args.intervention_mode}")
-        print(f"Intervention steps: {intervention_steps} (default)")
-        print(f"Intervention k: {intervention_k} (default)")
-    print()
-    
-    main(
+        print("... Testing scheduler ...")
+        if args.scheduler:
+            print(f"Running scheduler: {args.scheduler}")
+        else:
+            print("Running all schedulers")
+        if args.wandb:
+            print("Wandb logging enabled")
+        if args.intervention_mode:
+            print(f"Intervention mode: {args.intervention_mode}")
+            print(f"Intervention steps: {intervention_steps} (default)")
+            print(f"Intervention k: {intervention_k} (default)")
+        print()
+
+        main(
         scheduler_name=args.scheduler,
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,
@@ -355,4 +505,4 @@ if __name__ == "__main__":
         intervention_mode=args.intervention_mode,
         intervention_steps=intervention_steps,
         intervention_k=intervention_k
-    )
+        )

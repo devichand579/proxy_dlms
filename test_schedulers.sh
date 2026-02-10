@@ -34,6 +34,10 @@ INTERVENTION OPTIONS:
                               "drop": prevent tokens from being unmasked
                               "swap": swap tokens
 
+BATCH OPTIONS:
+  --batch                     Run batch execution tests only (batched generation)
+  --batch_size N              Batch size for --batch tests (default: 2)
+
 OTHER OPTIONS:
   --help, -h                  Show this help message
 
@@ -46,6 +50,12 @@ EXAMPLES:
 
   # Test with custom tracing disabled
   $0 --scheduler top_k_confidence --tracing_enabled False
+
+  # Run batch execution tests (all schedulers, batch_size=2)
+  $0 --batch
+
+  # Run batch tests for one scheduler with batch_size 4
+  $0 --batch --scheduler pure_diffusion --batch_size 4
 
   # Test all schedulers (default behavior)
   $0
@@ -63,6 +73,8 @@ USE_WANDB=false
 WANDB_NAME=""
 SCHEDULER=""
 INTERVENTION_MODE=""
+USE_BATCH=false
+BATCH_SIZE=2
 PYTHON_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -99,6 +111,14 @@ while [[ $# -gt 0 ]]; do
             INTERVENTION_MODE="$2"
             shift 2
             ;;
+        --batch)
+            USE_BATCH=true
+            shift
+            ;;
+        --batch_size)
+            BATCH_SIZE="$2"
+            shift 2
+            ;;
         *)
             # Pass through any other arguments to the Python script
             PYTHON_ARGS+=("$1")
@@ -115,6 +135,8 @@ conda activate strace
 export TRACING_ENABLED
 export WANDB_API_KEY
 export WANDB_PROJECT
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES=1
 
 # Build Python command array
 PYTHON_CMD_ARGS=("test_schedulers.py")
@@ -137,6 +159,11 @@ fi
 
 if [ -n "$INTERVENTION_MODE" ]; then
     PYTHON_CMD_ARGS+=("--intervention_mode" "$INTERVENTION_MODE")
+fi
+
+if [ "$USE_BATCH" = true ]; then
+    PYTHON_CMD_ARGS+=("--batch")
+    PYTHON_CMD_ARGS+=("--batch_size" "$BATCH_SIZE")
 fi
 
 # Add any additional arguments passed through

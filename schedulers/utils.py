@@ -78,32 +78,43 @@ def check_eos_stop_condition(
     x: torch.Tensor,
     eos_id: int,
     mask_id: int,
-    prompt_len: int
+    prompt_len: int,
+    require_all_done: bool = True,
 ) -> bool:
     """
-    Check if generation should stop: EOS token is present AND all tokens before it are unmasked.
-    
+    Check if generation should stop based on EOS and unmasked state.
+
+    When require_all_done is True (default, for batched execution): returns True only
+    when every sample in the batch has EOS present with all tokens before it unmasked.
+    When require_all_done is False: returns True when any sample satisfies the condition.
+
     Args:
         x: Current token sequence of shape (batch_size, seq_len)
         eos_id: Token ID of EOS token
         mask_id: ID of the mask token
         prompt_len: Length of the input prompt
-        
+        require_all_done: If True, stop only when all batch elements are done; if False, stop when any is done.
+
     Returns:
-        True if EOS is found and all tokens before it are unmasked, False otherwise
+        True if the stop condition is met for the batch, False otherwise
     """
     generated_part = x[:, prompt_len:]  # Shape: (batch_size, gen_length)
-    
-    for batch_idx in range(x.shape[0]):
-        # Find EOS token positions in generated part
+    batch_size = x.shape[0]
+
+    for batch_idx in range(batch_size):
         eos_positions = (generated_part[batch_idx] == eos_id).nonzero(as_tuple=True)[0]
-        
-        if len(eos_positions) > 0:
-            first_eos_pos = eos_positions[0].item()
-            # Check if all tokens before EOS are unmasked
-            tokens_before_eos = generated_part[batch_idx, :first_eos_pos]
-            if not (tokens_before_eos == mask_id).any():
-                # All tokens before EOS are unmasked, can stop
-                return True
-    
-    return False
+        if len(eos_positions) == 0:
+            if require_all_done:
+                return False  # This sample not done
+            continue
+        first_eos_pos = eos_positions[0].item()
+        tokens_before_eos = generated_part[batch_idx, :first_eos_pos]
+        if (tokens_before_eos == mask_id).any():
+            if require_all_done:
+                return False  # This sample has EOS but still has masks before it
+            continue
+        # This sample is done (EOS with all before unmasked)
+        if not require_all_done:
+            return True  # Any done -> stop
+    # All samples checked: if require_all_done, every sample was done
+    return require_all_done
