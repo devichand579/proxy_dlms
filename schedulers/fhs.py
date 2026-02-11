@@ -176,11 +176,12 @@ def generate_fhs_extrapolation(
             if mu_prev is None:
                 mu_hat = mu
             else:
-                # Lagrange interpolation in time
-                mu_hat = (
-                    (tau_new - tau_prev) / (tau_curr - tau_prev) * mu
-                    + (tau_new - tau_curr) / (tau_prev - tau_curr) * mu_prev
-                )
+                # Lagrange interpolation in time; reshape for (batch, seq, vocab) broadcast
+                coeff1 = (tau_new - tau_prev) / (tau_curr - tau_prev)
+                coeff2 = (tau_new - tau_curr) / (tau_prev - tau_curr)
+                coeff1 = coeff1.reshape(-1, 1, 1)
+                coeff2 = coeff2.reshape(-1, 1, 1)
+                mu_hat = coeff1 * mu + coeff2 * mu_prev
 
             # Sample ONE token per batch
             for b in range(prompt.shape[0]):

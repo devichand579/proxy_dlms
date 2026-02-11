@@ -17,6 +17,7 @@ model: llada
 compile_model: false
 wandb: true
 tracing_enabled: true
+num_fewshot: null  # null = use per-task default (humaneval 0, gsm8k 4, mbpp 3, arc_challenge_chat 0). Set to int to override.
 
 # Optional intervention
 intervention:

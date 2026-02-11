@@ -49,6 +49,7 @@ Convenient wrapper that sets generation length, steps, few-shot count, and outpu
 | `--intervention_mode` | Optional: `drop` or `swap`. |
 | `--intervention_steps` | Optional: comma-separated step indices (e.g. `0,128,256`). |
 | `--intervention_k` | Optional: tokens per intervention step (default 1). |
+| `--num_fewshot` | Optional: override per-task few-shot count (defaults: humaneval/arc_challenge_chat 0, gsm8k/math500 4, mbpp 3). |
 | `--slurm` | Use when submitting via `sbatch` so the command runs under `srun`. |
 
 **Mode shortcuts:**
@@ -66,7 +67,7 @@ Convenient wrapper that sets generation length, steps, few-shot count, and outpu
 
 - **Length & steps:** arc_challenge_chat uses 128 tokens and 128 steps; other tasks use 512.
 - **Block length:** Block diffusion uses 32; pure diffusion uses full generation length.
-- **Few-shot:** HumanEval 0; GSM8K, Minerva Math500 4; MBPP 3; arc_challenge_chat 5.
+- **Few-shot:** HumanEval, arc_challenge_chat 0; GSM8K, Minerva Math500 4; MBPP 3. Override with `--num_fewshot <n>` (eval.sh) or `num_fewshot: <n>` (Hydra).
 
 **Examples:**
 
