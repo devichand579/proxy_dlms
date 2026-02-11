@@ -38,6 +38,7 @@ INTERVENTION_STEPS=""
 INTERVENTION_K=""
 WANDB=""
 TRACING_ENABLED_ARG=""
+NUM_FEWSHOT_OVERRIDE=""
 SLURM_MODE=false
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -81,13 +82,17 @@ while [[ $# -gt 0 ]]; do
             TRACING_ENABLED_ARG="$2"
             shift 2
             ;;
+        --num_fewshot)
+            NUM_FEWSHOT_OVERRIDE="$2"
+            shift 2
+            ;;
         --slurm)
             SLURM_MODE=true
             shift
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
+            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
             exit 1
             ;;
     esac
@@ -96,10 +101,11 @@ done
 # Check required arguments (intervention and wandb are optional)
 if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "Error: Missing required arguments"
-    echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
+    echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
     echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)"
     echo "  Optional - Intervention: --intervention_mode drop|swap, --intervention_steps 0,128,256, --intervention_k 1"
     echo "  Optional - Wandb: --wandb True to log to wandb"
+    echo "  Optional - Few-shot: --num_fewshot <n> to override per-task default (defaults: humaneval/arc_challenge_chat 0, gsm8k/math500 4, mbpp 3)"
     echo "  Optional - Tracing: --tracing_enabled True to enable scheduler tracing (writes trace_outputs/<trace_name>.json)"
     echo "  Optional - SLURM: --slurm to run the eval under srun (for sbatch submissions)"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
@@ -208,20 +214,22 @@ if [[ -n "$INTERVENTION_MODE" ]]; then
     WANDB_NAME="${OUTPUT_SUFFIX}"
 fi
 
-# Set num_fewshot based on task name
-NUM_FEWSHOT=0  # Default
-if [[ "$TASK_NAME" == *"humaneval"* ]]; then
-    NUM_FEWSHOT=0
-elif [[ "$TASK_NAME" == *"gsm8k"* ]]; then
-    NUM_FEWSHOT=4
-elif [[ "$TASK_NAME" == *"math500"* ]] || [[ "$TASK_NAME" == *"minerva_math500"* ]]; then
-    NUM_FEWSHOT=4
-elif [[ "$TASK_NAME" == *"mbpp3"* ]]; then
-    NUM_FEWSHOT=3
-elif [[ "$TASK_NAME" == *"mbpp"* ]]; then
-    NUM_FEWSHOT=3
-elif [[ "$TASK_NAME" == *"arc_challenge_chat"* ]]; then
-    NUM_FEWSHOT=5
+# Set num_fewshot: override if provided, else per-task default
+if [[ -n "$NUM_FEWSHOT_OVERRIDE" ]]; then
+    NUM_FEWSHOT="$NUM_FEWSHOT_OVERRIDE"
+else
+    NUM_FEWSHOT=0  # Default
+    if [[ "$TASK_NAME" == *"humaneval"* ]]; then
+        NUM_FEWSHOT=0
+    elif [[ "$TASK_NAME" == *"gsm8k"* ]]; then
+        NUM_FEWSHOT=4
+    elif [[ "$TASK_NAME" == *"math500"* ]] || [[ "$TASK_NAME" == *"minerva_math500"* ]]; then
+        NUM_FEWSHOT=4
+    elif [[ "$TASK_NAME" == *"mbpp"* ]]; then
+        NUM_FEWSHOT=3
+    elif [[ "$TASK_NAME" == *"arc_challenge_chat"* ]]; then
+        NUM_FEWSHOT=0
+    fi
 fi
 
 # Build model_args (base args + optional intervention params)

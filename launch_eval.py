@@ -95,7 +95,8 @@ def run(cfg: DictConfig) -> int:
 
     gen_length, steps = get_gen_length_steps(task_name)
     block_length = 32 if mode == "block_diffusion" else gen_length
-    num_fewshot = get_num_fewshot(task_name)
+    num_fewshot_cfg = cfg.get("num_fewshot")
+    num_fewshot = int(num_fewshot_cfg) if num_fewshot_cfg is not None else get_num_fewshot(task_name)
     model_path = f"./models/{model}"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
