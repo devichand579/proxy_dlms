@@ -23,7 +23,7 @@
 # Parse command-line arguments
 # Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [--compile_model False] [--intervention_mode drop] [--intervention_steps 0,128,256] [--intervention_k 1] [--wandb True] [--tracing_enabled True] [--slurm]
 # Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)
-# Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, truthfulqa
+# Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, arc_challenge_chat
 # --slurm: run the eval command under srun (use when script is submitted via sbatch so the job uses the allocated GPU).
 # Local GPU: run without --slurm; optionally export CUDA_VISIBLE_DEVICES=0 before running.
 
@@ -172,9 +172,8 @@ else
     export TRACING_ENABLED=FALSE
 fi
 
-# Set gen_length and steps based on task
-# truthfulqa: gen_length=256, steps=256; all other tasks: 512
-if [[ "$TASK_NAME" == *"truthfulqa"* ]]; then
+# Set gen_length and steps (arc_challenge_chat: 128; others: 512)
+if [[ "$TASK_NAME" == *"arc_challenge_chat"* ]]; then
     export GEN_LENGTH=128
     export STEPS=128
 else
@@ -221,8 +220,8 @@ elif [[ "$TASK_NAME" == *"mbpp3"* ]]; then
     NUM_FEWSHOT=3
 elif [[ "$TASK_NAME" == *"mbpp"* ]]; then
     NUM_FEWSHOT=3
-elif [[ "$TASK_NAME" == *"truthfulqa"* ]]; then
-    NUM_FEWSHOT=0
+elif [[ "$TASK_NAME" == *"arc_challenge_chat"* ]]; then
+    NUM_FEWSHOT=5
 fi
 
 # Build model_args (base args + optional intervention params)

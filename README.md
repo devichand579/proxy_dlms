@@ -41,7 +41,7 @@ Convenient wrapper that sets generation length, steps, few-shot count, and outpu
 |----------|-------------|
 | `--batch_size` | Max requests per chunk (e.g. 2, 4, 8). Chunks may be smaller when a length bucket has fewer samples. |
 | `--mode` | Scheduler: `pd`, `bd`, `eb`, `fdm`, `fhs`, `top_k_c`, `top_k_m`, `dus` (see below). |
-| `--task_name` | Eval task: `gsm8k`, `humaneval`, `mbpp`, `minerva_math500`, `bbh`, `truthfulqa`, etc. |
+| `--task_name` | Eval task: `gsm8k`, `humaneval`, `mbpp`, `minerva_math500`, `arc_challenge_chat`, etc. |
 | `--model` | Model dir under `./models/` (e.g. `llada`). |
 | `--compile_model` | `True` / `False` for `torch.compile`. |
 | `--wandb` | `True` to log to Weights & Biases. |
@@ -64,9 +64,9 @@ Convenient wrapper that sets generation length, steps, few-shot count, and outpu
 
 **Auto-configured from task:**
 
-- **Length & steps:** HumanEval/MBPP use 512 tokens and 512 steps; others use 256.
+- **Length & steps:** arc_challenge_chat uses 128 tokens and 128 steps; other tasks use 512.
 - **Block length:** Block diffusion uses 32; pure diffusion uses full generation length.
-- **Few-shot:** HumanEval/TruthfulQA 0; GSM8K, Minerva Math500 4; MBPP 3; BBH 3.
+- **Few-shot:** HumanEval 0; GSM8K, Minerva Math500 4; MBPP 3; arc_challenge_chat 5.
 
 **Examples:**
 

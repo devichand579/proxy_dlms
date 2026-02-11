@@ -47,13 +47,13 @@ def get_num_fewshot(task_name: str) -> int:
         return 3
     if "mbpp" in task_name:
         return 3
-    if "truthfulqa" in task_name:
-        return 0
+    if "arc_challenge_chat" in task_name:
+        return 5
     return 0
 
 
 def get_gen_length_steps(task_name: str) -> tuple[int, int]:
-    if "truthfulqa" in task_name:
+    if "arc_challenge_chat" in task_name:
         return 128, 128
     return 512, 512
 
