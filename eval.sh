@@ -217,8 +217,10 @@ elif [[ "$TASK_NAME" == *"gsm8k"* ]]; then
     NUM_FEWSHOT=4
 elif [[ "$TASK_NAME" == *"math500"* ]] || [[ "$TASK_NAME" == *"minerva_math500"* ]]; then
     NUM_FEWSHOT=4
+elif [[ "$TASK_NAME" == *"mbpp3"* ]]; then
+    NUM_FEWSHOT=3
 elif [[ "$TASK_NAME" == *"mbpp"* ]]; then
-    NUM_FEWSHOT=4
+    NUM_FEWSHOT=3
 elif [[ "$TASK_NAME" == *"truthfulqa"* ]]; then
     NUM_FEWSHOT=0
 fi

@@ -66,7 +66,7 @@ Convenient wrapper that sets generation length, steps, few-shot count, and outpu
 
 - **Length & steps:** HumanEval/MBPP use 512 tokens and 512 steps; others use 256.
 - **Block length:** Block diffusion uses 32; pure diffusion uses full generation length.
-- **Few-shot:** HumanEval/TruthfulQA 0; GSM8K, Minerva Math500, MBPP 4; BBH 3.
+- **Few-shot:** HumanEval/TruthfulQA 0; GSM8K, Minerva Math500 4; MBPP 3; BBH 3.
 
 **Examples:**
 
