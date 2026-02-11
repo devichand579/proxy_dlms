@@ -43,8 +43,10 @@ def get_num_fewshot(task_name: str) -> int:
         return 4
     if "math500" in task_name or "minerva_math500" in task_name:
         return 4
+    if "mbpp3" in task_name:
+        return 3
     if "mbpp" in task_name:
-        return 4
+        return 3
     if "truthfulqa" in task_name:
         return 0
     return 0
