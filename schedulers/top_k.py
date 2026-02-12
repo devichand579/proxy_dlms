@@ -106,7 +106,7 @@ def generate_topk(
             if metric == 'confidence':
                 x0_p = get_mask_by_confidence(logits, x0)
             elif metric == 'top_margin':
-                probs = F.softmax(logits.to(torch.float64), dim=-1)
+                probs = F.softmax(logits.float(), dim=-1)
                 top2 = torch.topk(probs, 2, dim=-1).values
                 x0_p = top2[..., 0] - top2[..., 1]
                 del probs, top2
