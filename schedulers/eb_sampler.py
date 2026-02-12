@@ -105,7 +105,7 @@ def generate_EB(
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
 
-            p = F.softmax(logits.to(torch.float64), dim=-1)
+            p = F.softmax(logits.float(), dim=-1)
 
             # Compute EB ranking score
             if E == 'confidence':
