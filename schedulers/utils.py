@@ -51,11 +51,9 @@ def get_mask_by_confidence(logits: torch.Tensor, x0: torch.Tensor) -> torch.Tens
     Returns:
         Confidence scores for each position
     """
-    p = F.softmax(logits.to(torch.float64), dim=-1)
-    x0_p = torch.squeeze(
-        torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
-    )
-    return x0_p
+    log_p = F.log_softmax(logits.float(), dim=-1)
+    x0_log_p = torch.gather(log_p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
+    return x0_log_p.exp()
 
 def get_mask_by_entropy(logits: torch.Tensor) -> torch.Tensor:
     """
@@ -70,7 +68,7 @@ def get_mask_by_entropy(logits: torch.Tensor) -> torch.Tensor:
     Returns:
         Entropy values for each position
     """
-    p = F.softmax(logits.to(torch.float64), dim=-1)
+    p = F.softmax(logits.float(), dim=-1)
     entropy = -torch.sum(p * torch.log(p + 1e-10), dim=-1)
     return entropy
 
