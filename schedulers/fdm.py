@@ -23,6 +23,7 @@ else:
 
 @ torch.no_grad()
 def _global_confidence_expected_logp(model, x_hyp, attention_mask, mask_id,
+                                     block_start=None, block_end=None,
                                      eos_id=None, eot_id=None,
                                      confidence_eos_eot_inf=False):
     """
@@ -31,13 +32,11 @@ def _global_confidence_expected_logp(model, x_hyp, attention_mask, mask_id,
     Strategy:
       For each hypothesis (shape [B_h, L]) compute logits -> log_softmax -> p
       Per-position expected log-prob:  e_lp = sum_v p_v * log p_v  (shape [B_h, L])
-      Then average e_lp over *masked* positions for each hypothesis.
-      This yields an average expected log-prob per masked position (log-space).
-      It is an unbiased-ish per-position expected log-prob estimator and is
-      closer to the expected sequence log-likelihood than max-logp.
+      Then average e_lp over *masked* positions within the active block only.
+      
 
     Returns:
-      c_global: [B_h] (float)  — average expected log-prob over masked positions.
+      c_global: [B_h] (float)  — average expected log-prob over masked positions in block.
     """
     device = x_hyp.device
     logits = model(x_hyp, attention_mask=attention_mask).logits  # [B_h, L, V]
@@ -53,8 +52,16 @@ def _global_confidence_expected_logp(model, x_hyp, attention_mask, mask_id,
     # per-position expected log-prob: sum_v p_v * log p_v (negative entropy, <= 0)
     expected_logp_per_pos = (p * logp).sum(dim=-1)  # [B_h, L]
 
-    # mask positions to consider
+    # mask positions to consider — restrict to current block only
+    L = x_hyp.shape[1]
+    if block_start is not None and block_end is not None:
+        assert 0 <= block_start < block_end <= L, "block indices must be within hypothesis length"
     mask_index = (x_hyp == mask_id)  # [B_h, L]
+    if block_start is not None and block_end is not None:
+        block_range = torch.zeros(L, dtype=torch.bool, device=device)
+        block_range[block_start:block_end] = True
+        mask_index = mask_index & block_range.unsqueeze(0)  # [B_h, L]
+
     denom = mask_index.sum(dim=-1).clamp_min(1).to(expected_logp_per_pos.dtype)  # [B_h]
 
     # sum over masked positions and average (so units are per-position log-prob)
@@ -102,15 +109,19 @@ def _fdm_single_step(
     K, n,
     log_gamma,
     mask_id,
+    block_start, block_end,
     eos_id, eot_id,
     confidence_eos_eot_inf,
     global_scale,
 ):
     device = x.device
 
-    # Candidate pruning
-    cand_mask = (x0_logp[b, masked_pos] > log_gamma)
-    cand_pos = masked_pos[cand_mask]
+    # Candidate pruning (FDM2 uses γ=1.0 → no pruning; FDM1 uses γ_1 or η_2)
+    if log_gamma > -1e-9:  # γ_1 ≈ 1.0: skip pruning, use all masked positions
+        cand_pos = masked_pos
+    else:
+        cand_mask = (x0_logp[b, masked_pos] > log_gamma)
+        cand_pos = masked_pos[cand_mask]
 
     if cand_pos.numel() == 0:
         # fallback greedy local
@@ -139,6 +150,8 @@ def _fdm_single_step(
         x_hyp=x_base,
         attention_mask=attn_hyp,
         mask_id=mask_id,
+        block_start=block_start,
+        block_end=block_end,
         eos_id=eos_id,
         eot_id=eot_id,
         confidence_eos_eot_inf=confidence_eos_eot_inf
@@ -220,7 +233,8 @@ def generate_fdm(
     eos_id, eot_id = 126081, 126348
     steps_taken = 0  
 
-    log_gamma = math.log(gamma) if gamma > 0 else -1e9
+    # γ_1: main pruning threshold (exploration branch). η_2: borderline-stage threshold (final else).
+    log_gamma1 = math.log(gamma) if gamma > 0 else -1e9
 
     for num_block in range(num_blocks):
         block_start = prompt_len + num_block * block_length
@@ -279,19 +293,19 @@ def generate_fdm(
                 num_high = int(high_mask.sum().item())
                 num_border = int(border_mask.sum().item())
 
-    
-                # Case A: Exploration (FDM1 with γ=η2) — borderline exists, no high confidence
-                if num_high == 0 and num_border > 0:
-                    # Use deep FDM with stricter pruning (γ=η2)
-                    log_gamma_eta2 = math.log(eta2) if eta2 > 0 else -1e9
+              
+                if num_high == 0:
+                    # Exploration: NUM(p > η1) == 0 → FDM1(..., n=1, γ=γ1)
                     _fdm_single_step(
                         model, x, j, attention_mask,
                         masked_pos,
                         x0, x0_logp,
                         K=K1,
                         n=1,
-                        log_gamma=log_gamma_eta2,
+                        log_gamma=log_gamma1,
                         mask_id=mask_id,
+                        block_start=block_start,
+                        block_end=block_end,
                         eos_id=eos_id,
                         eot_id=eot_id,
                         confidence_eos_eot_inf=confidence_eos_eot_inf,
@@ -299,23 +313,63 @@ def generate_fdm(
                     )
                     continue
 
-                # Case B: Balance (FDM2) — many high confidence OR no borderline
-                if num_high > 0 or num_border == 0:
-                    # Cheap FDM (K=1), parallel small batch
+                if num_high >= N:
+                    # Many qualified → FDM2(..., n=N, γ=1.0).
                     _fdm_single_step(
                         model, x, j, attention_mask,
                         masked_pos,
                         x0, x0_logp,
                         K=1,
-                        n=min(N, masked_pos.numel()),
-                        log_gamma=0,
+                        n=min(num_high, N),
+                        log_gamma=0.0,
                         mask_id=mask_id,
+                        block_start=block_start,
+                        block_end=block_end,
                         eos_id=eos_id,
                         eot_id=eot_id,
                         confidence_eos_eot_inf=confidence_eos_eot_inf,
                         global_scale=global_scale,
                     )
                     continue
+
+                if num_border == 0:
+                    # No borderline → FDM2(..., n=NUM(p>η1), γ=1.0).
+                    n_dec = min(num_high, N)
+                    _fdm_single_step(
+                        model, x, j, attention_mask,
+                        masked_pos,
+                        x0, x0_logp,
+                        K=1,
+                        n=n_dec,
+                        log_gamma=0.0,
+                        mask_id=mask_id,
+                        block_start=block_start,
+                        block_end=block_end,
+                        eos_id=eos_id,
+                        eot_id=eot_id,
+                        confidence_eos_eot_inf=confidence_eos_eot_inf,
+                        global_scale=global_scale,
+                    )
+                    continue
+
+                # Else: borderline exists → FDM1(..., n=NUM(p>η1), γ=η_2). η_2 ≠ γ_1
+                n_dec = min(num_high, masked_pos.numel())
+                log_eta2 = math.log(eta2) if eta2 > 0 else -1e9
+                _fdm_single_step(
+                    model, x, j, attention_mask,
+                    masked_pos,
+                    x0, x0_logp,
+                    K=K1,
+                    n=n_dec,
+                    log_gamma=log_eta2,
+                    mask_id=mask_id,
+                    block_start=block_start,
+                    block_end=block_end,
+                    eos_id=eos_id,
+                    eot_id=eot_id,
+                    confidence_eos_eot_inf=confidence_eos_eot_inf,
+                    global_scale=global_scale,
+                )
 
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
             if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
