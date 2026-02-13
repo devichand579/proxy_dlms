@@ -84,15 +84,15 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
             confidence_threshold=0.1, **common_trace_kw,
         )
     elif mode == "fdm":
-        assert block_length is None, "Block length must be None"
-        gen, steps_taken = generate_fdm(
+        bl = block_length if block_length is not None else gen_length
+        assert bl <= gen_length, "Block length must be less than or equal to gen_length"
+        gen, steps_taken, blocks = generate_fdm(
             model, input_ids, attention_mask,
-            steps=steps, gen_length=gen_length,
+            steps=steps, gen_length=gen_length, block_length=bl,
             K1=2, N=4, eta1=0.8, eta2=0.7, gamma=0.5, temperature=0.0,
             mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False,
             global_scale=1.0, **common_trace_kw,
         )
-        blocks = 0
     else:
         raise ValueError(f"Unknown mode: {mode}")
 

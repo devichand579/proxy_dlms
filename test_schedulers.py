@@ -171,15 +171,15 @@ def test_dus(model, input_ids, attention_mask, tokenizer, trace_name=None,
 def test_fdm(model, input_ids, attention_mask, tokenizer, trace_name=None,
                         intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test FDM scheduler"""
-    print("Generating with FDM (steps=128)...")
+    print("Generating with FDM (steps=128, block_length=32)...")
     start_time = time.time()
-    out_fdm, steps_fdm = generate_fdm(
-        model, input_ids, attention_mask, steps=128, gen_length=256,
+    out_fdm, steps_fdm, blocks_fdm = generate_fdm(
+        model, input_ids, attention_mask, steps=128, gen_length=256, block_length=32,
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     fdm_time = time.time() - start_time
     print(f"FDM generation time: {fdm_time:.2f} seconds")
-    print(f"Steps taken: {steps_fdm}")
+    print(f"Steps taken: {steps_fdm}, blocks: {blocks_fdm}")
     print(f"output Shape: {out_fdm.shape}")
     print()
     
@@ -195,7 +195,7 @@ BATCH_TEST_MODES = {
     "fhs": ("fhs", None, None),
     "eb_sampler": ("eb_sampler", "confidence", 256),
     "dus": ("dus", "confidence", 32),
-    "fdm": ("fdm", None, None),
+    "fdm": ("fdm", None, 32),
 }
 
 
@@ -231,7 +231,7 @@ def run_batch_tests(model, tokenizer, device, batch_size=2, scheduler_name=None,
             gen_length = 256
             if mode == "fdm":
                 steps = 128
-            bl = None if mode in ("fhs", "fdm") else (block_length or gen_length)
+            bl = None if mode == "fhs" else (block_length or gen_length)
             trace_name = f"{trace_name_base}_{name}" if trace_name_base else None
             kwargs = dict(
                 steps=steps,
