@@ -224,7 +224,7 @@ class LLaDAEvalHarness(LM):
 
         self.steps = int(steps)
         self.gen_length = int(gen_length)
-        if self.mode in ("fhs", "fdm"):
+        if self.mode == "fhs":
             self.block_length = None
         else:
             self.block_length = int(block_length)

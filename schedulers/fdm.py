@@ -1,7 +1,7 @@
 '''
     FDM (Foreseeing Decoding Method) scheduler
     generate_fdm(model, prompt, attention_mask=None, steps=128, gen_length=256,
-                 K1=2, N=4, eta1=0.8, eta2=0.7, gamma=0.5, temperature=0.,
+                 block_length=256, K1=2, N=4, eta1=0.8, eta2=0.7, gamma=0.5, temperature=0.,
                  mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False,
                  global_scale=1.0, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
 '''
@@ -163,6 +163,7 @@ def generate_fdm(
     attention_mask=None,
     steps=128,
     gen_length=256,
+    block_length=256,
     K1=2,
     N=4,
     eta1=0.8,
@@ -184,8 +185,9 @@ def generate_fdm(
         model: Mask predictor.
         prompt: A tensor of shape (1, L).
         attention_mask: A tensor of shape (1, L).
-        steps: Sampling steps, less than or equal to gen_length.
+        steps: Sampling steps, less than or equal to gen_length. Divided across blocks.
         gen_length: Generated answer length.
+        block_length: Block length, less than or equal to gen_length. Confidence/unmasking is computed only within each block.
         K1: Deep foreseeing width for FDM1 (exploration mode).
         N: Max parallel tokens for FDM2 and acceleration mode.
         eta1: High-confidence threshold. Above this uses pure local decoding.
@@ -208,105 +210,125 @@ def generate_fdm(
     if attention_mask is not None:
         attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
 
+    assert gen_length % block_length == 0
+    num_blocks = gen_length // block_length
+
+    assert steps % num_blocks == 0
+    steps_per_block = steps // num_blocks
+
     prompt_len = prompt.shape[1]
     eos_id, eot_id = 126081, 126348
     steps_taken = 0  
 
     log_gamma = math.log(gamma) if gamma > 0 else -1e9
 
-    for t in range(steps):
-        # Cache mask_index - compute once per step
-        mask_index = (x == mask_id)
-        if not mask_index.any():
-            break
+    for num_block in range(num_blocks):
+        block_start = prompt_len + num_block * block_length
+        block_end = prompt_len + (num_block + 1) * block_length
 
-        steps_taken += 1  
-        logits = model(x, attention_mask=attention_mask).logits
+        # Early stopping - check if block is already complete
+        block_mask_index = (x[:, block_start:block_end] == mask_id)
+        if not block_mask_index.any():
+            continue  # Skip completed blocks
 
-        # Set EOS/EOT to -inf before sampling to prevent them from being predicted
-        if logits_eos_inf:
-            logits[:, :, eos_id] = -torch.inf
+        for t in range(steps_per_block):
+            # Cache mask_index - compute once per step
+            mask_index = (x == mask_id)
+            block_mask = mask_index[:, block_start:block_end]
+            if not block_mask.any():
+                break
 
-        if confidence_eos_eot_inf:
-            logits[:, :, eos_id] = -torch.inf
-            logits[:, :, eot_id] = -torch.inf
+            steps_taken += 1  
+            logits = model(x, attention_mask=attention_mask).logits
 
-        logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-        x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
+            # Set EOS/EOT to -inf before sampling to prevent them from being predicted
+            if logits_eos_inf:
+                logits[:, :, eos_id] = -torch.inf
 
-        logp = F.log_softmax(logits, dim=-1)
-        x0_logp = torch.gather(logp, -1, x0.unsqueeze(-1)).squeeze(-1)
+            if confidence_eos_eot_inf:
+                logits[:, :, eos_id] = -torch.inf
+                logits[:, :, eot_id] = -torch.inf
 
-        x0_logp[:, :prompt_len] = -np.inf
-        local_logconf = torch.where(mask_index, x0_logp, -np.inf)
+            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+            x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
 
-        # Convert to probs for threshold logic
-        local_p = torch.exp(local_logconf)
+            logp = F.log_softmax(logits, dim=-1)
+            x0_logp = torch.gather(logp, -1, x0.unsqueeze(-1)).squeeze(-1)
 
-        for j in range(prompt.shape[0]):
-            masked_pos = torch.nonzero(mask_index[j], as_tuple=False).squeeze(-1)
-            if masked_pos.numel() == 0:
-                continue
+            x0_logp[:, :prompt_len] = -np.inf
+            local_logconf = torch.where(mask_index, x0_logp, -np.inf)
 
-            p_b = local_p[j, masked_pos]
+            # Convert to probs for threshold logic
+            local_p = torch.exp(local_logconf)
 
-            # High confidence and borderline sets
-            high_mask = p_b > eta1
-            border_mask = (p_b > eta2) & (p_b <= eta1)
+            for j in range(prompt.shape[0]):
+                # Restrict to masked positions within current block only
+                masked_pos = torch.nonzero(
+                    mask_index[j, block_start:block_end], as_tuple=False
+                ).squeeze(-1)
+                if masked_pos.numel() == 0:
+                    continue
+                masked_pos = masked_pos + block_start  # Convert to global indices
 
-            num_high = int(high_mask.sum().item())
-            num_border = int(border_mask.sum().item())
+                p_b = local_p[j, masked_pos]
 
-            # Case A: Exploration (FDM1)
-            if num_high == 0:
-                # Use deep FDM (K=K1, n=1)
-                _fdm_single_step(
-                    model, x, j, attention_mask,
-                    masked_pos,
-                    x0, x0_logp,
-                    K=K1,
-                    n=1,
-                    log_gamma=log_gamma,
-                    mask_id=mask_id,
-                    eos_id=eos_id,
-                    eot_id=eot_id,
-                    confidence_eos_eot_inf=confidence_eos_eot_inf,
-                    global_scale=global_scale,
-                )
-                continue
+                # High confidence and borderline sets
+                high_mask = p_b > eta1
+                border_mask = (p_b > eta2) & (p_b <= eta1)
 
-            # Case B: Balance (FDM2)
-            if num_border > 0:
-                # Cheap FDM (K=1), parallel small batch
-                _fdm_single_step(
-                    model, x, j, attention_mask,
-                    masked_pos,
-                    x0, x0_logp,
-                    K=1,
-                    n=min(N, masked_pos.numel()),
-                    log_gamma=log_gamma,
-                    mask_id=mask_id,
-                    eos_id=eos_id,
-                    eot_id=eot_id,
-                    confidence_eos_eot_inf=confidence_eos_eot_inf,
-                    global_scale=global_scale,
-                )
-                continue
+                num_high = int(high_mask.sum().item())
+                num_border = int(border_mask.sum().item())
 
-            # Case C: Acceleration (pure local)
-            # Decode many tokens purely by local confidence
-            scores = local_logconf[j, masked_pos]
-            k = min(N, masked_pos.numel())
-            topk = torch.topk(scores, k=k).indices
-            chosen_pos = masked_pos[topk]
-            x[j, chosen_pos] = x0[j, chosen_pos]
+                # Case A: Exploration (FDM1)
+                if num_high == 0:
+                    # Use deep FDM (K=K1, n=1)
+                    _fdm_single_step(
+                        model, x, j, attention_mask,
+                        masked_pos,
+                        x0, x0_logp,
+                        K=K1,
+                        n=1,
+                        log_gamma=log_gamma,
+                        mask_id=mask_id,
+                        eos_id=eos_id,
+                        eot_id=eot_id,
+                        confidence_eos_eot_inf=confidence_eos_eot_inf,
+                        global_scale=global_scale,
+                    )
+                    continue
 
-        # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
-        if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
-            return x, steps_taken  # Stop generation early
+                # Case B: Balance (FDM2)
+                if num_border > 0:
+                    # Cheap FDM (K=1), parallel small batch
+                    _fdm_single_step(
+                        model, x, j, attention_mask,
+                        masked_pos,
+                        x0, x0_logp,
+                        K=1,
+                        n=min(N, masked_pos.numel()),
+                        log_gamma=log_gamma,
+                        mask_id=mask_id,
+                        eos_id=eos_id,
+                        eot_id=eot_id,
+                        confidence_eos_eot_inf=confidence_eos_eot_inf,
+                        global_scale=global_scale,
+                    )
+                    continue
 
-        # Clear intermediate tensors to free memory
-        del logits, logits_with_noise, logp, x0_logp, local_logconf, local_p
-        torch.cuda.empty_cache()
+                # Case C: Acceleration (pure local)
+                # Decode many tokens purely by local confidence
+                scores = local_logconf[j, masked_pos]
+                k = min(N, masked_pos.numel())
+                topk = torch.topk(scores, k=k).indices
+                chosen_pos = masked_pos[topk]
+                x[j, chosen_pos] = x0[j, chosen_pos]
 
-    return x, steps_taken
+            # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
+            if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
+                return x, steps_taken, num_block + 1  # Stop generation early
+
+            # Clear intermediate tensors to free memory
+            del logits, logits_with_noise, logp, x0_logp, local_logconf, local_p
+            torch.cuda.empty_cache()
+
+    return x, steps_taken, num_blocks
