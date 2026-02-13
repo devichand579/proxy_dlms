@@ -50,14 +50,43 @@ def _model_logits(model, x, attention_mask=None, t_cond=None):
 
 
 
-def update_tau_linear(tau, n_masked):
+def _sample_next_event_time_linear(tau, n_masked):
     """
-    Linear schedule:
-      alpha(t) = 1 - t
-      => tau_{l-1} = tau_l * u^{1/l}
+    Paper: sample next event time analytically.
+    Linear schedule α(t) = 1 - t  =>  τ_{l-1} = τ_l * u^{1/l}
     """
+    n_safe = n_masked.clamp(min=1.0)
     u = torch.rand_like(tau).clamp(min=1e-12)
-    return tau * torch.pow(u, 1.0 / n_masked)
+    return tau * torch.pow(u, 1.0 / n_safe)
+
+
+def _pick_token_and_tau(tau_per_token, masked, batch_idx):
+    """
+    FHS: pick the masked token with earliest (minimum) hitting time.
+    Returns (k, tau_new) where tau_new = actual next unmasking time.
+    """
+    idx = torch.nonzero(masked[batch_idx]).squeeze(-1)
+    if idx.numel() == 0:
+        return None, None
+    tau_b = tau_per_token[batch_idx]
+    tau_at_masked = tau_b[idx]
+    best_local = torch.argmin(tau_at_masked).item()
+    k = idx[best_local].item()
+    tau_new = tau_b[k].item()
+    return k, tau_new
+
+
+def _rescale_hitting_times_survival(tau_per_token, masked, k, tau_new, tau_upper, batch_idx):
+    """
+    After token k hits at τ_new, condition remaining on survival.
+    Rescale τ_j ∈ (τ_new, τ_upper] → (0, 1] for next round.
+    (masked already has k=False when called)
+    """
+    tau_b = tau_per_token[batch_idx]
+    mask_b = masked[batch_idx]
+    denom = tau_upper - tau_new
+    denom = max(float(denom), 1e-8)
+    tau_b[mask_b] = (tau_b[mask_b] - tau_new) / denom
 
 
 def sample_categorical(logits, temperature=1.0, use_fp64=True):
@@ -86,6 +115,8 @@ def make_equal_schedule(L, N):
     return [L // N] * N
 
 
+
+
 @ torch.no_grad()
 @trace_scheduler()  # tracing decorator
 def generate_fhs_extrapolation(
@@ -111,7 +142,7 @@ def generate_fhs_extrapolation(
         prompt: A tensor of shape (1, L).
         attention_mask: A tensor of shape (1, L).
         gen_length: Generated answer length.
-        steps: Number of diffusion steps (chunks). Must be divisible by gen_length.
+        steps: Number of diffusion steps (chunks). gen_length must be divisible by steps.
         temperature: Categorical distribution sampling temperature.
         mask_id: The token id of [MASK] is 126336.
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
@@ -140,11 +171,20 @@ def generate_fhs_extrapolation(
     masked = torch.zeros_like(x, dtype=torch.bool)
     masked[:, prompt_len:] = True
 
-    tau = torch.ones((prompt.shape[0],), device=model.device)
+    # Per-token hitting times: each masked token has τ_i ~ Uniform(0,1).
+    # Decoding order = token with minimum τ becomes visible first.
+    tau_per_token = torch.empty_like(x, dtype=torch.float32, device=model.device)
+    tau_per_token[:, :prompt_len] = 0.0  # unused for prompt
+    tau_per_token[:, prompt_len:] = torch.rand(
+        prompt.shape[0], gen_length, device=model.device, dtype=torch.float32
+    )
+
+    tau_upper = torch.ones((prompt.shape[0],), device=model.device, dtype=torch.float32)
     l = torch.full((prompt.shape[0],), gen_length, device=model.device, dtype=torch.float32)
 
     mu_prev = None
     tau_prev = None
+    EXTRAPOL_EPS = 1e-6  # guard against tau_curr ≈ tau_prev
 
     for step, Ln in enumerate(schedule):
         # Early stopping - check if all tokens are decoded
@@ -152,8 +192,12 @@ def generate_fhs_extrapolation(
             break
 
         for i in range(Ln):
-            # First-hitting time update
-            tau_new = update_tau_linear(tau, l)
+            # Paper: τ = actual next unmasking time = min(τ_i) among masked
+            picks = [_pick_token_and_tau(tau_per_token, masked, b) for b in range(prompt.shape[0])]
+            tau_new = torch.tensor(
+                [picks[b][1] if picks[b][1] is not None else 1.0 for b in range(prompt.shape[0])],
+                device=model.device, dtype=torch.float32
+            )
 
             # Network eval ONCE per chunk
             if i == 0:
@@ -177,26 +221,32 @@ def generate_fhs_extrapolation(
                 mu_hat = mu
             else:
                 # Lagrange interpolation in time; reshape for (batch, seq, vocab) broadcast
-                coeff1 = (tau_new - tau_prev) / (tau_curr - tau_prev)
-                coeff2 = (tau_new - tau_curr) / (tau_prev - tau_curr)
+                # Guard against tau_curr ≈ tau_prev which makes denominator ~0 and coefficients explode
+                denom = tau_curr - tau_prev
+                use_extrapol = denom.abs() >= EXTRAPOL_EPS
+                denom_safe = torch.where(use_extrapol, denom, EXTRAPOL_EPS * torch.ones_like(denom))
+                coeff1 = (tau_new - tau_prev) / denom_safe
+                coeff2 = (tau_new - tau_curr) / (-denom_safe)
                 coeff1 = coeff1.reshape(-1, 1, 1)
                 coeff2 = coeff2.reshape(-1, 1, 1)
-                mu_hat = coeff1 * mu + coeff2 * mu_prev
+                mu_hat = torch.where(
+                    use_extrapol.reshape(-1, 1, 1),
+                    coeff1 * mu + coeff2 * mu_prev,
+                    mu,
+                )
 
-            # Sample ONE token per batch
+            # Decode ONE token per batch; τ_new = actual hitting time; rescale on survival
             for b in range(prompt.shape[0]):
-                if not masked[b].any():
+                k, tau_new_b = picks[b][0], picks[b][1]
+                if k is None:
                     continue
-                idx = torch.nonzero(masked[b]).squeeze(1)
-                if idx.numel() == 0:
-                    continue
-                k = idx[torch.randint(0, idx.numel(), (1,), device=model.device).item()]
                 token = sample_categorical(mu_hat[b, k], temperature)
                 x[b, k] = token
                 masked[b, k] = False
                 l[b] -= 1
-
-            tau = tau_new
+                _rescale_hitting_times_survival(
+                    tau_per_token, masked, k, tau_new_b, tau_upper[b].item(), b
+                )
 
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
             if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
@@ -239,7 +289,7 @@ def generate_fhs_predictor_corrector(
         prompt: A tensor of shape (1, L).
         attention_mask: A tensor of shape (1, L).
         gen_length: Generated answer length.
-        steps: Number of diffusion steps (chunks). Must be divisible by gen_length.
+        steps: Number of diffusion steps (chunks). gen_length must be divisible by steps.
         temperature: Categorical distribution sampling temperature.
         mask_id: The token id of [MASK] is 126336.
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
@@ -268,7 +318,14 @@ def generate_fhs_predictor_corrector(
     masked = torch.zeros_like(x, dtype=torch.bool)
     masked[:, prompt_len:] = True
 
-    tau = torch.ones((prompt.shape[0],), device=model.device)
+    # Per-token hitting times: each masked token has τ_i ~ Uniform(0,1)
+    tau_per_token = torch.empty_like(x, dtype=torch.float32, device=model.device)
+    tau_per_token[:, :prompt_len] = 0.0
+    tau_per_token[:, prompt_len:] = torch.rand(
+        prompt.shape[0], gen_length, device=model.device, dtype=torch.float32
+    )
+
+    tau_upper = torch.ones((prompt.shape[0],), device=model.device, dtype=torch.float32)
     l = torch.full((prompt.shape[0],), gen_length, device=model.device, dtype=torch.float32)
 
     for step, Ln in enumerate(schedule):
@@ -276,16 +333,22 @@ def generate_fhs_predictor_corrector(
         if not masked.any():
             break
 
+        # Track positions decoded in this chunk (for corrector: refine same tokens only)
+        decoded_this_chunk = [[] for _ in range(prompt.shape[0])]
+
         for i in range(Ln):
-            # First-hitting time update
-            tau_new = update_tau_linear(tau, l)
+            # τ = actual next unmasking time = min(τ_i) among masked
+            picks = [_pick_token_and_tau(tau_per_token, masked, b) for b in range(prompt.shape[0])]
+            tau_new = torch.tensor(
+                [picks[b][1] if picks[b][1] is not None else 1.0 for b in range(prompt.shape[0])],
+                device=model.device, dtype=torch.float32
+            )
             t_cond = tau_new if pass_time_to_model else None
 
             # ----- Predictor -----
-            steps_taken += 1  
+            steps_taken += 1
             logits = _model_logits(model, x, attention_mask, t_cond)
 
-            # Set EOS/EOT to -inf before sampling to prevent them from being predicted
             if logits_eos_inf:
                 logits[:, :, eos_id] = -torch.inf
 
@@ -295,51 +358,41 @@ def generate_fhs_predictor_corrector(
 
             mu_pred = logits
 
-            # Sample ONE token per batch
+            # Decode ONE token per batch; τ_new = actual hitting time; rescale on survival
             for b in range(prompt.shape[0]):
-                if not masked[b].any():
+                k, tau_new_b = picks[b][0], picks[b][1]
+                if k is None:
                     continue
-                idx = torch.nonzero(masked[b]).squeeze(1)
-                if idx.numel() == 0:
-                    continue
-                k = idx[torch.randint(0, idx.numel(), (1,), device=model.device).item()]
                 token = sample_categorical(mu_pred[b, k], temperature)
                 x[b, k] = token
                 masked[b, k] = False
                 l[b] -= 1
+                decoded_this_chunk[b].append(k)
+                _rescale_hitting_times_survival(
+                    tau_per_token, masked, k, tau_new_b, tau_upper[b].item(), b
+                )
 
-            # ----- Corrector (only at end of chunk) -----
+            # ----- Corrector (only at end of chunk): refine SAME tokens, do not unmask new ones
             if i == Ln - 1:
-                # Refine using updated x - corrector step
                 steps_taken += 1
                 logits_corr = _model_logits(model, x, attention_mask, t_cond)
-                
-                # Set EOS/EOT to -inf before sampling
+
                 if logits_eos_inf:
                     logits_corr[:, :, eos_id] = -torch.inf
-                
+
                 if confidence_eos_eot_inf:
                     logits_corr[:, :, eos_id] = -torch.inf
                     logits_corr[:, :, eot_id] = -torch.inf
-                
-                mu_corr = logits_corr
-                
-                # Refine masked tokens using corrector output
-                for b in range(prompt.shape[0]):
-                    if not masked[b].any():
-                        continue
-                    idx = torch.nonzero(masked[b]).squeeze(1)
-                    if idx.numel() == 0:
-                        continue
-                    k = idx[torch.randint(0, idx.numel(), (1,), device=model.device).item()]
-                    token = sample_categorical(mu_corr[b, k], temperature)
-                    x[b, k] = token
-                    masked[b, k] = False
-                    l[b] -= 1
-                
-                del logits_corr, mu_corr
 
-            tau = tau_new
+                mu_corr = logits_corr
+
+                # Refine tokens at positions decoded in predictor (re-sample, no new unmasking)
+                for b in range(prompt.shape[0]):
+                    for k in decoded_this_chunk[b]:
+                        token = sample_categorical(mu_corr[b, k], temperature)
+                        x[b, k] = token
+
+                del logits_corr, mu_corr
 
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
             if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
@@ -381,7 +434,7 @@ def generate_fhs(
         prompt: A tensor of shape (1, L).
         attention_mask: A tensor of shape (1, L).
         gen_length: Generated answer length.
-        steps: Number of diffusion steps (chunks). Must be divisible by gen_length.
+        steps: Number of diffusion steps (chunks). gen_length must be divisible by steps.
         temperature: Categorical distribution sampling temperature.
         mask_id: The token id of [MASK] is 126336.
         logits_eos_inf: Whether to set the logits of EOS token to -inf. See Appendix B.4 of LLaDA for details
