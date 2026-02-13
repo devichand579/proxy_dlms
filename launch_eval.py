@@ -94,7 +94,15 @@ def run(cfg: DictConfig) -> int:
         mode = mode_input
 
     gen_length, steps = get_gen_length_steps(task_name)
-    block_length = 32 if mode == "block_diffusion" else (64 if mode == "fdm" else gen_length)
+    block_length_cfg = cfg.get("block_length")
+    if block_length_cfg is not None:
+        block_length = int(block_length_cfg)
+    else:
+        block_length = 32 if mode == "block_diffusion" else (64 if mode == "fdm" else (16 if mode == "dus" else gen_length))
+
+    top_k_cfg = cfg.get("top_k")
+    top_k = int(top_k_cfg) if top_k_cfg is not None else 1
+
     num_fewshot_cfg = cfg.get("num_fewshot")
     num_fewshot = int(num_fewshot_cfg) if num_fewshot_cfg is not None else get_num_fewshot(task_name)
     model_path = f"./models/{model}"
@@ -112,7 +120,7 @@ def run(cfg: DictConfig) -> int:
 
     model_args = (
         f"model_path={model_path},gen_length={gen_length},steps={steps},"
-        f"block_length={block_length},mode={mode},strategy={str(strategy)},compile_model={str(compile_model).lower()},"
+        f"block_length={block_length},mode={mode},strategy={str(strategy)},top_k={top_k},compile_model={str(compile_model).lower()},"
         f"task_name={task_name},trace_name={output_suffix}"
     )
     if intervention_mode:
@@ -133,7 +141,7 @@ def run(cfg: DictConfig) -> int:
 
     print("Configuration:")
     print(f"  batch_size={batch_size} mode={mode} task_name={task_name} model={model}")
-    print(f"  compile_model={compile_model} gen_length={gen_length} steps={steps} block_length={block_length}")
+    print(f"  compile_model={compile_model} gen_length={gen_length} steps={steps} block_length={block_length} top_k={top_k}")
     print(f"  num_fewshot={num_fewshot} wandb={wandb} tracing_enabled={tracing_enabled}")
     if intervention_mode:
         print(f"  intervention: mode={intervention_mode} steps={intervention_steps} k={intervention_k}")

@@ -157,6 +157,7 @@ class LLaDAEvalHarness(LM):
         block_length=256,
         mode='pure_diffusion',
         strategy='confidence',
+        top_k=1,
         compile_model=False,
         intervention_mode=None,
         intervention_steps=None,
@@ -184,6 +185,7 @@ class LLaDAEvalHarness(LM):
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive generation.
             mode: 'pure_diffusion' or 'block_diffusion' or 'top_k'.
             strategy: 'confidence' or 'random' or 'top_margin' or 'entropy'.
+            top_k: Number of tokens to transfer per step (top_k scheduler only). Default 1.
             compile_model: Whether to compile model with torch.compile for faster inference
             intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
             intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
@@ -199,6 +201,7 @@ class LLaDAEvalHarness(LM):
         self.model.eval()
         self.mode = str(mode)
         self.strategy = str(strategy)
+        self.top_k = int(top_k)
         self.intervention_mode = str(intervention_mode) if intervention_mode is not None else None  # keep None when not set
         if intervention_steps is None:
             self.intervention_steps = None
@@ -262,6 +265,7 @@ class LLaDAEvalHarness(LM):
         self.logger.info(f"Model path: {model_path}")
         self.logger.info(f"Mode: {self.mode}")
         self.logger.info(f"Strategy: {self.strategy}")
+        self.logger.info(f"Top-k: {self.top_k}")
         self.logger.info(f"Batch size: {self.batch_size}")
         self.logger.info(f"MC num: {self.mc_num}")
         self.logger.info(f"Steps: {self.steps}")
@@ -479,6 +483,7 @@ class LLaDAEvalHarness(LM):
                     block_length=self.block_length,
                     mode=self.mode,
                     strategy=self.strategy,
+                    top_k=self.top_k,
                     trace_name=self.trace_name,
                     upload_to_wandb=self.use_wandb,
                     intervention_mode=self.intervention_mode,
