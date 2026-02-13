@@ -15,6 +15,8 @@ mode: pd
 task_name: gsm8k
 model: llada
 compile_model: false
+block_length: null  # null = use mode default (block_diffusion 32, fdm 64, dus 16, else gen_length). Set to int to override.
+top_k: 2  # null = 1. Number of tokens to transfer per step (top_k scheduler only). Set to int to override.
 wandb: true
 tracing_enabled: true
 num_fewshot: null  # null = use per-task default (humaneval 0, gsm8k 4, mbpp 3, arc_challenge_chat 0). Set to int to override.

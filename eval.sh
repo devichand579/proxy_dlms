@@ -21,7 +21,7 @@
 
 ########################################################################################
 # Parse command-line arguments
-# Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [--compile_model False] [--intervention_mode drop] [--intervention_steps 0,128,256] [--intervention_k 1] [--wandb True] [--tracing_enabled True] [--slurm]
+# Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [--block_length 64] [--compile_model False] [--intervention_mode drop] [--intervention_steps 0,128,256] [--intervention_k 1] [--wandb True] [--tracing_enabled True] [--slurm]
 # Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)
 # Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, arc_challenge_chat
 # --slurm: run the eval command under srun (use when script is submitted via sbatch so the job uses the allocated GPU).
@@ -39,6 +39,8 @@ INTERVENTION_K=""
 WANDB=""
 TRACING_ENABLED_ARG=""
 NUM_FEWSHOT_OVERRIDE=""
+BLOCK_LENGTH_OVERRIDE=""
+TOP_K_OVERRIDE=""
 SLURM_MODE=false
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -86,13 +88,21 @@ while [[ $# -gt 0 ]]; do
             NUM_FEWSHOT_OVERRIDE="$2"
             shift 2
             ;;
+        --block_length)
+            BLOCK_LENGTH_OVERRIDE="$2"
+            shift 2
+            ;;
+        --top_k)
+            TOP_K_OVERRIDE="$2"
+            shift 2
+            ;;
         --slurm)
             SLURM_MODE=true
             shift
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
+            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--block_length <n>] [--top_k <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
             exit 1
             ;;
     esac
@@ -101,11 +111,13 @@ done
 # Check required arguments (intervention and wandb are optional)
 if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "Error: Missing required arguments"
-    echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
+    echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--block_length <n>] [--top_k <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
     echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)"
     echo "  Optional - Intervention: --intervention_mode drop|swap, --intervention_steps 0,128,256, --intervention_k 1"
     echo "  Optional - Wandb: --wandb True to log to wandb"
     echo "  Optional - Few-shot: --num_fewshot <n> to override per-task default (defaults: humaneval/arc_challenge_chat 0, gsm8k/math500 4, mbpp 3)"
+    echo "  Optional - Block length: --block_length <n> to override (defaults: block_diffusion 32, fdm 64, dus 16, else gen_length)"
+    echo "  Optional - Top-k: --top_k <n> for top_k scheduler (default 1, tokens to transfer per step)"
     echo "  Optional - Tracing: --tracing_enabled True to enable scheduler tracing (writes trace_outputs/<trace_name>.json)"
     echo "  Optional - SLURM: --slurm to run the eval under srun (for sbatch submissions)"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
@@ -129,9 +141,11 @@ case "$MODE" in
         ;;
     fdm)
         MODE="fdm"
+        STRATEGY="confidence"  # unused for fdm, kept for model_args
         ;;
     fhs)
         MODE="fhs"
+        STRATEGY="confidence"  # unused for fhs, kept for model_args
         ;;
     top_k_c)
         MODE="top_k"
@@ -187,16 +201,25 @@ else
     export STEPS=512
 fi
 
-# Set block_length based on mode
-# block_diffusion: block_length=32
-# fdm: block_length=64
-# Otherwise: block_length=gen_length
-if [[ "$MODE" == "block_diffusion" ]]; then
+# Set block_length: override if --block_length passed, else defaults by mode
+# block_diffusion: 32, fdm: 64, dus: 16, Otherwise: gen_length
+if [[ -n "$BLOCK_LENGTH_OVERRIDE" ]]; then
+    export BLOCK_LENGTH=$BLOCK_LENGTH_OVERRIDE
+elif [[ "$MODE" == "block_diffusion" ]]; then
     export BLOCK_LENGTH=32
 elif [[ "$MODE" == "fdm" ]]; then
     export BLOCK_LENGTH=64
+elif [[ "$MODE" == "dus" ]]; then
+    export BLOCK_LENGTH=16
 else
     export BLOCK_LENGTH=$GEN_LENGTH
+fi
+
+# Set top_k: override if --top_k passed, else default 1 (top_k scheduler only)
+if [[ -n "$TOP_K_OVERRIDE" ]]; then
+    export TOP_K=$TOP_K_OVERRIDE
+else
+    export TOP_K=1
 fi
 
 export MODEL_PATH=./models/${MODEL}
@@ -236,7 +259,7 @@ else
 fi
 
 # Build model_args (base args + optional intervention params)
-MODEL_ARGS="model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME},trace_name=${OUTPUT_SUFFIX}"
+MODEL_ARGS="model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},strategy=${STRATEGY},top_k=${TOP_K},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME},trace_name=${OUTPUT_SUFFIX}"
 if [[ -n "$INTERVENTION_MODE" ]]; then
     # Use underscores for intervention_steps so commas don't break model_args parsing
     INTERVENTION_STEPS_ARG="${INTERVENTION_STEPS//,/_}"
@@ -253,6 +276,7 @@ echo "  Model Path: $MODEL_PATH"
 echo "  Gen Length: $GEN_LENGTH"
 echo "  Steps: $STEPS"
 echo "  Block Length: $BLOCK_LENGTH"
+echo "  Top-k: $TOP_K"
 echo "  Compile Model: $COMPILE_MODEL"
 echo "  Num Fewshot: $NUM_FEWSHOT"
 if [[ -n "$INTERVENTION_MODE" ]]; then

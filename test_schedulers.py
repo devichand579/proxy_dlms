@@ -150,11 +150,11 @@ def test_eb_sampler(model, input_ids, attention_mask, tokenizer, trace_name=None
 def test_dus(model, input_ids, attention_mask, tokenizer, trace_name=None,
                         intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test DUS scheduler"""
-    print("Generating with DUS (dilated schedule, block_length=32)...")
+    print("Generating with DUS (dilated schedule, block_length=16)...")
     start_time = time.time()
     out_dus, steps_dus, blocks_dus = generate_dus(
-        model, input_ids, attention_mask, gen_length=256, 
-        block_length=32, temperature=0., remasking='confidence', scheduler='dilated',
+        model, input_ids, attention_mask, gen_length=256,
+        block_length=16, temperature=0., remasking='confidence', scheduler='dilated',
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     dus_time = time.time() - start_time
@@ -194,7 +194,7 @@ BATCH_TEST_MODES = {
     "top_k_margin": ("top_k", "top_margin", 256),
     "fhs": ("fhs", None, None),
     "eb_sampler": ("eb_sampler", "confidence", 256),
-    "dus": ("dus", "confidence", 32),
+    "dus": ("dus", "confidence", 16),
     "fdm": ("fdm", None, 64),
 }
 

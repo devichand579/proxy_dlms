@@ -66,7 +66,8 @@ Convenient wrapper that sets generation length, steps, few-shot count, and outpu
 **Auto-configured from task:**
 
 - **Length & steps:** arc_challenge_chat uses 128 tokens and 128 steps; other tasks use 512.
-- **Block length:** Block diffusion uses 32; pure diffusion uses full generation length.
+- **Block length:** block_diffusion 32, fdm 64, dus 16, else gen_length. Override with `--block_length <n>` (eval.sh) or `block_length=<n>` (Hydra).
+- **Top-k:** For top_k scheduler, tokens to transfer per step. Default 1. Override with `--top_k <n>` (eval.sh) or `top_k=<n>` (Hydra).
 - **Few-shot:** HumanEval, arc_challenge_chat 0; GSM8K, Minerva Math500 4; MBPP 3. Override with `--num_fewshot <n>` (eval.sh) or `num_fewshot: <n>` (Hydra).
 
 **Examples:**
