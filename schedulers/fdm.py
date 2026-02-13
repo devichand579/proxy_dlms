@@ -279,16 +279,18 @@ def generate_fdm(
                 num_high = int(high_mask.sum().item())
                 num_border = int(border_mask.sum().item())
 
-                # Case A: Exploration (FDM1)
-                if num_high == 0:
-                    # Use deep FDM (K=K1, n=1)
+    
+                # Case A: Exploration (FDM1 with γ=η2) — borderline exists, no high confidence
+                if num_high == 0 and num_border > 0:
+                    # Use deep FDM with stricter pruning (γ=η2)
+                    log_gamma_eta2 = math.log(eta2) if eta2 > 0 else -1e9
                     _fdm_single_step(
                         model, x, j, attention_mask,
                         masked_pos,
                         x0, x0_logp,
                         K=K1,
                         n=1,
-                        log_gamma=log_gamma,
+                        log_gamma=log_gamma_eta2,
                         mask_id=mask_id,
                         eos_id=eos_id,
                         eot_id=eot_id,
@@ -297,8 +299,8 @@ def generate_fdm(
                     )
                     continue
 
-                # Case B: Balance (FDM2)
-                if num_border > 0:
+                # Case B: Balance (FDM2) — many high confidence OR no borderline
+                if num_high > 0 or num_border == 0:
                     # Cheap FDM (K=1), parallel small batch
                     _fdm_single_step(
                         model, x, j, attention_mask,
@@ -306,7 +308,7 @@ def generate_fdm(
                         x0, x0_logp,
                         K=1,
                         n=min(N, masked_pos.numel()),
-                        log_gamma=log_gamma,
+                        log_gamma=0,
                         mask_id=mask_id,
                         eos_id=eos_id,
                         eot_id=eot_id,
@@ -314,14 +316,6 @@ def generate_fdm(
                         global_scale=global_scale,
                     )
                     continue
-
-                # Case C: Acceleration (pure local)
-                # Decode many tokens purely by local confidence
-                scores = local_logconf[j, masked_pos]
-                k = min(N, masked_pos.numel())
-                topk = torch.topk(scores, k=k).indices
-                chosen_pos = masked_pos[topk]
-                x[j, chosen_pos] = x0[j, chosen_pos]
 
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
             if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
