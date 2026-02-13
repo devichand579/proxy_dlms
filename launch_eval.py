@@ -94,7 +94,7 @@ def run(cfg: DictConfig) -> int:
         mode = mode_input
 
     gen_length, steps = get_gen_length_steps(task_name)
-    block_length = 32 if mode == "block_diffusion" else gen_length
+    block_length = 32 if mode == "block_diffusion" else (64 if mode == "fdm" else gen_length)
     num_fewshot_cfg = cfg.get("num_fewshot")
     num_fewshot = int(num_fewshot_cfg) if num_fewshot_cfg is not None else get_num_fewshot(task_name)
     model_path = f"./models/{model}"

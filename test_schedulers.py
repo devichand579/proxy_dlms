@@ -171,10 +171,10 @@ def test_dus(model, input_ids, attention_mask, tokenizer, trace_name=None,
 def test_fdm(model, input_ids, attention_mask, tokenizer, trace_name=None,
                         intervention_mode=None, intervention_steps=None, intervention_k=1):
     """Test FDM scheduler"""
-    print("Generating with FDM (steps=128, block_length=32)...")
+    print("Generating with FDM (steps=256, block_length=64)...")
     start_time = time.time()
     out_fdm, steps_fdm, blocks_fdm = generate_fdm(
-        model, input_ids, attention_mask, steps=128, gen_length=256, block_length=32,
+        model, input_ids, attention_mask, steps=256, gen_length=256, block_length=64,
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
     )
     fdm_time = time.time() - start_time
@@ -195,7 +195,7 @@ BATCH_TEST_MODES = {
     "fhs": ("fhs", None, None),
     "eb_sampler": ("eb_sampler", "confidence", 256),
     "dus": ("dus", "confidence", 32),
-    "fdm": ("fdm", None, 32),
+    "fdm": ("fdm", None, 64),
 }
 
 

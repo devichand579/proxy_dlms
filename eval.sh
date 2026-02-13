@@ -188,10 +188,13 @@ else
 fi
 
 # Set block_length based on mode
-# If mode is "block_diffusion": block_length=32
+# block_diffusion: block_length=32
+# fdm: block_length=64
 # Otherwise: block_length=gen_length
 if [[ "$MODE" == "block_diffusion" ]]; then
     export BLOCK_LENGTH=32
+elif [[ "$MODE" == "fdm" ]]; then
+    export BLOCK_LENGTH=64
 else
     export BLOCK_LENGTH=$GEN_LENGTH
 fi
