@@ -4,11 +4,10 @@
 #SBATCH --error=job_outputs/strace_job_err_%j.err
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48gb
-#SBATCH --time=72:00:00
-#SBATCH --partition=dgx2  # gpupart_v100, gpupart_a40, gpu_h100
-#SBATCH --gres=gpu:1
-#SBATCH --qos=gpu2  # ignore if your cluster doesn't have a qos for GPUs
+#SBATCH --mem=42gb
+#SBATCH --time=47:00:00
+#SBATCH --partition=gpupart_a40  # gpupart_v100, gpupart_a40, gpu_h100
+#SBATCH --gres=gpu:1  # ignore if your cluster doesn't have a qos for GPUs
 
 
 ########################################################################################
