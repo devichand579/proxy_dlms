@@ -13,7 +13,7 @@ hydra:
     qos: gpu2
     timeout_min: 4320   # 72h (override: hydra.launcher.timeout_max=N)
     mem_gb: 72
-    gres: gpu:1
+    gres: gpu:2
     cpus_per_task: 8
     nodes: 1
     tasks_per_node: 1
