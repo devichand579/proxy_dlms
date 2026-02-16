@@ -24,7 +24,7 @@
 # Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)
 # Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, arc_challenge_chat
 # --slurm: run the eval command under srun (use when script is submitted via sbatch so the job uses the allocated GPU).
-# Local GPU: run without --slurm; optionally export CUDA_VISIBLE_DEVICES=0 before running.
+# Local GPU: run without --slurm; optionally export CUDA_VISIBLE_DEVICES=0 or 1  before running.
 
 BATCH_SIZE=""
 MODE=""
@@ -116,7 +116,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Optional - Wandb: --wandb True to log to wandb"
     echo "  Optional - Few-shot: --num_fewshot <n> to override per-task default (defaults: humaneval/arc_challenge_chat 0, gsm8k/math500 4, mbpp 3)"
     echo "  Optional - Block length: --block_length <n> to override (defaults: block_diffusion 32, fdm 64, dus 16, else gen_length)"
-    echo "  Optional - Top-k: --top_k <n> for top_k scheduler (default 1, tokens to transfer per step)"
+    echo "  Optional - Top-k: --top_k <n> for top_k scheduler (default 2, tokens to transfer per step)"
     echo "  Optional - Tracing: --tracing_enabled True to enable scheduler tracing (writes trace_outputs/<trace_name>.json)"
     echo "  Optional - SLURM: --slurm to run the eval under srun (for sbatch submissions)"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
@@ -177,7 +177,7 @@ export HF_TOKEN=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
 # When running locally (not --slurm), you can set CUDA_VISIBLE_DEVICES; when --slurm, leave to SLURM allocation.
 if [[ "$SLURM_MODE" != "true" ]]; then
     export CUDA_DEVICE_ORDER=PCI_BUS_ID
-    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 fi
 
 # Wandb configuration 
@@ -214,11 +214,11 @@ else
     export BLOCK_LENGTH=$GEN_LENGTH
 fi
 
-# Set top_k: override if --top_k passed, else default 1 (top_k scheduler only)
+# Set top_k: override if --top_k passed, else default 2 (top_k scheduler only)
 if [[ -n "$TOP_K_OVERRIDE" ]]; then
     export TOP_K=$TOP_K_OVERRIDE
 else
-    export TOP_K=1
+    export TOP_K=2
 fi
 
 export MODEL_PATH=./models/${MODEL}
