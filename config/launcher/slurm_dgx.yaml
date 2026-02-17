@@ -1,7 +1,7 @@
 # @package _global_
-# SLURM launcher 
-# Use: launcher=slurm. Requires --multirun for multirun.
-
+# SLURM launcher for DGX2
+# Use: launcher=slurm_dgx. Requires --multirun for multirun.
+# Example: python launch_eval.py task_name=gsm8k mode=pd --multirun launcher=slurm_dgx
 
 defaults:
   - override /hydra/launcher: submitit_slurm
@@ -11,12 +11,18 @@ hydra:
     submitit_folder: job_outputs/%j
     partition: dgx2
     qos: gpu2
-    timeout_min: 4320   # 72h (override: hydra.launcher.timeout_max=N)
+    timeout_min: 4320   # 72h
     mem_gb: 72
     gres: gpu:2
     cpus_per_task: 8
     nodes: 1
     tasks_per_node: 1
+    signal_delay_s: 120
+    # DGX-specific SBATCH options via additional_parameters
+    additional_parameters:
+      signal: "USR2@120"
+      wckey: submitit
+      open_mode: append
 
     setup:
       - source $(conda info --base)/etc/profile.d/conda.sh
