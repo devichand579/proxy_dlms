@@ -9,6 +9,21 @@
 #SBATCH --partition=gpupart_a40  # gpupart_v100, gpupart_a40, gpu_h100
 #SBATCH --gres=gpu:1  # ignore if your cluster doesn't have a qos for GPUs
 
+########################################################################################
+# DGX setup: uncomment the block below and comment out (partition through gres) above
+########################################################################################
+##SBATCH --partition=dgx2
+##SBATCH --qos=gpu2
+##SBATCH --gres=gpu:2
+##SBATCH --mem=72GB
+##SBATCH --time=72:00:00
+##SBATCH --nodes=1
+##SBATCH --ntasks-per-node=1
+##SBATCH --open-mode=append
+##SBATCH --signal=USR2@120
+##SBATCH --wckey=submitit
+##SBATCH --output=job_outputs/%j/%j_0_log.out
+##SBATCH --error=job_outputs/%j/%j_0_log.err
 
 ########################################################################################
 # Single eval job via sbatch: run this script with your args and --slurm, e.g.:
