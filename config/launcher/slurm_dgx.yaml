@@ -27,3 +27,8 @@ hydra:
     setup:
       - source $(conda info --base)/etc/profile.d/conda.sh
       - conda activate strace
+      - export HF_DATASETS_OFFLINE=1
+      - export TRANSFORMERS_OFFLINE=1
+      - export WANDB_MODE=offline
+      - export HF_HOME=$HOME/.cache/huggingface
+      - export HF_DATASETS_CACHE=$HOME/.cache/huggingface/datasets
