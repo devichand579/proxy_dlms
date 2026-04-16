@@ -28,6 +28,7 @@
 ########################################################################################
 # Single eval job via sbatch: run this script with your args and --slurm, e.g.:
 #   sbatch eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --slurm
+# Resumable (checkpointing): add --resumable; re-run same command to resume after crash
 # Alternative (Hydra): sbatch --wrap "conda run -n strace python launch_eval.py task_name=gsm8k mode=pd"
 # Multirun on SLURM (one job per config): python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
 
@@ -56,6 +57,8 @@ NUM_FEWSHOT_OVERRIDE=""
 BLOCK_LENGTH_OVERRIDE=""
 TOP_K_OVERRIDE=""
 SLURM_MODE=false
+RESUMABLE=false
+RUN_ID=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --batch_size)
@@ -114,9 +117,17 @@ while [[ $# -gt 0 ]]; do
             SLURM_MODE=true
             shift
             ;;
+        --resumable)
+            RESUMABLE=true
+            shift
+            ;;
+        --run_id)
+            RUN_ID="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--block_length <n>] [--top_k <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
+            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--block_length <n>] [--top_k <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm] [--resumable] [--run_id <id>]"
             exit 1
             ;;
     esac
@@ -134,6 +145,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Optional - Top-k: --top_k <n> for top_k scheduler (default 2, tokens to transfer per step)"
     echo "  Optional - Tracing: --tracing_enabled True to enable scheduler tracing (writes trace_outputs/<trace_name>.json)"
     echo "  Optional - SLURM: --slurm to run the eval under srun (for sbatch submissions)"
+    echo "  Optional - Resumable: --resumable writes outputs/{run_id}/checkpoint.jsonl and resumes skipped samples; traces use JSONL when tracing is on. Use --run_id for custom id."
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
     echo "Example with intervention: $0 --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True"
     exit 1
@@ -192,7 +204,7 @@ export HF_TOKEN=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
 # When running locally (not --slurm), you can set CUDA_VISIBLE_DEVICES; when --slurm, leave to SLURM allocation.
 if [[ "$SLURM_MODE" != "true" ]]; then
     export CUDA_DEVICE_ORDER=PCI_BUS_ID
-    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 fi
 
 # Wandb configuration 
@@ -244,15 +256,30 @@ if [[ -z "$COMPILE_MODEL" ]]; then
     COMPILE_MODEL="False"
 fi
 
-# Generate wandb name and output suffix: MODEL_TASK_MODE_TIMESTAMP; append intervention info when intervention_mode is set
-OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}_${TIMESTAMP}"
-WANDB_NAME="${OUTPUT_SUFFIX}"
-if [[ -n "$INTERVENTION_MODE" ]]; then
-    INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
-    INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
-    OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}_intv_${INTERVENTION_MODE}_steps${INTERVENTION_STEPS_SAFE}_k${INTERVENTION_K:-1}_${TIMESTAMP}"
-    WANDB_NAME="${OUTPUT_SUFFIX}"
+# Generate wandb name and output suffix: MODEL_TASK_MODE; use stable run_id when resumable for checkpointing
+if [[ "$RESUMABLE" == "true" ]]; then
+    if [[ -n "$RUN_ID" ]]; then
+        OUTPUT_SUFFIX="$RUN_ID"
+    else
+        OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}"
+        if [[ -n "$INTERVENTION_MODE" ]]; then
+            INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
+            INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
+            OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}_intv_${INTERVENTION_MODE}_steps${INTERVENTION_STEPS_SAFE}_k${INTERVENTION_K:-1}"
+        fi
+    fi
+    CHECKPOINT_DIR="outputs/${OUTPUT_SUFFIX}"
+    mkdir -p "$CHECKPOINT_DIR"
+else
+    OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}_${TIMESTAMP}"
+    if [[ -n "$INTERVENTION_MODE" ]]; then
+        INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
+        INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
+        OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}_intv_${INTERVENTION_MODE}_steps${INTERVENTION_STEPS_SAFE}_k${INTERVENTION_K:-1}_${TIMESTAMP}"
+    fi
+    CHECKPOINT_DIR=""
 fi
+WANDB_NAME="${OUTPUT_SUFFIX}"
 
 # Set num_fewshot: override if provided, else per-task default
 if [[ -n "$NUM_FEWSHOT_OVERRIDE" ]]; then
@@ -272,8 +299,11 @@ else
     fi
 fi
 
-# Build model_args (base args + optional intervention params)
+# Build model_args (base args + optional intervention params + checkpoint paths when resumable)
 MODEL_ARGS="model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},strategy=${STRATEGY},top_k=${TOP_K},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME},trace_name=${OUTPUT_SUFFIX}"
+if [[ "$RESUMABLE" == "true" ]]; then
+    MODEL_ARGS="${MODEL_ARGS},resumable=true,output_dir=${CHECKPOINT_DIR}"
+fi
 if [[ -n "$INTERVENTION_MODE" ]]; then
     # Use underscores for intervention_steps so commas don't break model_args parsing
     INTERVENTION_STEPS_ARG="${INTERVENTION_STEPS//,/_}"
@@ -304,13 +334,38 @@ echo "  SLURM mode (srun): ${SLURM_MODE}"
 if [[ -n "$WANDB_NAME" ]]; then
     echo "  Wandb Name: $WANDB_NAME"
 fi
-echo "  Output: outputs/${OUTPUT_SUFFIX}.json"
+if [[ "$RESUMABLE" == "true" ]]; then
+    echo "  Resumable: yes (checkpoint=${CHECKPOINT_DIR})"
+else
+    echo "  Output: outputs/${OUTPUT_SUFFIX}.json"
+fi
 echo ""
 
-# Build accelerate launch command (add --wandb_args only when --wandb True)
-ACCEL_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path outputs/${OUTPUT_SUFFIX}.json --log_samples --cache_requests true"
+# Build accelerate launch command
+# When resumable: checkpoint.jsonl skips completed samples; pass wandb resume id if .wandb_id exists
+RESUME_ENV=""
+WANDB_RESUME_ARGS=""
+if [[ "$RESUMABLE" == "true" ]]; then
+    WANDB_ID_FILE="${CHECKPOINT_DIR}/.wandb_id"
+    if [[ -f "$WANDB_ID_FILE" ]] && [[ "${WANDB,,}" == "true" ]]; then
+        WANDB_RUN_ID=$(cat "$WANDB_ID_FILE")
+        WANDB_RESUME_ARGS=",resume=allow,id=${WANDB_RUN_ID}"
+        echo "  Resuming wandb run: ${WANDB_RUN_ID}"
+    fi
+    RESUME_ENV="RESUMABLE_RUN_ID=${OUTPUT_SUFFIX} CHECKPOINT_DIR=${CHECKPOINT_DIR}"
+fi
+
+if [[ "$RESUMABLE" == "true" ]]; then
+    # Resumable: checkpoint-based skip for completed samples; output_path in checkpoint dir for final metrics
+    ACCEL_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path ${CHECKPOINT_DIR}/results.json --log_samples --cache_requests true"
+else
+    ACCEL_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path outputs/${OUTPUT_SUFFIX}.json --log_samples --cache_requests true"
+fi
 if [[ "${WANDB,,}" == "true" ]]; then
-    ACCEL_CMD="${ACCEL_CMD} --wandb_args project=${WANDB_PROJECT},name=${WANDB_NAME}"
+    ACCEL_CMD="${ACCEL_CMD} --wandb_args project=${WANDB_PROJECT},name=${WANDB_NAME}${WANDB_RESUME_ARGS}"
+fi
+if [[ -n "$RESUME_ENV" ]]; then
+    ACCEL_CMD="env ${RESUME_ENV} ${ACCEL_CMD}"
 fi
 
 # Run: under srun when --slurm (for sbatch), else directly (local GPU)

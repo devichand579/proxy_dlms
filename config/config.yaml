@@ -27,6 +27,10 @@ intervention:
   steps: null
   k: 1
 
+# Checkpointing: when true, use stable run_id (no timestamp)
+resumable: false
+run_id: null  # optional custom id; if null, uses {model}_{task}_{mode}
+
 # Env / paths
 wandb_project: strace
 

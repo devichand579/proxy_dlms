@@ -107,22 +107,40 @@ def run(cfg: DictConfig) -> int:
     num_fewshot = int(num_fewshot_cfg) if num_fewshot_cfg is not None else get_num_fewshot(task_name)
     model_path = f"./models/{model}"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    resumable = _to_bool(cfg.get("resumable", False))
+    run_id = cfg.get("run_id") or None
 
-    output_suffix = f"{model}_{task_name}_{mode}_{timestamp}"
-    if intervention_mode:
-        steps_raw = intervention_steps if intervention_steps is not None else "0"
-        if isinstance(steps_raw, (list, tuple)):
-            steps_safe = "_".join(str(s) for s in steps_raw)
-        else:
-            steps_safe = re.sub(r"[,_]", "_", str(steps_raw))
-        output_suffix = f"{model}_{task_name}_{mode}_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}_{timestamp}"
+    if resumable and run_id:
+        output_suffix = str(run_id)
+    elif resumable:
+        output_suffix = f"{model}_{task_name}_{mode}"
+        if intervention_mode:
+            steps_raw = intervention_steps if intervention_steps is not None else "0"
+            if isinstance(steps_raw, (list, tuple)):
+                steps_safe = "_".join(str(s) for s in steps_raw)
+            else:
+                steps_safe = re.sub(r"[,_]", "_", str(steps_raw))
+            output_suffix = f"{model}_{task_name}_{mode}_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}"
+    else:
+        output_suffix = f"{model}_{task_name}_{mode}_{timestamp}"
+        if intervention_mode:
+            steps_raw = intervention_steps if intervention_steps is not None else "0"
+            if isinstance(steps_raw, (list, tuple)):
+                steps_safe = "_".join(str(s) for s in steps_raw)
+            else:
+                steps_safe = re.sub(r"[,_]", "_", str(steps_raw))
+            output_suffix = f"{model}_{task_name}_{mode}_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}_{timestamp}"
     wandb_name = output_suffix
+
+    checkpoint_dir = f"outputs/{output_suffix}" if resumable else None
 
     model_args = (
         f"model_path={model_path},gen_length={gen_length},steps={steps},"
         f"block_length={block_length},mode={mode},strategy={str(strategy)},top_k={top_k},compile_model={str(compile_model).lower()},"
         f"task_name={task_name},trace_name={output_suffix}"
     )
+    if resumable and checkpoint_dir:
+        model_args += f",resumable=true,output_dir={checkpoint_dir}"
     if intervention_mode:
         if isinstance(intervention_steps, (list, tuple)):
             steps_arg = "_".join(str(s) for s in intervention_steps)
@@ -136,16 +154,29 @@ def run(cfg: DictConfig) -> int:
     env.setdefault("LMEVAL_LOG_LEVEL", "INFO")
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     env["TRACING_ENABLED"] = "TRUE" if tracing_enabled else "FALSE"
+    if resumable:
+        env["RESUMABLE_RUN_ID"] = output_suffix
+        env["CHECKPOINT_DIR"] = checkpoint_dir
     env.setdefault("WANDB_API_KEY", "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")
     env.setdefault("WANDB_PROJECT", str(cfg.get("wandb_project", "strace")))
+
+    wandb_resume_args = ""
+    if resumable:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+    if resumable and wandb:
+        wandb_id_file = Path(checkpoint_dir) / ".wandb_id"
+        if wandb_id_file.exists():
+            wandb_run_id = wandb_id_file.read_text().strip()
+            wandb_resume_args = f",resume=allow,id={wandb_run_id}"
+            print(f"  Resuming wandb run: {wandb_run_id}")
 
     print("Configuration:")
     print(f"  batch_size={batch_size} mode={mode} task_name={task_name} model={model}")
     print(f"  compile_model={compile_model} gen_length={gen_length} steps={steps} block_length={block_length} top_k={top_k}")
-    print(f"  num_fewshot={num_fewshot} wandb={wandb} tracing_enabled={tracing_enabled}")
+    print(f"  num_fewshot={num_fewshot} wandb={wandb} tracing_enabled={tracing_enabled} resumable={resumable}")
     if intervention_mode:
         print(f"  intervention: mode={intervention_mode} steps={intervention_steps} k={intervention_k}")
-    print(f"  output: outputs/{output_suffix}.json")
+    print(f"  output: outputs/{output_suffix}/" if resumable else f"  output: outputs/{output_suffix}.json")
     print()
 
     cmd = [
@@ -157,12 +188,14 @@ def run(cfg: DictConfig) -> int:
         "--model", model,
         "--model_args", model_args,
         "--write_out",
-        "--output_path", f"outputs/{output_suffix}.json",
-        "--log_samples",
         "--cache_requests", "true",
     ]
+    if resumable:
+        cmd += ["--output_path", f"{checkpoint_dir}/results.json", "--log_samples"]
+    else:
+        cmd += ["--output_path", f"outputs/{output_suffix}.json", "--log_samples"]
     if wandb:
-        cmd += ["--wandb_args", f"project={env.get('WANDB_PROJECT', 'strace')},name={wandb_name}"]
+        cmd += ["--wandb_args", f"project={env.get('WANDB_PROJECT', 'strace')},name={wandb_name}{wandb_resume_args}"]
 
     return subprocess.run(cmd, env=env, cwd=project_root).returncode
 

@@ -51,6 +51,8 @@ Convenient wrapper that sets generation length, steps, few-shot count, and outpu
 | `--intervention_k` | Optional: tokens per intervention step (default 1). |
 | `--num_fewshot` | Optional: override per-task few-shot count (defaults: humaneval/arc_challenge_chat 0, gsm8k/math500 4, mbpp 3). |
 | `--slurm` | Use when submitting via `sbatch` so the command runs under `srun`. |
+| `--resumable` | Checkpointed evaluation: fixed output directory, sample-level resume after crash or preemption (see below). |
+| `--run_id` | With `--resumable`, directory name under `outputs/` (default: `{model}_{task}_{mode}`, or includes intervention tags when set). |
 
 **Mode shortcuts:**
 
@@ -87,15 +89,44 @@ Convenient wrapper that sets generation length, steps, few-shot count, and outpu
 
 **Outputs:**
 
-- **Results:** `outputs/{model}_{task_name}_{mode}_{timestamp}.json`
+- **Results (default run):** `outputs/{model}_{task_name}_{mode}_{timestamp}.json`
+- **Results (resumable run):** directory `outputs/{run_id}/` with final metrics in `results.json` (see **Resumable evaluation**).
 - **Logs:** `logs/{model}_{task_name}_{mode}_{timestamp}.log`
-- **Traces:** If tracing is enabled, one file per task: `trace_outputs/{trace_name}.json` (contains all samples for that run in a single JSON structure).
+- **Traces:** If tracing is enabled, one file per run: `trace_outputs/{trace_name}.json` (full JSON document), or `{trace_name}.jsonl` (one sample per line) when resumable.
+
+### Resumable evaluation
+
+Long jobs can save partial progress and continue from the same command line.
+
+**Enable**
+
+- **Shell:** add `--resumable` to `./eval.sh` (optional `--run_id my_run` for a custom folder name).
+- **Hydra:** set `resumable=true` in `config/config.yaml` or on the CLI; optional `run_id=my_run` overrides the default suffix.
+
+**Stable paths (no timestamp)**  
+Non-resumable runs use a timestamp in filenames so each invocation is isolated. With resumable mode, outputs go under `outputs/{run_id}/`, where `run_id` is `--run_id` if set, otherwise `{model}_{task}_{mode}` (and, if interventions are configured, a longer suffix that includes intervention mode, steps, and `k`).
+
+**Checkpoint file**  
+The harness writes `outputs/{run_id}/checkpoint.jsonl`. Each line is one completed sample: `doc_id`, `task_name`, `prompt`, and `resps`. On a new process, existing lines are read into a map `(task_name, doc_id) - response`; those requests skip generation and only missing samples are sent through the model. New completions are appended, so a crash mid-run does not discard finished work.
+
+**Metrics and W&B**  
+lm-eval writes the aggregated output to `outputs/{run_id}/results.json`. If W&B is enabled, the first run stores the run id in `outputs/{run_id}/.wandb_id`; a later invocation with the same resumable paths passes `resume=allow` so logging continues on the same W&B run.
+
+**Tracing**  
+With tracing on, scheduler traces use JSONL append mode under `trace_outputs/` so new samples can be appended after a resume (non-resumable runs use a single JSON array file).
+
+**Example**
+
+```bash
+./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --compile_model False --resumable
+# same command again after failure or cancel — skips samples already in checkpoint.jsonl
+```
 
 ---
 
 ## Hydra / `launch_eval.py` (single and multirun)
 
-Config lives in `config/config.yaml`. Override from CLI: `task_name=gsm8k mode=pd batch_size=4`.
+Config lives in `config/config.yaml`. Override from CLI: `task_name=gsm8k mode=pd batch_size=4`. For checkpointed runs: `resumable=true` and optionally `run_id=my_run`.
 
 **Single run (local):**
 ```bash

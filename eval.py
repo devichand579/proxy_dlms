@@ -51,6 +51,14 @@ except ImportError:
 warnings.filterwarnings("ignore", category=PicklingWarning)
 
 
+def _to_bool(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.lower() in ("true", "1", "yes")
+    return bool(val)
+
+
 def setup_logger(name="llada_eval", log_dir="logs"):
     """
     Set up a logger that writes to both file and console.
@@ -107,40 +115,90 @@ def set_seed(seed):
 
 class StreamingTraceWriter:
     """
-    Writes trace dicts to a JSON file incrementally (one sample at a time) to avoid
-    holding all traces in memory. Thread-safe for use from concurrent scheduler workers.
+    Writes trace dicts incrementally. Supports resumable runs:
+    - Resumable: JSONL format (one JSON object per line), append mode. Survives crash and appends on resume.
+    - Non-resumable: Original JSON array format for backward compatibility.
+    Thread-safe for use from concurrent scheduler workers.
     """
-    def __init__(self, filepath: str, task_name: str):
+    def __init__(self, filepath: str, task_name: str, resumable: bool = False):
         self._path = filepath
         self._task_name = task_name
+        self._resumable = resumable
         self._count = 0
         self._lock = threading.Lock()
-        self._f = open(filepath, "w")
-        self._f.write('{"task": ')
-        json.dump(task_name, self._f)
-        self._f.write(', "samples": [')
-        self._f.flush()
+
+        if resumable:
+            # JSONL: append mode, count existing lines for resume
+            if os.path.exists(filepath):
+                with open(filepath, "r") as rf:
+                    for line in rf:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            self._count += 1
+            self._f = open(filepath, "a")
+            if self._count == 0:
+                # Fresh file: write header line (comment for humans)
+                self._f.write(f'# task={json.dumps(task_name)}\n')
+                self._f.flush()
+        else:
+            self._f = open(filepath, "w")
+            self._f.write('{"task": ')
+            json.dump(task_name, self._f)
+            self._f.write(', "samples": [')
+            self._f.flush()
 
     def append(self, trace_dict: dict):
         with self._lock:
-            if self._count > 0:
-                self._f.write(",")
-            json.dump(trace_dict, self._f)
+            if self._resumable:
+                self._f.write(json.dumps(trace_dict, ensure_ascii=False) + "\n")
+            else:
+                if self._count > 0:
+                    self._f.write(",")
+                json.dump(trace_dict, self._f)
             self._count += 1
             self._f.flush()
 
     def close(self):
         with self._lock:
             if self._f is not None:
-                self._f.write('], "num_samples": ')
-                self._f.write(str(self._count))
-                self._f.write("}")
+                if self._resumable:
+                    # JSONL needs no footer
+                    pass
+                else:
+                    self._f.write('], "num_samples": ')
+                    self._f.write(str(self._count))
+                    self._f.write("}")
                 self._f.close()
                 self._f = None
 
     @property
     def count(self):
         return self._count
+
+
+def _load_checkpoint_completed(checkpoint_path: str) -> dict:
+    """
+    Load checkpoint.jsonl and return dict mapping (task_name, doc_id) -> resps (list of strings).
+    Later entries overwrite earlier for same key (handles duplicate lines from mixed resume).
+    """
+    completed = {}
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        return completed
+    try:
+        with open(checkpoint_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                rec = json.loads(line)
+                task = rec.get("task_name", "")
+                doc_id = rec.get("doc_id", None)
+                resps = rec.get("resps", [])
+                if doc_id is not None and resps:
+                    completed[(str(task), doc_id)] = resps
+    except Exception as e:
+        logging.getLogger("llada_eval").warning(f"Failed to load checkpoint {checkpoint_path}: {e}")
+    return completed
 
 
 @register_model("llada")
@@ -165,6 +223,8 @@ class LLaDAEvalHarness(LM):
         device="cuda",
         trace_name=None,
         task_name=None,
+        resumable=False,
+        output_dir=None,
     ):
         '''
         Args:
@@ -213,6 +273,18 @@ class LLaDAEvalHarness(LM):
         self.intervention_k = int(intervention_k)
         self.trace_name = str(trace_name) if trace_name is not None else None
         self.task_name = task_name if task_name is not None else os.environ.get("TASK_NAME", "unknown")
+        self.resumable = _to_bool(resumable) if resumable is not None else False
+        self.output_dir = str(output_dir) if output_dir else os.environ.get("CHECKPOINT_DIR", "")
+        # Resumable: persist wandb run id on first run for resume
+        if self.resumable and self.output_dir and WANDB_AVAILABLE and wandb.run is not None:
+            os.makedirs(self.output_dir, exist_ok=True)
+            wandb_id_file = os.path.join(self.output_dir, ".wandb_id")
+            if not os.path.exists(wandb_id_file):
+                try:
+                    with open(wandb_id_file, "w") as f:
+                        f.write(wandb.run.id)
+                except Exception:
+                    pass
         self.mask_id = int(mask_id)
         if self.tokenizer.padding_side != 'left':
             self.tokenizer.padding_side = 'left'
@@ -429,13 +501,27 @@ class LLaDAEvalHarness(LM):
 
         # When tracing is enabled, stream each sample's trace to disk (avoids holding all in memory)
         trace_writer = None
+        checkpoint_writer = None
         if self.trace_name is not None:
             trace_base_dir = "trace_outputs"
             os.makedirs(trace_base_dir, exist_ok=True)
             trace_name_safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', str(self.trace_name))
-            task_trace_path = os.path.join(trace_base_dir, f"{trace_name_safe}.json")
-            trace_writer = StreamingTraceWriter(task_trace_path, getattr(self, "task_name", "unknown"))
+            trace_ext = "jsonl" if self.resumable else "json"
+            task_trace_path = os.path.join(trace_base_dir, f"{trace_name_safe}.{trace_ext}")
+            trace_writer = StreamingTraceWriter(
+                task_trace_path, getattr(self, "task_name", "unknown"), resumable=self.resumable
+            )
             _task_trace_list_ctx.set(trace_writer)
+
+        # Resumable: load completed from checkpoint, open for appending new results
+        completed_from_checkpoint = {}
+        if self.resumable and self.output_dir:
+            os.makedirs(self.output_dir, exist_ok=True)
+            checkpoint_path = os.path.join(self.output_dir, "checkpoint.jsonl")
+            completed_from_checkpoint = _load_checkpoint_completed(checkpoint_path)
+            if completed_from_checkpoint:
+                self.logger.info(f"Resuming: loaded {len(completed_from_checkpoint)} completed samples from checkpoint")
+            checkpoint_writer = open(checkpoint_path, "a")
 
         # Get prompt lengths and group request indices by length bucket for better batching
         question_texts = [req.args[0] for req in requests]
@@ -463,52 +549,92 @@ class LLaDAEvalHarness(LM):
             for chunk_index, chunk_indices in enumerate(chunks):
                 chunk_requests = [requests[i] for i in chunk_indices]
                 chunk_size = len(chunk_requests)
-                chunk_question_texts = [req.args[0] for req in chunk_requests]
 
-                encoded_outputs = self.tokenizer(
-                    chunk_question_texts,
-                    add_special_tokens=False,
-                    padding=True,
-                    return_tensors="pt",
-                )
-                input_ids = encoded_outputs["input_ids"].to(self.device)
-                attention_mask = encoded_outputs["attention_mask"].to(self.device)
-
-                generated, steps_taken, blocks, gen_time = generate(
-                    self.model,
-                    input_ids,
-                    attention_mask,
-                    steps=self.steps,
-                    gen_length=self.gen_length,
-                    block_length=self.block_length,
-                    mode=self.mode,
-                    strategy=self.strategy,
-                    top_k=self.top_k,
-                    trace_name=self.trace_name,
-                    upload_to_wandb=self.use_wandb,
-                    intervention_mode=self.intervention_mode,
-                    intervention_steps=self.intervention_steps,
-                    intervention_k=self.intervention_k,
-                )
-
-                chunk_gen_texts = self.tokenizer.batch_decode(
-                    generated[:, input_ids.shape[1] :], skip_special_tokens=True
-                )
-                for i, gen_text in enumerate(chunk_gen_texts):
-                    for stop in stop_tokens:
-                        if stop in gen_text:
-                            chunk_gen_texts[i] = gen_text.split(stop)[0]
-
+                # Resumable: split into completed (from checkpoint) and to_compute
+                to_compute = []  # list of (orig_idx, req)
                 for j, orig_idx in enumerate(chunk_indices):
-                    all_gen_texts[orig_idx] = chunk_gen_texts[j]
+                    req = chunk_requests[j]
+                    task_name = getattr(req, "task_name", self.task_name) or self.task_name
+                    doc_id = getattr(req, "doc_id", orig_idx)
+                    key = (str(task_name), doc_id)
+                    if self.resumable and key in completed_from_checkpoint:
+                        resp = completed_from_checkpoint[key][0]
+                        for stop in stop_tokens:
+                            if stop in resp:
+                                resp = resp.split(stop)[0]
+                        all_gen_texts[orig_idx] = resp
+                    else:
+                        to_compute.append((orig_idx, req))
 
-                total_steps_taken += steps_taken
-                total_blocks_processed += blocks
-                total_gen_time += gen_time
+                # Run model only for to_compute
+                if to_compute:
+                    to_compute_indices, to_compute_requests = zip(*to_compute)
+                    chunk_question_texts = [req.args[0] for req in to_compute_requests]
 
-                self.logger.info(
-                    f"Processed chunk {chunk_index + 1}/{len(chunks)} (indices {chunk_indices}, size {chunk_size}, gen time: {gen_time:.4f}s)"
-                )
+                    encoded_outputs = self.tokenizer(
+                        chunk_question_texts,
+                        add_special_tokens=False,
+                        padding=True,
+                        return_tensors="pt",
+                    )
+                    input_ids = encoded_outputs["input_ids"].to(self.device)
+                    attention_mask = encoded_outputs["attention_mask"].to(self.device)
+
+                    generated, steps_taken, blocks, gen_time = generate(
+                        self.model,
+                        input_ids,
+                        attention_mask,
+                        steps=self.steps,
+                        gen_length=self.gen_length,
+                        block_length=self.block_length,
+                        mode=self.mode,
+                        strategy=self.strategy,
+                        top_k=self.top_k,
+                        trace_name=self.trace_name,
+                        upload_to_wandb=self.use_wandb,
+                        intervention_mode=self.intervention_mode,
+                        intervention_steps=self.intervention_steps,
+                        intervention_k=self.intervention_k,
+                    )
+
+                    chunk_gen_texts = self.tokenizer.batch_decode(
+                        generated[:, input_ids.shape[1] :], skip_special_tokens=True
+                    )
+                    for i, gen_text in enumerate(chunk_gen_texts):
+                        for stop in stop_tokens:
+                            if stop in gen_text:
+                                chunk_gen_texts[i] = gen_text.split(stop)[0]
+
+                    for j, orig_idx in enumerate(to_compute_indices):
+                        all_gen_texts[orig_idx] = chunk_gen_texts[j]
+                        # Resumable: append newly computed sample to checkpoint
+                        if checkpoint_writer is not None:
+                            req = to_compute_requests[j]
+                            try:
+                                rec = {
+                                    "doc_id": getattr(req, "doc_id", orig_idx),
+                                    "task_name": getattr(req, "task_name", self.task_name),
+                                    "prompt": req.args[0],
+                                    "resps": [chunk_gen_texts[j]],
+                                }
+                                checkpoint_writer.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                                checkpoint_writer.flush()
+                            except Exception as e:
+                                self.logger.warning(f"Failed to write checkpoint sample: {e}")
+
+                    total_steps_taken += steps_taken
+                    total_blocks_processed += blocks
+                    total_gen_time += gen_time
+
+                    self.logger.info(
+                        f"Processed chunk {chunk_index + 1}/{len(chunks)} (indices {chunk_indices}, "
+                        f"computed={len(to_compute)}, skipped={chunk_size - len(to_compute)}, gen time: {gen_time:.4f}s)"
+                    )
+                else:
+                    self.logger.info(
+                        f"Processed chunk {chunk_index + 1}/{len(chunks)} (indices {chunk_indices}, "
+                        f"all {chunk_size} from checkpoint, skipped)"
+                    )
 
                 if self.use_wandb and wandb.run is not None:
                     try:
@@ -544,6 +670,11 @@ class LLaDAEvalHarness(LM):
         finally:
             if trace_writer is not None:
                 _task_trace_list_ctx.set(None)
+            if checkpoint_writer is not None:
+                try:
+                    checkpoint_writer.close()
+                except Exception as e:
+                    self.logger.warning(f"Failed to close checkpoint: {e}")
 
         # Update global statistics (thread-safe)
         with self._stats_lock:
