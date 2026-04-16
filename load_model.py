@@ -1,128 +1,102 @@
 """
-Load LLaDA model  without using HuggingFace's from_pretrained mechanism.
+Load diffusion LMs (LLaDA, LLaDA 1.5, Dream, …) from local checkpoints via HuggingFace Auto classes.
 """
 
-import torch
 import json
 from pathlib import Path
-import sys
-from models.llada.configuration_llada import LLaDAConfig
-from models.llada.modeling_llada import LLaDAModelLM
-from transformers import AutoTokenizer
+from typing import Any, Dict, Optional, Tuple, Union
+
+import torch
+from transformers import AutoModel, AutoTokenizer
+
+BASE_DIR = Path(__file__).parent.resolve()
 
 
-
-#  models directory to path
-BASE_DIR = Path(__file__).parent
-MODELS_DIR = BASE_DIR / "models" / "llada"
-sys.path.insert(0, str(BASE_DIR))
-
-
-def load_config(model_dir: str):
-    """
-    Load model configuration from local config.json file.
-    """
-    config_path = Path(model_dir) / "config.json"
+def _read_config(model_dir: Path) -> Dict[str, Any]:
+    config_path = model_dir / "config.json"
     if not config_path.exists():
         raise FileNotFoundError(f"config.json not found at {config_path}")
-    
-    with open(config_path, 'r') as f:
-        config_dict = json.load(f)
-    
-    # Create config object from the dictionary
-    config = LLaDAConfig(**config_dict)
-    return config
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def load_model(model_dir: str, torch_dtype=torch.bfloat16, device="cuda", compile_model=True):
+def infer_diffusion_token_ids(model_dir: Union[str, Path]) -> Tuple[int, int, Optional[int]]:
     """
-    Load LLaDA model completely from local files.
-    
-    Args:
-        model_dir: Path to model directory
-        torch_dtype: Data type for model weights
-        device: Device to load model on
-        compile_model: Whether to compile model with torch.compile for faster inference
+    Read mask / EOS / optional EoT ids from config. LLaDA models use a fixed EoT id (126348); Dream has no EoT.
     """
-    model_dir = Path(model_dir)
-    
-    # Load config
-    config = load_config(model_dir)
-    
-    # Load model using HuggingFace's from_pretrained but with local path
-    # This still uses HF's safetensors loading but from local files
-    model = LLaDAModelLM.from_pretrained(
+    model_dir = Path(model_dir).resolve()
+    cfg = _read_config(model_dir)
+    model_type = str(cfg.get("model_type", "")).lower()
+    mask_id = int(cfg["mask_token_id"])
+    eos_id = int(cfg["eos_token_id"])
+    if model_type == "llada":
+        eot_id: Optional[int] = 126348
+    else:
+        eot_id = None
+    return mask_id, eos_id, eot_id
+
+
+def load_model(
+    model_dir: str,
+    torch_dtype=torch.bfloat16,
+    device: str = "cuda",
+    compile_model: bool = True,
+):
+    """
+    Load model weights from a local directory (config + safetensors). Uses trust_remote_code for LLaDA / Dream modeling files shipped next to config.
+    """
+    model_dir = Path(model_dir).resolve()
+    _read_config(model_dir)
+
+    model = AutoModel.from_pretrained(
         str(model_dir),
-        config=config,
         torch_dtype=torch_dtype,
-        local_files_only=True 
+        local_files_only=True,
+        trust_remote_code=True,
     )
-    
+
     model = model.to(device)
     model.eval()
-    
-    # Compile model for faster inference (PyTorch 2.0+)
+
     if compile_model:
         try:
             model = torch.compile(model, mode="max-autotune")
         except Exception as e:
             print(f"Warning: Could not compile model: {e}")
             print("Continuing without compilation...")
-    
+
     return model
 
 
 def load_tokenizer(model_dir: str):
-    """
-    Load tokenizer from local files.
-    """
-    model_dir = Path(model_dir)
-    
-    # Check if tokenizer files exist
-    tokenizer_files = [
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "special_tokens_map.json"
-    ]
-    
-    for file in tokenizer_files:
-        if not (model_dir / file).exists():
-            raise FileNotFoundError(f"Tokenizer file {file} not found at {model_dir}")
-    
-    # Load tokenizer from local directory
-    tokenizer = AutoTokenizer.from_pretrained(
+    """Load tokenizer from local files (fast JSON, Dream BPE, etc.)."""
+    model_dir = Path(model_dir).resolve()
+    if not model_dir.is_dir():
+        raise FileNotFoundError(f"Model directory not found: {model_dir}")
+
+    return AutoTokenizer.from_pretrained(
         str(model_dir),
         local_files_only=True,
-        trust_remote_code=False  # Not needed since we're loading locally
+        trust_remote_code=True,
     )
-    
-    return tokenizer
 
 
-def load_model_and_tokenizer(model_dir: str, torch_dtype=torch.bfloat16, device="cuda", compile_model=True):
-    """
-    function to load both model and tokenizer from local files.
-    
-    Args:
-        model_dir: Path to model directory
-        torch_dtype: Data type for model weights
-        device: Device to load model on
-        compile_model: Whether to compile model with torch.compile for faster inference
-    """
+def load_model_and_tokenizer(
+    model_dir: str,
+    torch_dtype=torch.bfloat16,
+    device: str = "cuda",
+    compile_model: bool = True,
+):
     model = load_model(model_dir, torch_dtype=torch_dtype, device=device, compile_model=compile_model)
     tokenizer = load_tokenizer(model_dir)
-    
     return model, tokenizer
 
 
 if __name__ == "__main__":
-    # Example usage
-    model_dir = "./models/llada"
-    
-    print(f"Loading model from {model_dir}...")
-    model, tokenizer = load_model_and_tokenizer(model_dir, compile_model=True)
-    
+    example_dir = BASE_DIR / "models" / "dream"
+    print(f"Loading model from {example_dir}...")
+    model, tokenizer = load_model_and_tokenizer(str(example_dir), compile_model=True)
     print("Model and tokenizer loaded successfully!")
     print(f"Model type: {type(model)}")
     print(f"Tokenizer type: {type(tokenizer)}")
-
+    print(f"Inferred token ids: {infer_diffusion_token_ids(example_dir)}")

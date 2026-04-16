@@ -13,7 +13,7 @@ from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
 from tqdm import tqdm
 
-from load_model import load_model_and_tokenizer
+from load_model import load_model_and_tokenizer, infer_diffusion_token_ids
 from schedulers.generate import generate
 from traces.trace_wrapper import _task_trace_list_ctx
 
@@ -201,12 +201,14 @@ def _load_checkpoint_completed(checkpoint_path: str) -> dict:
     return completed
 
 
-@register_model("llada")
+@register_model("llada", "llada1_5", "dream")
 class LLaDAEvalHarness(LM):
     def __init__(
         self,
         model_path="./models/llada",
-        mask_id=126336,
+        mask_id=None,
+        eos_id=None,
+        eot_id=None,
         batch_size=8,
         mc_num=128,
         is_check_greedy=False,
@@ -228,8 +230,10 @@ class LLaDAEvalHarness(LM):
     ):
         '''
         Args:
-            model_path: LLaDA-8B-Base model path.
-            mask_id: The token id of [MASK] is 126336.
+            model_path: Local checkpoint directory (e.g. ./models/llada, ./models/llada1_5, ./models/dream).
+            mask_id: [MASK] token id; default from config.json (mask_token_id).
+            eos_id: EOS id for schedulers; default from config.
+            eot_id: LLaDA EoT id; default 126348 for model_type llada, else None (e.g. Dream).
             batch_size: mini batch size.
             mc_num: Monte Carlo estimation iterations
             is_check_greedy: For certain metrics like LAMBADA, the evaluation requires the model to verify whether the answer
@@ -256,6 +260,11 @@ class LLaDAEvalHarness(LM):
 
         self.device = torch.device(device)
         self.model, self.tokenizer = load_model_and_tokenizer(model_path, device=device, compile_model=compile_model)
+
+        inf_mask, inf_eos, inf_eot = infer_diffusion_token_ids(model_path)
+        self.mask_id = int(mask_id) if mask_id is not None else inf_mask
+        self.eos_id = int(eos_id) if eos_id is not None else inf_eos
+        self.eot_id = int(eot_id) if eot_id is not None else inf_eot
 
         self.model = self.model.to(self.device)
         self.model.eval()
@@ -285,7 +294,6 @@ class LLaDAEvalHarness(LM):
                         f.write(wandb.run.id)
                 except Exception:
                     pass
-        self.mask_id = int(mask_id)
         if self.tokenizer.padding_side != 'left':
             self.tokenizer.padding_side = 'left'
 
@@ -346,6 +354,7 @@ class LLaDAEvalHarness(LM):
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Compile model: {compile_model}")
         self.logger.info(f"Mask id: {self.mask_id}")
+        self.logger.info(f"EOS id: {self.eos_id}, EoT id: {self.eot_id}")
         self.logger.info(f"Trace name: {self.trace_name}")
         self.logger.info(f"Intervention mode: {self.intervention_mode}")
         self.logger.info(f"Intervention steps: {self.intervention_steps}")
@@ -595,6 +604,9 @@ class LLaDAEvalHarness(LM):
                         intervention_mode=self.intervention_mode,
                         intervention_steps=self.intervention_steps,
                         intervention_k=self.intervention_k,
+                        mask_id=self.mask_id,
+                        eos_id=self.eos_id,
+                        eot_id=self.eot_id,
                     )
 
                     chunk_gen_texts = self.tokenizer.batch_decode(

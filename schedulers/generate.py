@@ -1,5 +1,6 @@
 import torch
 import time
+from typing import Optional
 
 from schedulers.llada_schedulers import generate_llada
 from schedulers.top_k import generate_topk
@@ -10,7 +11,25 @@ from schedulers.fdm import generate_fdm
 
 
 @torch.no_grad()
-def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_length=256, mode="pure_diffusion", strategy="confidence", top_k=1, trace_name=None, upload_to_wandb=True, intervention_mode=None, intervention_steps=None, intervention_k=1):
+def generate(
+    model,
+    input_ids,
+    attention_mask,
+    steps=256,
+    gen_length=256,
+    block_length=256,
+    mode="pure_diffusion",
+    strategy="confidence",
+    top_k=1,
+    trace_name=None,
+    upload_to_wandb=True,
+    intervention_mode=None,
+    intervention_steps=None,
+    intervention_k=1,
+    mask_id=126336,
+    eos_id=126081,
+    eot_id: Optional[int] = 126348,
+):
     """
     Run batched diffusion generation. All samples in input_ids are processed in one batch.
 
@@ -29,6 +48,9 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
         intervention_mode=intervention_mode,
         intervention_steps=intervention_steps,
         intervention_k=intervention_k,
+        mask_id=mask_id,
+        eos_id=eos_id,
+        eot_id=eot_id,
     )
 
     if mode == "pure_diffusion":
@@ -86,11 +108,12 @@ def generate(model, input_ids, attention_mask, steps=256, gen_length=256, block_
         )
     elif mode == "fdm":
         assert block_length <= gen_length, "Block length must be less than or equal to gen_length"
+        # mask_id / eos_id / eot_id come from common_trace_kw only (avoid duplicate mask_id kwarg).
         gen, steps_taken, blocks = generate_fdm(
             model, input_ids, attention_mask,
             steps=steps, gen_length=gen_length, block_length=block_length,
             K1=2, N=4, eta1=0.8, eta2=0.7, gamma=0.5, temperature=0.0,
-            mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False,
+            logits_eos_inf=False, confidence_eos_eot_inf=False,
             global_scale=1.0, **common_trace_kw,
         )
     else:

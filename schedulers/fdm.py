@@ -9,10 +9,12 @@
 
 import math
 import os
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 import numpy as np
-from schedulers.utils import add_gumbel_noise, check_eos_stop_condition
+from schedulers.utils import add_gumbel_noise, check_eos_stop_condition, mask_eos_eot_logits
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
     from traces.trace_wrapper import trace_scheduler
@@ -41,9 +43,8 @@ def _global_confidence_expected_logp(model, x_hyp, attention_mask, mask_id,
     device = x_hyp.device
     logits = model(x_hyp, attention_mask=attention_mask).logits  # [B_h, L, V]
 
-    if confidence_eos_eot_inf and eos_id is not None and eot_id is not None:
-        logits[:, :, eos_id] = -torch.inf
-        logits[:, :, eot_id] = -torch.inf
+    if confidence_eos_eot_inf and eos_id is not None:
+        mask_eos_eot_logits(logits, False, True, eos_id, eot_id)
 
     # log-probs and probs
     logp = F.log_softmax(logits, dim=-1)  # [B_h, L, V]
@@ -184,6 +185,8 @@ def generate_fdm(
     gamma=0.5,
     temperature=0.,
     mask_id=126336,
+    eos_id=126081,
+    eot_id: Optional[int] = 126348,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     global_scale=1.0,
@@ -230,7 +233,6 @@ def generate_fdm(
     steps_per_block = steps // num_blocks
 
     prompt_len = prompt.shape[1]
-    eos_id, eot_id = 126081, 126348
     steps_taken = 0  
 
     # γ_1: main pruning threshold (exploration branch). η_2: borderline-stage threshold (final else).
@@ -255,13 +257,7 @@ def generate_fdm(
             steps_taken += 1  
             logits = model(x, attention_mask=attention_mask).logits
 
-            # Set EOS/EOT to -inf before sampling to prevent them from being predicted
-            if logits_eos_inf:
-                logits[:, :, eos_id] = -torch.inf
-
-            if confidence_eos_eot_inf:
-                logits[:, :, eos_id] = -torch.inf
-                logits[:, :, eot_id] = -torch.inf
+            mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l

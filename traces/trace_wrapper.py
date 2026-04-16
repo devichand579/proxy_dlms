@@ -655,10 +655,11 @@ def trace_scheduler(
                     upload_to_wandb=upload_to_wandb
                 )
             
+            effective_mask_id = kwargs.get("mask_id", mask_id)
             # Create model tracer
             tracer = ModelTracer(
                 func,
-                mask_id=mask_id,
+                mask_id=effective_mask_id,
                 tracing_context=tracing_context,
                 trace_name=trace_name
             )

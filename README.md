@@ -24,6 +24,20 @@ python3 -c "from huggingface_hub import snapshot_download; snapshot_download(rep
 
 ---
 
+Download the Dream 7B model before running evaluation or scheduler tests:
+
+```bash
+python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Dream-org/Dream-v0-Base-7B', local_dir='./models/dream', local_dir_use_symlinks=False)"
+```
+
+---
+
+Download the LLaDA-1.5 model before running evaluation or scheduler tests:
+
+```bash
+python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='GSAI-ML/LLaDA-1.5', local_dir='./models/llada1_5', local_dir_use_symlinks=False)"
+```
+
 ## Running Evaluation
 
 ### Using `eval.sh`

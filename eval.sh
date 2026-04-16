@@ -39,6 +39,8 @@
 # Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [--block_length 64] [--compile_model False] [--intervention_mode drop] [--intervention_steps 0,128,256] [--intervention_k 1] [--wandb True] [--tracing_enabled True] [--slurm]
 # Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)
 # Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, arc_challenge_chat
+# --model: basename of a folder under ./models/ (must match lm-eval registration). Examples: llada, llada1_5, dream.
+#          Weights/tokenizer load from ./models/<model>/; mask/EOS/EoT ids come from that folder's config when not overridden.
 # --slurm: run the eval command under srun (use when script is submitted via sbatch so the job uses the allocated GPU).
 # Local GPU: run without --slurm; optionally export CUDA_VISIBLE_DEVICES=0 or 1  before running.
 
@@ -73,6 +75,7 @@ while [[ $# -gt 0 ]]; do
             TASK_NAME="$2"
             shift 2
             ;;
+        # See header: must be llada | llada1_5 | dream (directory name under ./models/)
         --model)
             MODEL="$2"
             shift 2
@@ -248,6 +251,7 @@ else
     export TOP_K=2
 fi
 
+# Passed through to eval harness as model_path=...; AutoModel/AutoTokenizer resolve from this directory.
 export MODEL_PATH=./models/${MODEL}
 export TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 

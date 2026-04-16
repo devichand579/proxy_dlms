@@ -1,6 +1,22 @@
 import torch
 import torch.nn.functional as F
-from typing import List
+from typing import List, Optional
+
+
+def mask_eos_eot_logits(
+    logits: torch.Tensor,
+    logits_eos_inf: bool,
+    confidence_eos_eot_inf: bool,
+    eos_id: int,
+    eot_id: Optional[int],
+) -> None:
+    """In-place: optionally suppress EOS / EoT in logits (LLaDA-style; eot_id may be None, e.g. Dream)."""
+    if logits_eos_inf:
+        logits[:, :, eos_id] = -torch.inf
+    if confidence_eos_eot_inf:
+        logits[:, :, eos_id] = -torch.inf
+        if eot_id is not None:
+            logits[:, :, eot_id] = -torch.inf
 
 
 def add_gumbel_noise(logits, temperature):
