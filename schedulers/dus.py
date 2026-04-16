@@ -17,7 +17,13 @@
 
 import torch
 from typing import Optional, List
-from schedulers.utils import add_gumbel_noise, get_mask_by_confidence, get_mask_by_entropy, check_eos_stop_condition
+from schedulers.utils import (
+    add_gumbel_noise,
+    get_mask_by_confidence,
+    get_mask_by_entropy,
+    check_eos_stop_condition,
+    mask_eos_eot_logits,
+)
 import os
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
@@ -138,6 +144,8 @@ def generate_dus(
     temperature=0.,
     remasking='confidence',
     mask_id=126336,
+    eos_id=126081,
+    eot_id: Optional[int] = 126348,
     scheduler='binary',
     base=2,
     base_skip=1,
@@ -186,7 +194,6 @@ def generate_dus(
     num_blocks = gen_length // block_length
 
     prompt_len = prompt.shape[1]
-    eos_id, eot_id = 126081, 126348
     steps_taken = 0  
 
     for num_block in range(num_blocks):
@@ -217,13 +224,7 @@ def generate_dus(
             steps_taken += 1  
             logits = model(x, attention_mask=attention_mask).logits
 
-            # Set EOS/EOT to -inf before sampling to prevent them from being predicted
-            if logits_eos_inf:
-                logits[:, :, eos_id] = -torch.inf
-
-            if confidence_eos_eot_inf:
-                logits[:, :, eos_id] = -torch.inf
-                logits[:, :, eot_id] = -torch.inf
+            mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l

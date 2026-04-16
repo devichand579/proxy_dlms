@@ -6,10 +6,18 @@
 '''
 
 import os
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 import numpy as np
-from schedulers.utils import add_gumbel_noise, get_mask_by_confidence, get_mask_by_entropy, check_eos_stop_condition
+from schedulers.utils import (
+    add_gumbel_noise,
+    get_mask_by_confidence,
+    get_mask_by_entropy,
+    check_eos_stop_condition,
+    mask_eos_eot_logits,
+)
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
     from traces.trace_wrapper import trace_scheduler
@@ -30,6 +38,8 @@ def generate_topk(
     metric='confidence',  # 'top_margin', 'confidence', 'entropy', 'random'
     temperature=0.,
     mask_id=126336,
+    eos_id=126081,
+    eot_id: Optional[int] = 126348,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     trace_name=None,  
@@ -71,7 +81,6 @@ def generate_topk(
     steps = steps // num_blocks
 
     prompt_len = prompt.shape[1]
-    eos_id, eot_id = 126081, 126348
     steps_taken = 0  
 
     for num_block in range(num_blocks):
@@ -91,13 +100,7 @@ def generate_topk(
             steps_taken += 1  
             logits = model(x, attention_mask=attention_mask).logits
 
-            # Set EOS/EOT to -inf before sampling to prevent them from being predicted
-            if logits_eos_inf:
-                logits[:, :, eos_id] = -torch.inf
-
-            if confidence_eos_eot_inf:
-                logits[:, :, eos_id] = -torch.inf
-                logits[:, :, eot_id] = -torch.inf
+            mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l

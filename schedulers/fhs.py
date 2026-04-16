@@ -14,9 +14,11 @@
 '''
 
 
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
-from schedulers.utils import  check_eos_stop_condition
+from schedulers.utils import check_eos_stop_condition, mask_eos_eot_logits
 import os
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
@@ -127,6 +129,8 @@ def generate_fhs_extrapolation(
     steps=128,
     temperature=1.0,
     mask_id=126336,
+    eos_id=126081,
+    eot_id: Optional[int] = 126348,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     pass_time_to_model=True,
@@ -164,7 +168,6 @@ def generate_fhs_extrapolation(
     schedule = make_equal_schedule(gen_length, steps)
 
     prompt_len = prompt.shape[1]
-    eos_id, eot_id = 126081, 126348
     steps_taken = 0  
 
     # Mask bookkeeping
@@ -205,13 +208,7 @@ def generate_fhs_extrapolation(
                 t_cond = tau_new if pass_time_to_model else None
                 logits = _model_logits(model, x, attention_mask, t_cond)
 
-                # Set EOS/EOT to -inf before sampling to prevent them from being predicted
-                if logits_eos_inf:
-                    logits[:, :, eos_id] = -torch.inf
-
-                if confidence_eos_eot_inf:
-                    logits[:, :, eos_id] = -torch.inf
-                    logits[:, :, eot_id] = -torch.inf
+                mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
                 mu = logits
                 tau_curr = tau_new.clone()
@@ -274,6 +271,8 @@ def generate_fhs_predictor_corrector(
     steps=256,
     temperature=1.0,
     mask_id=126336,
+    eos_id=126081,
+    eot_id: Optional[int] = 126348,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     pass_time_to_model=True,
@@ -311,7 +310,6 @@ def generate_fhs_predictor_corrector(
     schedule = make_equal_schedule(gen_length, steps)
 
     prompt_len = prompt.shape[1]
-    eos_id, eot_id = 126081, 126348
     steps_taken = 0 
 
     # Mask bookkeeping
@@ -349,12 +347,7 @@ def generate_fhs_predictor_corrector(
             steps_taken += 1
             logits = _model_logits(model, x, attention_mask, t_cond)
 
-            if logits_eos_inf:
-                logits[:, :, eos_id] = -torch.inf
-
-            if confidence_eos_eot_inf:
-                logits[:, :, eos_id] = -torch.inf
-                logits[:, :, eot_id] = -torch.inf
+            mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
             mu_pred = logits
 
@@ -377,12 +370,7 @@ def generate_fhs_predictor_corrector(
                 steps_taken += 1
                 logits_corr = _model_logits(model, x, attention_mask, t_cond)
 
-                if logits_eos_inf:
-                    logits_corr[:, :, eos_id] = -torch.inf
-
-                if confidence_eos_eot_inf:
-                    logits_corr[:, :, eos_id] = -torch.inf
-                    logits_corr[:, :, eot_id] = -torch.inf
+                mask_eos_eot_logits(logits_corr, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
                 mu_corr = logits_corr
 
@@ -415,6 +403,8 @@ def generate_fhs(
     steps=128,
     temperature=1.0,
     mask_id=126336,
+    eos_id=126081,
+    eot_id: Optional[int] = 126348,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     pass_time_to_model=True,
@@ -446,15 +436,41 @@ def generate_fhs(
         intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
         intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
     '''
+    trace_kw = dict(
+        trace_name=trace_name,
+        upload_to_wandb=upload_to_wandb,
+        intervention_mode=intervention_mode,
+        intervention_steps=intervention_steps,
+        intervention_k=intervention_k,
+    )
     if steps <= 128:
         return generate_fhs_extrapolation(
-            model, prompt, attention_mask,
-            gen_length, steps, temperature,
-            mask_id, logits_eos_inf, confidence_eos_eot_inf, pass_time_to_model
+            model,
+            prompt,
+            attention_mask,
+            gen_length=gen_length,
+            steps=steps,
+            temperature=temperature,
+            mask_id=mask_id,
+            eos_id=eos_id,
+            eot_id=eot_id,
+            logits_eos_inf=logits_eos_inf,
+            confidence_eos_eot_inf=confidence_eos_eot_inf,
+            pass_time_to_model=pass_time_to_model,
+            **trace_kw,
         )
-    else:
-        return generate_fhs_predictor_corrector(
-            model, prompt, attention_mask,
-            gen_length, steps, temperature,
-            mask_id, logits_eos_inf, confidence_eos_eot_inf, pass_time_to_model
-        )
+    return generate_fhs_predictor_corrector(
+        model,
+        prompt,
+        attention_mask,
+        gen_length=gen_length,
+        steps=steps,
+        temperature=temperature,
+        mask_id=mask_id,
+        eos_id=eos_id,
+        eot_id=eot_id,
+        logits_eos_inf=logits_eos_inf,
+        confidence_eos_eot_inf=confidence_eos_eot_inf,
+        pass_time_to_model=pass_time_to_model,
+        **trace_kw,
+    )
