@@ -609,8 +609,16 @@ class LLaDAEvalHarness(LM):
                         eot_id=self.eot_id,
                     )
 
+                    prompt_len = int(input_ids.shape[1])
+                    gen_tails = []
+                    for b in range(generated.shape[0]):
+                        tail = generated[b, prompt_len:]
+                        eos_positions = (tail == self.eos_id).nonzero(as_tuple=False)
+                        if eos_positions.numel() > 0:
+                            tail = tail[: eos_positions[0].item()]
+                        gen_tails.append(tail)
                     chunk_gen_texts = self.tokenizer.batch_decode(
-                        generated[:, input_ids.shape[1] :], skip_special_tokens=True
+                        gen_tails, skip_special_tokens=True
                     )
                     for i, gen_text in enumerate(chunk_gen_texts):
                         for stop in stop_tokens:
