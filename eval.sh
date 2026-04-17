@@ -299,7 +299,7 @@ else
     elif [[ "$TASK_NAME" == *"mbpp"* ]]; then
         NUM_FEWSHOT=3
     elif [[ "$TASK_NAME" == *"arc_challenge_chat"* ]]; then
-        NUM_FEWSHOT=0
+        NUM_FEWSHOT=5
     fi
 fi
 
