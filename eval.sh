@@ -36,7 +36,7 @@
 
 ########################################################################################
 # Parse command-line arguments
-# Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [--block_length 64] [--compile_model False] [--intervention_mode drop] [--intervention_steps 0,128,256] [--intervention_k 1] [--wandb True] [--tracing_enabled True] [--slurm]
+# Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [--block_length 64] [--compile_model False] [--intervention_mode drop] [--intervention_steps 0,128,256] [--intervention_k 1] [--wandb True] [--tracing_enabled True] [--capture_pre_logits True] [--hidden_capture_path outputs/my_hidden] [--slurm]
 # Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)
 # Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, arc_challenge_chat
 # --model: basename of a folder under ./models/ (must match lm-eval registration). Examples: llada, llada1_5, dream.
@@ -61,6 +61,8 @@ TOP_K_OVERRIDE=""
 SLURM_MODE=false
 RESUMABLE=false
 RUN_ID=""
+CAPTURE_PRE_LOGITS=""
+HIDDEN_CAPTURE_PATH=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --batch_size)
@@ -128,9 +130,17 @@ while [[ $# -gt 0 ]]; do
             RUN_ID="$2"
             shift 2
             ;;
+        --capture_pre_logits)
+            CAPTURE_PRE_LOGITS="$2"
+            shift 2
+            ;;
+        --hidden_capture_path)
+            HIDDEN_CAPTURE_PATH="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--block_length <n>] [--top_k <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm] [--resumable] [--run_id <id>]"
+            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--block_length <n>] [--top_k <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--capture_pre_logits <True|False>] [--hidden_capture_path <dir>] [--slurm] [--resumable] [--run_id <id>]"
             exit 1
             ;;
     esac
@@ -147,6 +157,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Optional - Block length: --block_length <n> to override (defaults: block_diffusion 32, fdm 64, dus 16, else gen_length)"
     echo "  Optional - Top-k: --top_k <n> for top_k scheduler (default 2, tokens to transfer per step)"
     echo "  Optional - Tracing: --tracing_enabled True to enable scheduler tracing (writes trace_outputs/<trace_name>.json)"
+    echo "  Optional - Hidden states: --capture_pre_logits True [--hidden_capture_path <dir>] (default dir under outputs/ or checkpoint/hidden)"
     echo "  Optional - SLURM: --slurm to run the eval under srun (for sbatch submissions)"
     echo "  Optional - Resumable: --resumable writes outputs/{run_id}/checkpoint.jsonl and resumes skipped samples; traces use JSONL when tracing is on. Use --run_id for custom id."
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
@@ -314,6 +325,19 @@ if [[ -n "$INTERVENTION_MODE" ]]; then
     MODEL_ARGS="${MODEL_ARGS},intervention_mode=${INTERVENTION_MODE},intervention_steps=${INTERVENTION_STEPS_ARG},intervention_k=${INTERVENTION_K:-1}"
 fi
 
+# Pre-logit hidden capture (cst): paths must not contain commas (lm-eval model_args)
+if [[ "${CAPTURE_PRE_LOGITS,,}" == "true" ]]; then
+    if [[ -n "$HIDDEN_CAPTURE_PATH" ]]; then
+        HIDDEN_DIR="$HIDDEN_CAPTURE_PATH"
+    elif [[ "$RESUMABLE" == "true" && -n "$CHECKPOINT_DIR" ]]; then
+        HIDDEN_DIR="${CHECKPOINT_DIR}/hidden"
+    else
+        HIDDEN_DIR="outputs/${OUTPUT_SUFFIX}/hidden"
+    fi
+    mkdir -p "$HIDDEN_DIR"
+    MODEL_ARGS="${MODEL_ARGS},capture_pre_logits=true,hidden_capture_path=${HIDDEN_DIR}"
+fi
+
 # Display configuration
 echo "Configuration:"
 echo "  Batch Size: $BATCH_SIZE"
@@ -334,6 +358,9 @@ if [[ -n "$INTERVENTION_MODE" ]]; then
 fi
 echo "  Wandb: ${WANDB:-False}"
 echo "  Tracing enabled: ${TRACING_ENABLED_ARG:-False}"
+if [[ "${CAPTURE_PRE_LOGITS,,}" == "true" ]]; then
+    echo "  Capture pre-logit hiddens: yes (dir=${HIDDEN_DIR})"
+fi
 echo "  SLURM mode (srun): ${SLURM_MODE}"
 if [[ -n "$WANDB_NAME" ]]; then
     echo "  Wandb Name: $WANDB_NAME"

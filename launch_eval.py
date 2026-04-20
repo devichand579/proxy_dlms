@@ -11,6 +11,7 @@ Launch eval with Hydra. Supports local runs and SLURM multirun via submitit laun
   python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm_a40
 
 Config: config/config.yaml. Launcher defaults: config/launcher/local.yaml; use launcher=slurm_* for cluster (e.g. launcher=slurm_a40).
+  Hidden states: capture_pre_logits=true, optional hidden_capture_path=/abs/path (or null for auto under outputs/).
 """
 
 import os
@@ -148,6 +149,19 @@ def run(cfg: DictConfig) -> int:
             steps_arg = re.sub(r",", "_", str(intervention_steps or "0"))
         model_args += f",intervention_mode={intervention_mode},intervention_steps={steps_arg},intervention_k={intervention_k}"
 
+    capture_pre_logits = _to_bool(cfg.get("capture_pre_logits", False))
+    hidden_capture_path = cfg.get("hidden_capture_path")
+    if capture_pre_logits:
+        if hidden_capture_path is None or str(hidden_capture_path).strip().lower() in ("null", "none", ""):
+            if resumable and checkpoint_dir:
+                hidden_dir = f"{checkpoint_dir}/hidden"
+            else:
+                hidden_dir = f"outputs/{output_suffix}/hidden"
+        else:
+            hidden_dir = str(hidden_capture_path).strip()
+        os.makedirs(hidden_dir, exist_ok=True)
+        model_args += f",capture_pre_logits=true,hidden_capture_path={hidden_dir}"
+
     env = os.environ.copy()
     env.setdefault("HF_ALLOW_CODE_EVAL", "1")
     env.setdefault("HF_DATASETS_TRUST_REMOTE_CODE", "true")
@@ -174,6 +188,8 @@ def run(cfg: DictConfig) -> int:
     print(f"  batch_size={batch_size} mode={mode} task_name={task_name} model={model}")
     print(f"  compile_model={compile_model} gen_length={gen_length} steps={steps} block_length={block_length} top_k={top_k}")
     print(f"  num_fewshot={num_fewshot} wandb={wandb} tracing_enabled={tracing_enabled} resumable={resumable}")
+    if capture_pre_logits:
+        print(f"  capture_pre_logits=true hidden_capture_path={hidden_dir}")
     if intervention_mode:
         print(f"  intervention: mode={intervention_mode} steps={intervention_steps} k={intervention_k}")
     print(f"  output: outputs/{output_suffix}/" if resumable else f"  output: outputs/{output_suffix}.json")
