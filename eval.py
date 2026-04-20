@@ -14,6 +14,7 @@ from lm_eval.api.registry import register_model
 from tqdm import tqdm
 
 from load_model import load_model_and_tokenizer, infer_diffusion_token_ids
+from cst import save_hidden_records
 from schedulers.generate import generate
 from traces.trace_wrapper import _task_trace_list_ctx
 
@@ -227,6 +228,8 @@ class LLaDAEvalHarness(LM):
         task_name=None,
         resumable=False,
         output_dir=None,
+        capture_pre_logits=False,
+        hidden_capture_path=None,
     ):
         '''
         Args:
@@ -255,11 +258,21 @@ class LLaDAEvalHarness(LM):
             intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
             trace_name: Optional trace name. If provided, trace will be saved to disk and uploaded to wandb as artifact.
             intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
+            capture_pre_logits: If True, wrap the model to record pre-logit hidden states (bf16) on every forward.
+            hidden_capture_path: If set (directory path) and capture_pre_logits is True, writes one ``.pt`` file per
+                chunk inside generate_until (each file: all scheduler steps for that batch, bf16 tensors).
         '''
         super().__init__()
 
         self.device = torch.device(device)
-        self.model, self.tokenizer = load_model_and_tokenizer(model_path, device=device, compile_model=compile_model)
+        self._capture_pre_logits = _to_bool(capture_pre_logits)
+        self._hidden_capture_path = str(hidden_capture_path) if hidden_capture_path else None
+        self.model, self.tokenizer = load_model_and_tokenizer(
+            model_path,
+            device=device,
+            compile_model=compile_model,
+            capture_pre_logits=self._capture_pre_logits,
+        )
 
         inf_mask, inf_eos, inf_eot = infer_diffusion_token_ids(model_path)
         self.mask_id = int(mask_id) if mask_id is not None else inf_mask
@@ -645,6 +658,29 @@ class LLaDAEvalHarness(LM):
                     total_steps_taken += steps_taken
                     total_blocks_processed += blocks
                     total_gen_time += gen_time
+
+                    if (
+                        self._capture_pre_logits
+                        and self._hidden_capture_path
+                        and hasattr(self.model, "records")
+                        and hasattr(self.model, "clear_records")
+                    ):
+                        os.makedirs(self._hidden_capture_path, exist_ok=True)
+                        hidden_name = (
+                            f"hidden_g{self.generate_until_call_count:05d}_chunk_{chunk_index:05d}.pt"
+                        )
+                        hidden_out = os.path.join(self._hidden_capture_path, hidden_name)
+                        save_hidden_records(
+                            self.model.records,
+                            hidden_out,
+                            extra={
+                                "generate_until_call": self.generate_until_call_count,
+                                "chunk_index": chunk_index,
+                                "batch_size": int(generated.shape[0]),
+                                "steps_taken": int(steps_taken),
+                            },
+                        )
+                        self.model.clear_records()
 
                     self.logger.info(
                         f"Processed chunk {chunk_index + 1}/{len(chunks)} (indices {chunk_indices}, "

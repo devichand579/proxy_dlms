@@ -41,6 +41,7 @@ def load_model(
     torch_dtype=torch.bfloat16,
     device: str = "cuda",
     compile_model: bool = True,
+    capture_pre_logits: bool = False,
 ):
     """
     Load model weights from a local directory (config + safetensors). Uses trust_remote_code for LLaDA / Dream modeling files shipped next to config.
@@ -57,6 +58,11 @@ def load_model(
 
     model = model.to(device)
     model.eval()
+
+    if capture_pre_logits:
+        from cst import PreLogitsCaptureWrapper
+
+        model = PreLogitsCaptureWrapper(model)
 
     if compile_model:
         try:
@@ -86,8 +92,15 @@ def load_model_and_tokenizer(
     torch_dtype=torch.bfloat16,
     device: str = "cuda",
     compile_model: bool = True,
+    capture_pre_logits: bool = False,
 ):
-    model = load_model(model_dir, torch_dtype=torch_dtype, device=device, compile_model=compile_model)
+    model = load_model(
+        model_dir,
+        torch_dtype=torch_dtype,
+        device=device,
+        compile_model=compile_model,
+        capture_pre_logits=capture_pre_logits,
+    )
     tokenizer = load_tokenizer(model_dir)
     return model, tokenizer
 
