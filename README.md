@@ -1,6 +1,6 @@
 # STrace
 
-Diffusion-based text generation with LLaDA-style schedulers. Supports evaluation on lm-eval tasks, batched generation, tracing, and optional interventions.
+Diffusion-based text generation with LLaDA-style schedulers. Supports evaluation on lm-eval tasks, batched generation, tracing, optional interventions, **optional pre-logit hidden-state capture** (`cst/`), and **mixed training prompt pools** (`cst.train_data`).
 
 ---
 
@@ -67,6 +67,8 @@ Convenient wrapper that sets generation length, steps, few-shot count, and outpu
 | `--slurm` | Use when submitting via `sbatch` so the command runs under `srun`. |
 | `--resumable` | Checkpointed evaluation: fixed output directory, sample-level resume after crash or preemption (see below). |
 | `--run_id` | With `--resumable`, directory name under `outputs/` (default: `{model}_{task}_{mode}`, or includes intervention tags when set). |
+| `--capture_pre_logits` | `True` to save **pre-logit** hidden states (bf16) during eval; see **Pre-logit hidden states (CST)** below. |
+| `--hidden_capture_path` | Optional directory for saved `.pt` files. **Must not contain commas** (passed through lm-eval `model_args`). If omitted, defaults to `outputs/<run_suffix>/hidden`, or `<checkpoint_dir>/hidden` when `--resumable` is set. |
 
 **Mode shortcuts:**
 
@@ -161,6 +163,56 @@ python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=s
 ```
 
 Install for SLURM: `pip install hydra-core hydra-submitit-launcher` (or use `requirements.txt`).
+
+**Pre-logit hidden states (same flags as `eval.sh`):** In `config/config.yaml`, set `capture_pre_logits: true`. Optional `hidden_capture_path: null` uses the same auto paths as the shell script (`outputs/<run>/hidden`, or under the resumable checkpoint directory). Override with an absolute path if you want a fixed dump location.
+
+---
+
+## Pre-logit hidden states (CST)
+
+Evaluation can record **last-layer representations immediately before the vocabulary projection** (post final norm: `ln_f` / RMSNorm depending on the model). Implementation lives in `cst/pre_logits.py` and is wired through `eval.py` when the LM is constructed with `capture_pre_logits=true` and a writable `hidden_capture_path`.
+
+**Enable**
+
+- **`eval.sh`:** `--capture_pre_logits True` and, if you want an explicit folder, `--hidden_capture_path /path/to/dir`.
+- **`launch_eval.py`:** `capture_pre_logits=true` and optionally `hidden_capture_path=/path/to/dir` (use `null` for auto).
+
+**Where files go**
+
+- Non-resumable: `outputs/<output_suffix>/hidden/` (suffix matches the run’s JSON/log naming).
+- Resumable: `<checkpoint_dir>/hidden/` (same checkpoint root as `checkpoint.jsonl`).
+
+**What is written**
+
+- One PyTorch file per **lm-eval `generate_until` chunk**, e.g. `hidden_g00001_chunk_00000.pt`.
+- Each file is a dict: `hidden_states_bf16` (list of bf16 tensors, one per forward in that chunk) and `meta` (chunk index, batch size, steps, etc.). See `cst.pre_logits.save_hidden_records`.
+
+Use these traces for analysis, calibration, or downstream **CST** training pipelines that consume hidden-state supervision alongside prompts.
+
+---
+
+## CST training data (`cst.train_data`)
+
+The **`cst`** package also provides **mixed prompt pools** for experiments that train or align on the same kinds of prompts as lm-eval (math, code-style tasks via TACO, multiple-choice, etc.).
+
+**API** (see `cst/train_data/__init__.py` and `compose.py`):
+
+- **`load_pools(...)`** — Loads one list of rows per source. Each row is `{id, source, text, meta}`.
+- **`sample_uniform(n, seed=..., ...)`** — Draws `n` **distinct** examples with a **proportional split** across non-empty pools (largest-remainder), **sampling without replacement** within each pool, then shuffles.
+- **`default_source_specs()`** / **`SourceSpec`** — Default sources: `gsm8k`, `minerva_math`, `arc_easy`, `arc_challenge`, `commonsense_qa`, `taco`.
+
+**Formatting**
+
+- **GSM8K:** optional few-shot from the public **test** split (`gsm8k_num_fewshot`, default 4).
+- **Minerva Math:** optional **fixed** 4-shot demos (`minerva_math_fixed_fewshot`).
+- **ARC / CommonsenseQA:** few-shot blocks prepended from a held-out pool; ARC uses the public **test** split; **CommonsenseQA uses the validation split** (the HF **test** split has no `answerKey`, so gold letters are unavailable there).
+
+**CLI**
+
+```bash
+python -m cst.train_data              # pool sizes + 24 sample rows (full text)
+python -m cst.train_data --samples 8  # fewer printed samples
+```
 
 ---
 
