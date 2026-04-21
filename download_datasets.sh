@@ -28,6 +28,7 @@ if hf_token:
 datasets_to_download = [
     ("openai/gsm8k", "main", "GSM8K"),
     ("google-research-datasets/mbpp", "full", "MBPP"),
+    ("BAAI/TACO", "ALL", "TACO"),
     ("openai/openai_humaneval", None, "HumanEval"),
     ("allenai/ai2_arc", "ARC-Challenge", "ARC Challenge"),
     ("HuggingFaceH4/MATH-500", None, "Minerva MATH-500"),
