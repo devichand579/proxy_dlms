@@ -232,3 +232,33 @@ def sample_uniform(
 
     rng.shuffle(out)
     return out
+
+
+def sample_uniform_batched(
+    num_samples: int,
+    batch_size: int,
+    *,
+    seed: int = 0,
+    specs: Optional[Sequence[SourceSpec]] = None,
+    gsm8k_num_fewshot: int = 4,
+    gsm8k_fewshot_seed: Optional[int] = None,
+    minerva_math_fixed_fewshot: bool = True,
+    arc_csqa_num_fewshot: int = 5,
+    arc_csqa_fewshot_seed: Optional[int] = None,
+) -> List[List[Dict[str, Any]]]:
+    """Same draw as :func:`sample_uniform`, but split into consecutive batches of up to ``batch_size`` rows."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    flat = sample_uniform(
+        num_samples,
+        seed=seed,
+        specs=specs,
+        gsm8k_num_fewshot=gsm8k_num_fewshot,
+        gsm8k_fewshot_seed=gsm8k_fewshot_seed,
+        minerva_math_fixed_fewshot=minerva_math_fixed_fewshot,
+        arc_csqa_num_fewshot=arc_csqa_num_fewshot,
+        arc_csqa_fewshot_seed=arc_csqa_fewshot_seed,
+    )
+    if not flat:
+        return []
+    return [flat[i : i + batch_size] for i in range(0, len(flat), batch_size)]

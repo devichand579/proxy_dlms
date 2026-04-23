@@ -62,7 +62,8 @@ def load_model(
     if capture_pre_logits:
         from cst import PreLogitsCaptureWrapper
 
-        model = PreLogitsCaptureWrapper(model)
+        mid, _, _ = infer_diffusion_token_ids(model_dir)
+        model = PreLogitsCaptureWrapper(model, mask_id=mid)
 
     if compile_model:
         try:
