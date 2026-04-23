@@ -1,4 +1,4 @@
-"""Pre-logit hiddens: last entry of ``hidden_states`` (post final norm, before logits), fp32 for on-disk capture."""
+"""Pre-logit hiddens: last layer of ``hidden_states``; captured in fp32, written to disk as bfloat16 (see :mod:`cst.storage_dtype`)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import nn
+
+from cst.storage_dtype import map_float_tensors
 
 
 def extract_pre_logits_hidden(outputs: Any) -> torch.Tensor:
@@ -148,13 +150,15 @@ def save_hidden_records(
     token_unmasked: Optional[Sequence[torch.Tensor]] = None,
     token_diffusion_masked: Optional[Sequence[torch.Tensor]] = None,
 ) -> None:
-    """``torch.save`` dict with ``hidden_states``, optional per-step bool masks, and ``meta``."""
+    """``torch.save`` dict with ``hidden_states`` (bfloat16), optional bool masks, and ``meta``."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    rec_list = [t.float() if t.dtype != torch.float32 else t for t in records]
+    rec_list = [map_float_tensors(t.float(), to_storage=True) for t in records]
+    meta_merged: dict[str, Any] = dict(extra) if extra else {}
+    meta_merged.setdefault("hidden_storage_dtype", "bfloat16")
     payload: dict[str, Any] = {
         "hidden_states": rec_list,
-        "meta": extra or {},
+        "meta": meta_merged,
     }
     n = len(rec_list)
     if (

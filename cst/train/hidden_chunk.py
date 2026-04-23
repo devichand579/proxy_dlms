@@ -11,7 +11,7 @@ import torch
 def records_to_H(
     hidden_states: List[torch.Tensor],
 ) -> torch.Tensor:
-    """``len(list)`` tensors ``(B,L,D)`` -> ``[n,B,L,D]`` float32. If captures include an initial embed row, ``n = (#forwards) + 1``."""
+    """``len(list)`` tensors (bf16 on disk, any float dtype here) -> ``[n,B,L,D]`` float32."""
     if not hidden_states:
         raise ValueError("empty hidden_states list")
     stacked = torch.stack([h.float() for h in hidden_states], dim=0)

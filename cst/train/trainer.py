@@ -12,6 +12,7 @@ import torch
 
 from cst.model.cst_bank import CSTBank
 from cst.naming import train_checkpoint_names
+from cst.storage_dtype import map_float_tensors
 from cst.train.hidden_chunk import iter_anchor_samples, load_chunk_H
 from cst.train.loss import windowed_cst_loss_full
 
@@ -257,15 +258,20 @@ def save_cst_checkpoint(
     """Write CST state, optimizer, ramp, and ``meta`` to ``path``."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "cst": cst_bank.state_dict_for_save(),
-            "optimizer": optimizer.state_dict(),
-            "ramp": ramp.state_dict(),
-            "meta": meta or {},
-        },
-        path,
-    )
+    raw = {
+        "cst": cst_bank.state_dict_for_save(),
+        "optimizer": optimizer.state_dict(),
+        "ramp": ramp.state_dict(),
+        "meta": meta or {},
+    }
+    to_save = {
+        "cst": map_float_tensors(raw["cst"], to_storage=True),
+        "optimizer": map_float_tensors(raw["optimizer"], to_storage=True),
+        "ramp": map_float_tensors(raw["ramp"], to_storage=True),
+        "meta": raw["meta"],
+        "storage_float_dtype": "bfloat16",
+    }
+    torch.save(to_save, path)
 
 
 def load_cst_checkpoint(
@@ -276,18 +282,20 @@ def load_cst_checkpoint(
 ) -> Dict[str, Any]:
     """Load from ``path``; return checkpoint ``meta``."""
     payload = torch.load(path, map_location="cpu")
-    cst_bank.load_state_dict_from_save(payload["cst"])
+    cst_sd = map_float_tensors(payload["cst"], to_storage=False)
+    cst_bank.load_state_dict_from_save(cst_sd)
     if "optimizer" in payload:
-        optimizer.load_state_dict(payload["optimizer"])
+        optimizer.load_state_dict(map_float_tensors(payload["optimizer"], to_storage=False))
     if "ramp" in payload:
-        ramp.load_state_dict(payload["ramp"])
+        ramp.load_state_dict(map_float_tensors(payload["ramp"], to_storage=False))
     return payload.get("meta") or {}
 
 
 def load_cst_bank_weights(path: str | Path, cst_bank: CSTBank) -> Dict[str, Any]:
     """Load only CST weights from ``path``; return ``meta``."""
     payload = torch.load(path, map_location="cpu")
-    cst_bank.load_state_dict_from_save(payload["cst"])
+    cst_sd = map_float_tensors(payload["cst"], to_storage=False)
+    cst_bank.load_state_dict_from_save(cst_sd)
     return payload.get("meta") or {}
 
 

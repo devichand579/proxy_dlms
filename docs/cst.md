@@ -29,7 +29,7 @@ See [Evaluation — Resumable](evaluation.md#resumable-evaluation) and [Resumabl
 - One PyTorch file per **lm-eval `generate_until` chunk**  
 - Filenames include **model**, **scheduler** (short tag), **CST `k` and `w`** (from your CST YAML), **task name**, and chunk indices, for example:  
   `llada_scheduler_pd_k4096_w4_task_gsm8k_g00001_chunk_00000.pt`  
-- Payload: dict with `hidden_states` (list of float32 tensors) and `meta` (chunk index, batch size, `cst_name_token`, `context`, etc.); see `cst.pre_logits.save_hidden_records`
+- Payload: dict with `hidden_states` (bfloat16 tensors on disk) and `meta` (chunk index, batch size, `cst_name_token`, `context`, etc.); loads cast to float32; see `cst.pre_logits.save_hidden_records`
 
 Use these for analysis or to feed the **CST training** pipeline below.
 
@@ -44,6 +44,8 @@ To avoid clobbering runs, **CST training checkpoints** and **collect staging** `
 - `cst_<model>_scheduler_<sched>_k<K>_w<W>_train_latest.pt` — resume / last write  
 - `cst_..._train_best.pt` — best mean loss so far  
 - `cst_..._train_state.json` — best-loss bookkeeping  
+
+Checkpoint **`.pt`** files store float tensors in **bfloat16** to save space; loading promotes them to float32 for the CST module, optimizer, and ramp.
 
 **Resume:** `train.resume_from_latest=true` loads the matching `*_train_latest.pt`, or legacy `cst_latest.pt` if present. You can set **`train.resume_checkpoint`** to an explicit path (old or new naming).
 
