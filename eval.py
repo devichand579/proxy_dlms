@@ -295,9 +295,9 @@ class LLaDAEvalHarness(LM):
             intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
             trace_name: Optional trace name. If provided, trace will be saved to disk and uploaded to wandb as artifact.
             intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
-            capture_pre_logits: If True, wrap the model to record pre-logit hidden states (float32) on every forward.
+            capture_pre_logits: If True, wrap the model to record pre-logit hiddens (fp32 in memory) on every forward.
             hidden_capture_path: If set (directory path) and capture_pre_logits is True, writes one ``.pt`` file per
-                chunk inside generate_until (each file: all scheduler steps for that batch, float32 tensors).
+                chunk inside generate_until (each file: tensors stored as bfloat16 on disk).
             cst_checkpoint: If set, load this CST weight file and, for each written hidden ``.pt``, run CST eval
                 metrics. **Tied to the current lm-eval ``task_name``** (one dataset per run) — for per-dataset
                 numbers, use ``launch_eval.py task_name=...`` and multirun over tasks, not the mixed
