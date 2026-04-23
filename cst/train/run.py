@@ -1,4 +1,4 @@
-"""Hydra entry: CST collection + training, or eval metrics."""
+"""CST training entry: collection + `run_train` (used by `launch_cst mode=train`)."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def _train_cst_on_chunks_and_checkpoint(
     epoch: Optional[int] = None,
     segment: Optional[int] = None,
 ) -> int:
-    """Train on ``batch_paths``, save checkpoint, delete chunks. Returns new ``global_step``."""
+    """Fit CST on ``batch_paths``, checkpoint, delete chunks; return updated ``global_step``."""
     from cst.train.trainer import delete_files, save_train_checkpoints, train_on_chunk_files
 
     logger.info("=== train on %d hidden files ===", len(batch_paths))

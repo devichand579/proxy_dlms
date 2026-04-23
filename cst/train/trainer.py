@@ -25,7 +25,7 @@ TRAIN_STATE_JSON = "cst_train_state.json"
 
 
 def _read_train_state(ckpt_dir: Path, state_basename: str) -> Dict[str, Any]:
-    """Read ``state_basename``; if missing, fall back to legacy ``cst_train_state.json`` when using new names."""
+    """Read state JSON; may fall back to legacy ``cst_train_state.json``."""
     want = Path(state_basename).name
     cands: List[Path] = [ckpt_dir / want]
     if want != TRAIN_STATE_JSON:
@@ -72,12 +72,7 @@ def save_train_checkpoints(
     train_batches: float,
     name_token: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Save latest (and best if improved) CST checkpoints; drop legacy ``cst_phase_*.pt``.
-
-    If ``name_token`` is set (e.g. ``llada_scheduler_pd_k4096_w4_train``), writes
-    ``cst_{name_token}_latest.pt`` / ``_best.pt`` / ``_state.json``. Otherwise uses legacy
-    ``cst_latest.pt`` / ``cst_best.pt`` / ``cst_train_state.json``.
-    """
+    """Write latest/best CST checkpoints and training state; remove legacy ``cst_phase_*.pt``."""
     ckpt_dir = Path(ckpt_dir)
     latest_n, best_n, state_n = train_checkpoint_names(name_token)
     n_anchors = int(float(train_batches))

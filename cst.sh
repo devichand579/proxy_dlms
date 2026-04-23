@@ -25,9 +25,7 @@
 ##SBATCH --output=job_outputs/%j/%j_0_log.out
 ##SBATCH --error=job_outputs/%j/%j_0_log.err
 
-########################################################################################
-# CLI: ./cst.sh --help   (options + Hydra overrides; see config/cst.yaml)
-########################################################################################
+# CLI: ./cst.sh --help. Hydra: config/cst.yaml. Docs: docs/cst.md, docs/parallel-runs.md
 
 set -euo pipefail
 

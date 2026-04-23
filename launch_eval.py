@@ -1,21 +1,4 @@
-"""
-Launch eval with Hydra. Supports local runs and SLURM multirun via submitit launcher.
-
-  # Single run (local, same as run_eval.py)
-  python launch_eval.py task_name=gsm8k mode=pd
-
-  # CST metrics (per task_name = one dataset; same hidden .pt as capture), with checkpoint:
-  python launch_eval.py task_name=gsm8k cst_checkpoint=outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt
-
-  # Multirun locally (multiple configs, sequential)
-  python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun
-
-  # Multirun on SLURM (one job per combination)
-  python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm_a40
-
-Config: config/config.yaml. Launcher defaults: config/launcher/local.yaml; use launcher=slurm_* for cluster (e.g. launcher=slurm_a40).
-  Hidden states: capture_pre_logits=true, optional hidden_capture_path=/abs/path (or null for auto under outputs/).
-"""
+"""Run `eval.py` via Hydra (local or SLURM). Config `config/config.yaml`; details in `docs/evaluation.md`."""
 
 import os
 import re
@@ -243,21 +226,7 @@ def run(cfg: DictConfig) -> int:
 
 
 def _normalize_hydra_cli(argv: list[str]) -> list[str]:
-    """Normalize CLI args for Hydra.
-
-    Hydra expects all flags (e.g. --multirun, --cfg, --resolve) to come before
-    positional overrides (key=value). Users often interleave them, e.g.:
-      python launch_eval.py task_name=humaneval mode=bd --multirun launcher=slurm_a40
-    which Hydra will reject with 'unrecognized arguments'.
-
-    This function reorders argv so flags come first and overrides come last.
-
-    It also supports the common pattern:
-      hydra.launcher=slurm_a40
-    by rewriting it to our config-group override:
-      launcher=slurm_a40
-    when the requested launcher exists in config/launcher/*.yaml.
-    """
+    """Put Hydra flags (``--multirun``, etc.) before ``key=value`` overrides; map ``hydra.launcher=X`` → ``launcher=X`` if valid."""
     if len(argv) <= 1:
         return argv
 

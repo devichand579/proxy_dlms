@@ -1,13 +1,4 @@
-"""Stable, filesystem-safe names for CST checkpoints and hidden ``.pt`` artifacts.
-
-``k`` and ``w`` come from the CST config (codebook / window) so runs with different
-architectures do not collide.
-
-Train collect / staging: ``{model}_scheduler_{sched}_k{K}_w{W}_train_...``
-Eval (lm-eval) hiddens: ``{model}_scheduler_{sched}_k{K}_w{W}_task_{task}_...``
-Resumable CST eval aggregate (JSON, not tensors): ``cst_{same_token as hiddens}_eval_agg.json``
-CST training checkpoints: ``cst_{...}_k{K}_w{W}_train_{latest|best|state}.pt|json``
-"""
+"""Path tokens for CST train/eval: model, scheduler, k/w, task (staged hiddens and aggregates)."""
 
 from __future__ import annotations
 
@@ -76,10 +67,7 @@ LEGACY_CST_EVAL_AGG_BASENAME = "cst_eval_agg.json"
 
 
 def cst_resumable_eval_agg_basename(cst_eval_name_token: str) -> str:
-    """
-    Resumable lm-eval + CST: merged per-chunk **scalar** stats JSON, same name token as hidden ``.pt``:
-    ``cst_<token>_eval_agg.json`` (parallel to ``cst_<train_token>_state.json`` for training).
-    """
+    """``cst_<token>_eval_agg.json`` (resumable scalar aggregates; same token as hiddens)."""
     t = str(cst_eval_name_token).strip() or "eval"
     return f"cst_{fs_token(t, max_len=200)}_eval_agg.json"
 
@@ -116,11 +104,7 @@ def scheduler_short_from_eval_mode(mode: str, strategy: str) -> str:
 
 
 def train_checkpoint_names(name_token: Optional[str]) -> tuple[str, str, str]:
-    """
-    Return ``(latest_pt, best_pt, state_json)`` basenames.
-    If ``name_token`` is set, files are ``cst_{name_token}_latest.pt`` etc.
-    Otherwise legacy ``cst_latest.pt`` / ``cst_best.pt`` / ``cst_train_state.json``.
-    """
+    """Return ``(latest_pt, best_pt, state_json)``; named token or fixed legacy basenames."""
     if name_token:
         base = f"cst_{name_token}"
         return f"{base}_latest.pt", f"{base}_best.pt", f"{base}_state.json"
@@ -139,10 +123,7 @@ def resolve_train_resume_latest(ckpt_dir: Path, name_token: str) -> Optional[Pat
 
 
 def resolve_train_best_in_dir(ckpt_dir: Path) -> Optional[Path]:
-    """
-    If legacy ``cst_best.pt`` exists, use it. Else newest ``cst_*_train_best.pt`` by mtime
-    (for defaults when the exact name is unknown).
-    """
+    """Prefer ``cst_best.pt``; else newest ``cst_*_train_best.pt`` by mtime (offline eval fallback)."""
     d = Path(ckpt_dir)
     leg = d / "cst_best.pt"
     if leg.is_file():

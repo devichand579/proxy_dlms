@@ -1,4 +1,4 @@
-"""CST eval: one chunk or a directory of ``.pt`` hiddens vs a CST checkpoint."""
+"""Per-file or directory evaluation of hidden ``.pt`` vs a CST weight file."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def evaluate_chunk_file(
     ntf_conf_low: float = 0.2,
     ntf_conf_high: float = 0.8,
 ) -> Dict[str, Any]:
-    """One file: recon metrics, optional unmasked / masked (diffusion) splits, NTF if ``base_model``; TC on all tokens."""
+    """Metrics for one hidden chunk: NMSE, L0, cos, TC; optional masks and NTF if ``base_model`` is set."""
     H, meta, segs = load_chunk_H(chunk_path)
     H = H.to(device)
     T, B, L, D = H.shape
@@ -221,12 +221,12 @@ EVAL_AGG_SPLIT_KEYS = (
 
 
 def new_eval_aggregator() -> Dict[str, List[float]]:
-    """Empty lists for merging :func:`evaluate_chunk_file` outputs into a run-level mean."""
+    """Empty metric lists for run-level means."""
     return {k: [] for k in ("nmse", "l0", "cos", "tc", "ntf", *EVAL_AGG_SPLIT_KEYS)}
 
 
 def merge_eval_file_into_agg(agg: Dict[str, List[float]], m: Dict[str, Any]) -> None:
-    """Merge one per-file result dict (same format as from :func:`evaluate_chunk_file`) into ``agg``."""
+    """Append one file's means into ``agg``."""
     if "nmse_mean" in m:
         agg["nmse"].append(m["nmse_mean"])
         agg["l0"].append(m["l0_mean"])
@@ -241,7 +241,7 @@ def merge_eval_file_into_agg(agg: Dict[str, List[float]], m: Dict[str, Any]) -> 
 
 
 def eval_summary_from_agg(agg: Dict[str, List[float]]) -> Dict[str, float]:
-    """Turn merged lists into means (same keys as :func:`run_eval_on_dir` ``summary``)."""
+    """Mean of each list → ``summary`` dict."""
     summary: Dict[str, float] = {
         "nmse": sum(agg["nmse"]) / max(len(agg["nmse"]), 1),
         "l0": sum(agg["l0"]) / max(len(agg["l0"]), 1),
@@ -267,7 +267,7 @@ def run_eval_on_dir(
     ntf_conf_low: float = 0.2,
     ntf_conf_high: float = 0.8,
 ) -> Dict[str, Any]:
-    """All ``*.pt`` in ``hidden_dir``: per-file stats plus mean ``summary``."""
+    """Evaluate all ``*.pt`` under ``hidden_dir``; return per-file list and mean ``summary``."""
     dev = torch.device(device)
     base_model: Optional[torch.nn.Module] = None
     if model_path:
