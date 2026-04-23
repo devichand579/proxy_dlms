@@ -31,6 +31,12 @@
 # Resumable (checkpointing): add --resumable; re-run same command to resume after crash
 # Alternative (Hydra): sbatch --wrap "conda run -n strace python launch_eval.py task_name=gsm8k mode=pd"
 # Multirun on SLURM (one job per config): python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
+#
+# CST (optional, via eval.LLaDAEvalHarness in eval.py):
+#   --cst_checkpoint PATH         forces --capture_pre_logits true, buffers .pt to cst_target_staging_gb, eval+delete
+#   [--cst_config_path PATH]      default config/cst.yaml
+#   [--cst_ntf_conf_low HIGH]   [--cst_ntf_conf_high HIGH]  [--cst_target_staging_gb GB]
+# Example: --capture_pre_logits true --cst_checkpoint ./outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt
 
 
 
@@ -63,6 +69,11 @@ RESUMABLE=false
 RUN_ID=""
 CAPTURE_PRE_LOGITS=""
 HIDDEN_CAPTURE_PATH=""
+CST_CHECKPOINT=""
+CST_CONFIG_PATH=""
+CST_NTF_LO=""
+CST_NTF_HI=""
+CST_TGB=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --batch_size)
@@ -138,6 +149,26 @@ while [[ $# -gt 0 ]]; do
             HIDDEN_CAPTURE_PATH="$2"
             shift 2
             ;;
+        --cst_checkpoint)
+            CST_CHECKPOINT="$2"
+            shift 2
+            ;;
+        --cst_config_path)
+            CST_CONFIG_PATH="$2"
+            shift 2
+            ;;
+        --cst_ntf_conf_low)
+            CST_NTF_LO="$2"
+            shift 2
+            ;;
+        --cst_ntf_conf_high)
+            CST_NTF_HI="$2"
+            shift 2
+            ;;
+        --cst_target_staging_gb)
+            CST_TGB="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--block_length <n>] [--top_k <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--capture_pre_logits <True|False>] [--hidden_capture_path <dir>] [--slurm] [--resumable] [--run_id <id>]"
@@ -145,6 +176,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# CST needs hidden .pt (same as launch_eval.py: cst_checkpoint => capture on)
+if [[ -n "$CST_CHECKPOINT" ]]; then
+    CAPTURE_PRE_LOGITS="true"
+fi
 
 # Check required arguments (intervention and wandb are optional)
 if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
@@ -157,7 +193,8 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Optional - Block length: --block_length <n> to override (defaults: block_diffusion 32, fdm 64, dus 16, else gen_length)"
     echo "  Optional - Top-k: --top_k <n> for top_k scheduler (default 2, tokens to transfer per step)"
     echo "  Optional - Tracing: --tracing_enabled True to enable scheduler tracing (writes trace_outputs/<trace_name>.json)"
-    echo "  Optional - Hidden states: --capture_pre_logits True [--hidden_capture_path <dir>] (default dir under outputs/ or checkpoint/hidden)"
+            echo "  Optional - Hidden states: --capture_pre_logits True [--hidden_capture_path <dir>] (default dir under outputs/ or checkpoint/hidden)"
+            echo "  Optional - CST: --cst_checkpoint <.pt> (implies capture; also --cst_config_path, --cst_target_staging_gb, --cst_ntf_conf_low/high)"
     echo "  Optional - SLURM: --slurm to run the eval under srun (for sbatch submissions)"
     echo "  Optional - Resumable: --resumable writes outputs/{run_id}/checkpoint.jsonl and resumes skipped samples; traces use JSONL when tracing is on. Use --run_id for custom id."
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
@@ -338,6 +375,17 @@ if [[ "${CAPTURE_PRE_LOGITS,,}" == "true" ]]; then
     MODEL_ARGS="${MODEL_ARGS},capture_pre_logits=true,hidden_capture_path=${HIDDEN_DIR}"
 fi
 
+# CST: appended to --model_args (see eval.LLaDAEvalHarness; paths must not contain commas)
+if [[ -n "$CST_CHECKPOINT" ]]; then
+    NLO="${CST_NTF_LO:-0.2}"
+    NHI="${CST_NTF_HI:-0.8}"
+    TGB="${CST_TGB:-1.0}"
+    MODEL_ARGS="${MODEL_ARGS},cst_checkpoint=${CST_CHECKPOINT},cst_ntf_conf_low=${NLO},cst_ntf_conf_high=${NHI},cst_target_staging_gb=${TGB}"
+    if [[ -n "$CST_CONFIG_PATH" ]]; then
+        MODEL_ARGS="${MODEL_ARGS},cst_config_path=${CST_CONFIG_PATH}"
+    fi
+fi
+
 # Display configuration
 echo "Configuration:"
 echo "  Batch Size: $BATCH_SIZE"
@@ -360,6 +408,10 @@ echo "  Wandb: ${WANDB:-False}"
 echo "  Tracing enabled: ${TRACING_ENABLED_ARG:-False}"
 if [[ "${CAPTURE_PRE_LOGITS,,}" == "true" ]]; then
     echo "  Capture pre-logit hiddens: yes (dir=${HIDDEN_DIR})"
+fi
+if [[ -n "$CST_CHECKPOINT" ]]; then
+    echo "  CST: checkpoint=${CST_CHECKPOINT} target_gb=${CST_TGB:-1.0} ntf=[$NLO,$NHI]"
+    [[ -n "$CST_CONFIG_PATH" ]] && echo "  CST config: ${CST_CONFIG_PATH}"
 fi
 echo "  SLURM mode (srun): ${SLURM_MODE}"
 if [[ -n "$WANDB_NAME" ]]; then

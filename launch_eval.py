@@ -4,6 +4,9 @@ Launch eval with Hydra. Supports local runs and SLURM multirun via submitit laun
   # Single run (local, same as run_eval.py)
   python launch_eval.py task_name=gsm8k mode=pd
 
+  # CST metrics (per task_name = one dataset; same hidden .pt as capture), with checkpoint:
+  python launch_eval.py task_name=gsm8k cst_checkpoint=outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt
+
   # Multirun locally (multiple configs, sequential)
   python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun
 
@@ -149,7 +152,13 @@ def run(cfg: DictConfig) -> int:
             steps_arg = re.sub(r",", "_", str(intervention_steps or "0"))
         model_args += f",intervention_mode={intervention_mode},intervention_steps={steps_arg},intervention_k={intervention_k}"
 
-    capture_pre_logits = _to_bool(cfg.get("capture_pre_logits", False))
+    cst_ck = cfg.get("cst_checkpoint")
+    cst_ck_s = str(cst_ck).strip() if cst_ck is not None else ""
+    if cst_ck_s and cst_ck_s.lower() not in ("null", "none", ""):
+        # CST metrics are computed on written hidden .pt files; need capture on.
+        capture_pre_logits = True
+    else:
+        capture_pre_logits = _to_bool(cfg.get("capture_pre_logits", False))
     hidden_capture_path = cfg.get("hidden_capture_path")
     if capture_pre_logits:
         if hidden_capture_path is None or str(hidden_capture_path).strip().lower() in ("null", "none", ""):
@@ -162,6 +171,18 @@ def run(cfg: DictConfig) -> int:
         os.makedirs(hidden_dir, exist_ok=True)
         model_args += f",capture_pre_logits=true,hidden_capture_path={hidden_dir}"
 
+    cst_config_path = cfg.get("cst_config_path")
+    cst_conf_s = str(cst_config_path).strip() if cst_config_path is not None else ""
+    cst_config_arg = cst_conf_s if cst_conf_s and cst_conf_s.lower() not in ("null", "none", "") else ""
+    if cst_ck_s and cst_ck_s.lower() not in ("null", "none", ""):
+        cst_nlo = float(cfg.get("cst_ntf_conf_low", 0.2))
+        cst_nhi = float(cfg.get("cst_ntf_conf_high", 0.8))
+        cst_tgb = float(cfg.get("cst_target_staging_gb", 1.0))
+        model_args += f",cst_checkpoint={cst_ck_s}"
+        if cst_config_arg:
+            model_args += f",cst_config_path={cst_config_arg}"
+        model_args += f",cst_ntf_conf_low={cst_nlo},cst_ntf_conf_high={cst_nhi},cst_target_staging_gb={cst_tgb}"
+
     env = os.environ.copy()
     env.setdefault("HF_ALLOW_CODE_EVAL", "1")
     env.setdefault("HF_DATASETS_TRUST_REMOTE_CODE", "true")
@@ -171,7 +192,7 @@ def run(cfg: DictConfig) -> int:
     if resumable:
         env["RESUMABLE_RUN_ID"] = output_suffix
         env["CHECKPOINT_DIR"] = checkpoint_dir
-    env.setdefault("WANDB_API_KEY", "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")
+    # W&B auth: set WANDB_API_KEY in the environment (or ~/.netrc); do not hardcode keys in-repo.
     env.setdefault("WANDB_PROJECT", str(cfg.get("wandb_project", "strace")))
 
     wandb_resume_args = ""
@@ -190,6 +211,11 @@ def run(cfg: DictConfig) -> int:
     print(f"  num_fewshot={num_fewshot} wandb={wandb} tracing_enabled={tracing_enabled} resumable={resumable}")
     if capture_pre_logits:
         print(f"  capture_pre_logits=true hidden_capture_path={hidden_dir}")
+    if cst_ck_s and cst_ck_s.lower() not in ("null", "none", ""):
+        cst_tgb_p = float(cfg.get("cst_target_staging_gb", 1.0))
+        print(
+            f"  cst_checkpoint={cst_ck_s} cst_target_staging_gb={cst_tgb_p} (buffer .pt, eval+delete, lm-eval flow unchanged)"
+        )
     if intervention_mode:
         print(f"  intervention: mode={intervention_mode} steps={intervention_steps} k={intervention_k}")
     print(f"  output: outputs/{output_suffix}/" if resumable else f"  output: outputs/{output_suffix}.json")

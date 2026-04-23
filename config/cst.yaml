@@ -1,0 +1,72 @@
+# Hydra config: CST train (launch_cst.py)
+# For offline eval on a folder of .pt, use mode=eval and set eval.* on the CLI (no eval block in this file; defaults in launch_cst.py)
+# For per-task lm-eval + CST, use launch_eval.py cst_checkpoint=...
+#
+# Examples:
+#   python launch_cst.py mode=train
+#   python launch_cst.py mode=eval eval.hidden_dir=/path eval.checkpoint=/path/to/cst_<model>_scheduler_<sched>_k<K>_w<W>_train_best.pt
+
+defaults:
+  - launcher: local
+  - _self_
+
+mode: train
+
+wandb: true
+wandb_project: strace-cst
+
+model_path: ./models/llada
+
+cst:
+  d_model: 4096
+  k: 4096
+  w: 4
+  max_steps: 512
+  max_on_gpu: 512
+  jumprelu_initial_threshold: 0.03
+  jumprelu_bandwidth: 1.0
+
+train:
+  device: cuda
+  staging_dir: outputs/cst_staging
+  checkpoint_dir: outputs/cst_ckpt
+  # Resume: explicit .pt, or resume_from_latest=true loads cst_<model>_scheduler_<sched>_train_latest.pt
+  # (or legacy cst_latest.pt) under checkpoint_dir
+  resume_checkpoint: null
+  resume_from_latest: false
+  # One epoch = sample_uniform(samples_per_epoch) then fixed batch order; collect in segments of
+  # target_staging_gb (last segment may be smaller), train CST, checkpoint, delete chunks; repeat num_epochs.
+  samples_per_epoch: 2048
+  num_epochs: 1
+  # Collection stops when total written chunk size reaches this (decimal GB, 1e9 bytes per GB).
+  # A final segment can be smaller than this when fewer batches remain in the epoch.
+  target_staging_gb: 1.0
+  max_collect_batches: 50000
+  inference_batch_size: 2
+  scheduler_mode: pd
+  gen_length: 256
+  steps: 256
+  block_length: null
+  top_k: 1
+  max_prompt_length: 512
+  compile_model: false
+  seed: 0
+  learning_rate: 0.0003
+  lambda_sparsity: 0.001
+  # Pre-JumpReLU dead-feature penalty: mean(ReLU(-h)); not ramped (CLT-style). Set 0 to disable.
+  lambda_pre_dead: 3.0e-6
+  c_tanh: 1.0
+  # Sparsity ramp: one ramp.step() per training chunk .pt file (not per epoch); see LambdaRamp in trainer.
+  ramp_total_steps: 10000
+  gsm8k_num_fewshot: 4
+  arc_csqa_num_fewshot: 5
+  trace_name: cst_collect
+  wandb: true
+  wandb_name: cst-train
+
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.override_dirname}
