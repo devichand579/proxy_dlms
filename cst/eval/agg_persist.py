@@ -1,12 +1,4 @@
-"""Persist :func:`cst.eval.run_eval_cst.new_eval_aggregator` state for resumable lm-eval + CST.
-
-Mirrors the idea of ``checkpoint.jsonl``: JSON in ``output_dir`` so a resumed run can
-append new chunk metrics without re-processing removed hidden files.
-
-The file name follows :mod:`cst.naming` (same token as eval hidden ``.pt`` basenames);
-see :func:`cst.naming.cst_resumable_eval_agg_path`. Legacy ``cst_eval_agg.json`` is still
-read for backward compatibility.
-"""
+"""Persist resumable CST eval scalars (named path; legacy `cst_eval_agg.json` still loads)."""
 
 from __future__ import annotations
 
@@ -24,7 +16,7 @@ AGG_VERSION = 1
 
 
 def cst_eval_agg_path(output_dir: str, cst_eval_name_token: str) -> str:
-    """Path to the named JSON (alias for :func:`cst.naming.cst_resumable_eval_agg_path`)."""
+    """Alias of :func:`cst.naming.cst_resumable_eval_agg_path`."""
     return cst_resumable_eval_agg_path(output_dir, cst_eval_name_token)
 
 
@@ -47,7 +39,7 @@ def save_cst_eval_agg(
     segment_idx: int,
     n_files_merged: int,
 ) -> None:
-    """Write aggregator + run metadata. Safe to call after each completed CST segment."""
+    """Write JSON after a CST segment (metadata + per-metric lists)."""
     p = cst_resumable_eval_agg_path(str(output_dir), cst_eval_name_token)
     os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
     payload: Dict[str, Any] = {
@@ -117,10 +109,7 @@ def load_cst_eval_agg(
     expect_checkpoint: str,
     expect_name_token: str,
 ) -> Optional[Tuple[Dict[str, List[float]], int, int, str]]:
-    """
-    Load a saved aggregate: tries the **named** file first, then legacy ``cst_eval_agg.json``
-    in the same directory.
-    """
+    """Load named file first, else legacy ``cst_eval_agg.json``; validate checkpoint and name token match."""
     for p in _agg_paths_to_try(output_dir, cst_eval_name_token):
         if not os.path.isfile(p):
             continue

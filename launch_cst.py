@@ -1,14 +1,4 @@
-"""
-CST training / offline eval of saved hiddens via Hydra (same style as launch_eval.py).
-
-  # Train (collect hidden chunks with LM, then fit CST, delete staging)
-  python launch_cst.py mode=train
-
-  # Offline: score a folder of hidden .pt files + CST checkpoint (no lm-eval; for on-task runs use launch_eval.py + cst_checkpoint)
-  python launch_cst.py mode=eval eval.hidden_dir=/path/to/hidden eval.checkpoint=/path/to/cst_..._train_best.pt
-
-Config: config/cst.yaml
-"""
+"""Entry for CST train (collect + fit) or eval (offline hiddens). Config: `config/cst.yaml`."""
 
 from __future__ import annotations
 
@@ -36,7 +26,7 @@ _OFFLINE_EVAL_DEFAULTS = {
 
 
 def _merge_offline_eval_cfg(cfg: DictConfig):
-    """``eval.*`` on CLI + defaults; no ``eval`` in cst.yaml required."""
+    """Merge `eval` overrides with `launch_cst` defaults when `eval:` is absent in yaml."""
     base = OmegaConf.create(_OFFLINE_EVAL_DEFAULTS)
     o = cfg.get("eval")
     if o is not None:
@@ -45,7 +35,7 @@ def _merge_offline_eval_cfg(cfg: DictConfig):
 
 
 def _run_offline_eval(cfg: DictConfig) -> int:
-    """``run_eval_on_dir`` + optional W&B; primary CST path is :mod:`eval` + ``launch_eval.py`` with ``cst_checkpoint``."""
+    """Run `cst.eval.run_eval_cst.run_eval_on_dir`; optional W&B logging."""
     try:
         import wandb
     except ImportError:

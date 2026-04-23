@@ -20,12 +20,7 @@ def windowed_cst_loss_full(
     lambda_ramp: float,
     lambda_pre_dead: float = 0.0,
 ) -> tuple[torch.Tensor, Dict[str, Any]]:
-    """
-    For one anchor step: predict hidden states from CST decoders, compare to ``H_full`` (MSE),
-    add sparsity on JumpReLU activations, optional ``ReLU(-pre_act)`` dead penalty. Returns loss + metrics.
-
-    ``h_window`` is ``[B, w_eff, L, D]`` (encoder inputs per slot); ``H_full`` is ``[n, B, L, D]`` with row ``t`` at timestep ``t``.
-    """
+    """One anchor: decode from ``h_window`` [B,w,L,D] vs target rows in ``H_full`` [T,B,L,D]; MSE + sparsity + optional pre-dead."""
     if h_window.dim() != 4:
         raise ValueError(
             f"h_window must be [B, w, L, D], got {tuple(h_window.shape)}"

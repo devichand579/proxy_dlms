@@ -177,9 +177,7 @@ def collect_hidden_until_size_gb_from_row_batches(
     max_batches: int = 50_000,
     staging_name_token: Optional[str] = None,
 ) -> Tuple[List[str], int, Dict[str, Any]]:
-    """Write batches from ``row_batches[start_idx:]`` to disk as ``.pt`` files until reaching ``target_gb`` or out of batches.
-    Returns (paths, next_idx, summary).
-    """
+    """Stream row batches to ``.pt`` files until ``target_gb`` (or batches exhausted). Returns paths, next index, summary."""
     target_b = _bytes_from_gb(target_gb)
     staging_dir = Path(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)

@@ -75,11 +75,7 @@ def _to_bool(val) -> bool:
 
 
 def setup_logger(name="llada_eval", log_dir="logs"):
-    """
-    Set up a logger that writes to both file and console.
-    Creates logs directory if it doesn't exist.
-    If name already contains timestamp, use it as-is; otherwise add timestamp.
-    """
+    """File and console log; add timestamp to filename unless the name already has one."""
     # Create logs directory if it doesn't exist
     os.makedirs(log_dir, exist_ok=True)
 
@@ -129,12 +125,7 @@ def set_seed(seed):
 
 
 class StreamingTraceWriter:
-    """
-    Writes trace dicts incrementally. Supports resumable runs:
-    - Resumable: JSONL format (one JSON object per line), append mode. Survives crash and appends on resume.
-    - Non-resumable: Original JSON array format for backward compatibility.
-    Thread-safe for use from concurrent scheduler workers.
-    """
+    """JSONL or single JSON array output; thread-safe appends."""
     def __init__(self, filepath: str, task_name: str, resumable: bool = False):
         self._path = filepath
         self._task_name = task_name
@@ -192,10 +183,7 @@ class StreamingTraceWriter:
 
 
 def _load_checkpoint_completed(checkpoint_path: str) -> dict:
-    """
-    Load checkpoint.jsonl and return dict mapping (task_name, doc_id) -> resps (list of strings).
-    Later entries overwrite earlier for same key (handles duplicate lines from mixed resume).
-    """
+    """Read `checkpoint.jsonl`: map (task, doc) → resps; last line wins per key."""
     completed = {}
     if not checkpoint_path or not os.path.exists(checkpoint_path):
         return completed
@@ -217,7 +205,7 @@ def _load_checkpoint_completed(checkpoint_path: str) -> dict:
 
 
 def _load_cst_config_dict(cst_config_path) -> dict:
-    """Load ``cst:`` from ``config/cst.yaml`` (or a given path) for :class:`CSTBank` construction."""
+    """Return the ``cst:`` dict from repo ``config/cst.yaml`` or ``cst_config_path``."""
     from omegaconf import OmegaConf
 
     root = Path(__file__).resolve().parent
@@ -246,6 +234,8 @@ _CST_NAMING_KW_DEFAULT: tuple[int, int] = (4096, 4)
 
 @register_model("llada", "llada1_5", "dream")
 class LLaDAEvalHarness(LM):
+    """LLaDA/Dream harness for lm-eval: sampling, traces, optional pre-logit capture and CST."""
+
     def __init__(
         self,
         model_path="./models/llada",
@@ -498,7 +488,7 @@ class LLaDAEvalHarness(LM):
             self._cst_segment_idx = 0
 
     def _cst_load_resume_agg(self) -> None:
-        """If ``resumable`` + CST: merge prior run statistics from the named ``*_eval_agg.json`` (see cst.naming)."""
+        """Load resumable CST scalar aggregate from disk if present."""
         if (
             not self.resumable
             or not self.output_dir
@@ -528,7 +518,7 @@ class LLaDAEvalHarness(LM):
         )
 
     def _cst_persist_agg(self) -> None:
-        """Write merged CST aggregate to disk (``cst_<token>_eval_agg.json``) for the next resumable run."""
+        """Persist merged CST scalars for resumable runs."""
         if (
             not self.resumable
             or not self.output_dir
@@ -551,7 +541,7 @@ class LLaDAEvalHarness(LM):
             self.logger.warning("Could not persist CST eval aggregate: %s", e)
 
     def _cst_run_segment_and_delete(self, paths: list[str]) -> None:
-        """Run CST on a segment of files (same as training: eval then remove from disk)."""
+        """CST eval on a batch of ``.pt`` paths, then delete them."""
         if not paths or self._cst_eval_bank is None or self._cst_agg is None:
             return
         seg_n = self._cst_segment_idx
@@ -593,7 +583,7 @@ class LLaDAEvalHarness(LM):
             delete_files(paths)
 
     def _cst_on_hidden_saved(self, hidden_out: str) -> None:
-        """Buffer ``.pt`` until ``cst_target_staging_gb`` like training, then eval + delete a segment."""
+        """Accumulate hiddens until size budget, then one CST segment and delete."""
         if self._cst_eval_bank is None or self._cst_agg is None:
             return
         self._cst_pending_paths.append(hidden_out)
@@ -605,7 +595,7 @@ class LLaDAEvalHarness(LM):
             self._cst_run_segment_and_delete(to_run)
 
     def _cst_flush_pending_tail(self) -> None:
-        """End of task: evaluate any remaining hidden files and delete (partial segment, like training)."""
+        """Flush remaining buffered hiddens through CST and delete."""
         if not self._cst_pending_paths or self._cst_eval_bank is None or self._cst_agg is None:
             return
         to_run = self._cst_pending_paths
@@ -746,10 +736,7 @@ class LLaDAEvalHarness(LM):
         raise NotImplementedError
 
     def generate_until(self, requests: list[Instance]):
-        """
-        Generate text for multiple requests using batched processing.
-        Splits requests into chunks based on batch_size and processes them sequentially.
-        """
+        """Batched `generate_until`: length buckets, optional trace/checkpoint/CST hiddens."""
         # Increment call counter (thread-safe)
         with self._stats_lock:
             self.generate_until_call_count += 1
