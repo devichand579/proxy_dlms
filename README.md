@@ -1,4 +1,4 @@
-# STrace
+# Scheduler Tracing: Characterization of Unmasking Schedulers in Diffusion Language Models
 
 Diffusion-based text generation with LLaDA-style **schedulers**, **lm-evaluation-harness** integration, batched generation, **tracing**, optional **interventions**, optional **pre-logit hidden capture** and **CST** training/eval (`cst/`), and **mixed training prompt pools** (`cst.train_data`).
 
