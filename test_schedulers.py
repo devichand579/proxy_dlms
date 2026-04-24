@@ -3,7 +3,9 @@ import time
 import traceback
 import argparse
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
+
+import torch
 
 from load_model import (
     LLADA_DEFAULT_EOS_ID,
@@ -29,6 +31,27 @@ except ImportError:
     wandb = None
 
 
+def _decode_generated_tails_at_eos(
+    tokenizer,
+    generated: torch.Tensor,
+    prompt_len: int,
+    eos_id: int,
+) -> List[str]:
+    """
+    For each row, take ``generated[b, prompt_len:]`` and truncate before the first ``eos_id``,
+    matching ``eval.py`` (see ``LLaDAEvalHarness.generate_until`` chunk decoding) so
+    ``batch_decode`` is not swamped with mask or post-EOS noise.
+    """
+    gen_tails = []
+    for b in range(generated.shape[0]):
+        tail = generated[b, prompt_len:].contiguous()
+        eos_positions = (tail == eos_id).nonzero(as_tuple=False)
+        if eos_positions.numel() > 0:
+            tail = tail[: int(eos_positions[0].item())]
+        gen_tails.append(tail)
+    return tokenizer.batch_decode(gen_tails, skip_special_tokens=True)
+
+
 def test_pure_diffusion(
     model, input_ids, attention_mask, tokenizer, trace_name=None,
     intervention_mode=None, intervention_steps=None, intervention_k=1,
@@ -51,8 +74,9 @@ def test_pure_diffusion(
     print(f"Blocks generated: {blocks_pure}")
     print(f"output Shape: {out_pure_diffusion.shape}")
     print()
-    
-    output = tokenizer.batch_decode(out_pure_diffusion[:, input_ids.shape[1]:], skip_special_tokens=True)
+    output = _decode_generated_tails_at_eos(
+        tokenizer, out_pure_diffusion, int(input_ids.shape[1]), eos_id
+    )
     return output, "Pure diffusion"
 
 
@@ -78,8 +102,9 @@ def test_block_diffusion(
     print(f"Blocks generated: {blocks_block}")
     print(f"output Shape: {out_block_diffusion.shape}")
     print()
-    
-    output = tokenizer.batch_decode(out_block_diffusion[:, input_ids.shape[1]:], skip_special_tokens=True)
+    output = _decode_generated_tails_at_eos(
+        tokenizer, out_block_diffusion, int(input_ids.shape[1]), eos_id
+    )
     return output, "Block diffusion"
 
 
@@ -107,8 +132,9 @@ def test_top_k_confidence(
     print(f"Blocks generated: {blocks_top_k_confidence}")
     print(f"output Shape: {out_top_k_confidence.shape}")
     print()
-    
-    output = tokenizer.batch_decode(out_top_k_confidence[:, input_ids.shape[1]:], skip_special_tokens=True)
+    output = _decode_generated_tails_at_eos(
+        tokenizer, out_top_k_confidence, int(input_ids.shape[1]), eos_id
+    )
     return output, "Top-k (confidence)"
 
 
@@ -134,8 +160,9 @@ def test_top_k_margin(
     print(f"Blocks generated: {blocks_top_k_margin}")
     print(f"output Shape: {out_top_k_margin.shape}")
     print()
-    
-    output = tokenizer.batch_decode(out_top_k_margin[:, input_ids.shape[1]:], skip_special_tokens=True)
+    output = _decode_generated_tails_at_eos(
+        tokenizer, out_top_k_margin, int(input_ids.shape[1]), eos_id
+    )
     return output, "Top-k (margin)"
 
 
@@ -160,8 +187,9 @@ def test_fhs(
     print(f"Steps taken: {steps_fhs}")
     print(f"output Shape: {out_fhs.shape}")
     print()
-    
-    output = tokenizer.batch_decode(out_fhs[:, input_ids.shape[1]:], skip_special_tokens=True)
+    output = _decode_generated_tails_at_eos(
+        tokenizer, out_fhs, int(input_ids.shape[1]), eos_id
+    )
     return output, "FHS"
 
 
@@ -187,8 +215,9 @@ def test_eb_sampler(
     print(f"Blocks generated: {blocks_eb_sampler}")
     print(f"output Shape: {out_eb_sampler.shape}")
     print()
-    
-    output = tokenizer.batch_decode(out_eb_sampler[:, input_ids.shape[1]:], skip_special_tokens=True)
+    output = _decode_generated_tails_at_eos(
+        tokenizer, out_eb_sampler, int(input_ids.shape[1]), eos_id
+    )
     return output, "EB_sampler (confidence)"
 
 
@@ -214,8 +243,9 @@ def test_dus(
     print(f"Blocks generated: {blocks_dus}")
     print(f"output Shape: {out_dus.shape}")
     print()
-    
-    output = tokenizer.batch_decode(out_dus[:, input_ids.shape[1]:], skip_special_tokens=True)
+    output = _decode_generated_tails_at_eos(
+        tokenizer, out_dus, int(input_ids.shape[1]), eos_id
+    )
     return output, "DUS (dilated)"
 
 
@@ -239,8 +269,9 @@ def test_fdm(
     print(f"Steps taken: {steps_fdm}, blocks: {blocks_fdm}")
     print(f"output Shape: {out_fdm.shape}")
     print()
-    
-    output = tokenizer.batch_decode(out_fdm[:, input_ids.shape[1]:], skip_special_tokens=True)
+    output = _decode_generated_tails_at_eos(
+        tokenizer, out_fdm, int(input_ids.shape[1]), eos_id
+    )
     return output, "FDM"
 
 def _model_label(model_dir: str) -> str:
@@ -292,6 +323,12 @@ def run_batch_tests(
     attention_mask = encoded["attention_mask"].to(device)
     assert input_ids.shape[0] == batch_size, f"Expected batch {batch_size}, got {input_ids.shape[0]}"
 
+    if model_path is not None:
+        _, batch_eos_id, _ = infer_diffusion_token_ids(model_path)
+    else:
+        batch_eos_id = LLADA_DEFAULT_EOS_ID
+    prompt_len = int(input_ids.shape[1])
+
     modes_to_run = (
         {scheduler_name: BATCH_TEST_MODES[scheduler_name]}
         if scheduler_name
@@ -329,8 +366,8 @@ def run_batch_tests(
                 f"{name}: expected seq_len == prompt_len + gen_length, "
                 f"got {generated.shape[1]} vs {input_ids.shape[1]} + {gen_length}"
             )
-            decoded = tokenizer.batch_decode(
-                generated[:, input_ids.shape[1]:], skip_special_tokens=True
+            decoded = _decode_generated_tails_at_eos(
+                tokenizer, generated, prompt_len, batch_eos_id
             )
             assert len(decoded) == batch_size, (
                 f"{name}: expected {batch_size} decoded strings, got {len(decoded)}"
