@@ -19,14 +19,14 @@ from cst.train.loss import windowed_cst_loss_full
 logger = logging.getLogger("cst.train")
 
 # Training checkpoints: one ``latest`` (resume) + one ``best`` (lowest ``loss_mean``); no per-phase .pt files.
-# Legacy basenames; also see :func:`train_checkpoint_names` for ``cst_{model}_scheduler_{s}_train_*.pt``.
+# Short basenames below; with ``name_token`` see :func:`train_checkpoint_names` for ``cst_{...}_train_*.pt``.
 CKPT_LATEST = "cst_latest.pt"
 CKPT_BEST = "cst_best.pt"
 TRAIN_STATE_JSON = "cst_train_state.json"
 
 
 def _read_train_state(ckpt_dir: Path, state_basename: str) -> Dict[str, Any]:
-    """Read state JSON; may fall back to legacy ``cst_train_state.json``."""
+    """Read state JSON; if the requested basename is missing, try ``cst_train_state.json``."""
     want = Path(state_basename).name
     cands: List[Path] = [ckpt_dir / want]
     if want != TRAIN_STATE_JSON:
@@ -50,13 +50,13 @@ def _write_train_state(ckpt_dir: Path, state_basename: str, data: Dict[str, Any]
 
 
 def remove_legacy_phase_checkpoints(ckpt_dir: str | Path) -> int:
-    """Remove old ``cst_phase_*.pt`` files; return how many."""
+    """Remove obsolete ``cst_phase_*.pt`` files; return count removed."""
     n = 0
     for f in Path(ckpt_dir).glob("cst_phase_*.pt"):
         try:
             f.unlink()
             n += 1
-            logger.info("removed legacy checkpoint %s", f.name)
+            logger.info("removed obsolete checkpoint %s", f.name)
         except OSError as e:
             logger.warning("could not remove %s: %s", f, e)
     return n
@@ -73,7 +73,7 @@ def save_train_checkpoints(
     train_batches: float,
     name_token: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Write latest/best CST checkpoints and training state; remove legacy ``cst_phase_*.pt``."""
+    """Write latest/best CST checkpoints and training state; drop obsolete ``cst_phase_*.pt``."""
     ckpt_dir = Path(ckpt_dir)
     latest_n, best_n, state_n = train_checkpoint_names(name_token)
     n_anchors = int(float(train_batches))

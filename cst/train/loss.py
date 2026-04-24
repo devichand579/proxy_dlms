@@ -20,7 +20,7 @@ def windowed_cst_loss_full(
     lambda_ramp: float,
     lambda_pre_dead: float = 0.0,
 ) -> tuple[torch.Tensor, Dict[str, Any]]:
-    """One anchor: decode from ``h_window`` [B,w,L,D] vs target rows in ``H_full`` [T,B,L,D]; MSE + sparsity + optional pre-dead."""
+    """MSE of windowed recon vs H_full, plus sparsity and optional pre-dead (one anchor)."""
     if h_window.dim() != 4:
         raise ValueError(
             f"h_window must be [B, w, L, D], got {tuple(h_window.shape)}"
@@ -92,7 +92,8 @@ def windowed_cst_loss_full(
         n_contrib = 0
 
         for _enc_slot, enc_step, cst_enc, A in enc_cache:
-            offset = s_step - enc_step
+            # offset 1..w: target row s_step = enc_step + offset - 1
+            offset = s_step - enc_step + 1
             if offset < 1 or offset > cst_enc.w:
                 continue
             H_hat = H_hat + cst_enc.decode(A, offset).float()

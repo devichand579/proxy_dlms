@@ -37,7 +37,7 @@ def evaluate_chunk_file(
     ntf_conf_low: float = 0.2,
     ntf_conf_high: float = 0.8,
 ) -> Dict[str, Any]:
-    """Metrics for one hidden chunk: NMSE, L0, cos, TC; optional masks and NTF if ``base_model`` is set."""
+    """NMSE, L0, cos, TC on one chunk; NTF and masks if base_model is given."""
     H, meta, segs = load_chunk_H(chunk_path)
     H = H.to(device)
     T, B, L, D = H.shape
@@ -95,7 +95,8 @@ def evaluate_chunk_file(
 
     hi = min(T, max_anchor) if max_anchor is not None else T
     for anchor in range(w, hi + 1):
-        tgt = H[anchor - 1]
+        s_target = anchor - 1  # same H row as training s_step
+        tgt = H[s_target]
         H_hat = torch.zeros_like(tgt)
         u_tgt, m_tgt = row_um(anchor - 1)
 
@@ -103,7 +104,7 @@ def evaluate_chunk_file(
             enc_step = anchor - w + 1 + enc_slot
             if enc_step < 1:
                 continue
-            offset = anchor - enc_step
+            offset = s_target - enc_step + 1
             if offset < 1:
                 continue
             cst = cst_bank.get(enc_step)

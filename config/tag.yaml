@@ -1,0 +1,27 @@
+# Hydra: TAG (Temporal Attribution Graph)
+defaults:
+  - _self_
+
+model_path: ./models/llada
+# CST checkpoint and yaml must match the trained bank (k, w, max_steps, d_model)
+cst_checkpoint: null
+cst_config: null
+
+# Single prompt: full pipeline writes outputs/tag Run dir with tag_trace.pt, tag_graph.json, tag_view.html
+prompt: "Solve: 2+2="
+out_dir: outputs/tag
+
+mode_key: pd
+gen_length: 256
+steps: 256
+device: cuda
+prune_p: 0.1
+# influence (default) | bfs (per-destination in-edges) | none
+prune_mode: influence
+influence_node_mass: 0.8
+influence_edge_mass: 0.98
+mix_uniform: 0.0001
+with_residual: false
+write_html: true
+# If you already have a .pt, set hidden_pt to skip generation (CLI only)
+# hidden_pt: null

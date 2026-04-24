@@ -62,7 +62,7 @@ def cst_eval_task_name_token(
     )
 
 
-# Legacy resumable aggregate filename (one file per run dir); load still tries this if present.
+# Alternate eval-aggregate basename (one file per run dir); tried if the named file is absent.
 LEGACY_CST_EVAL_AGG_BASENAME = "cst_eval_agg.json"
 
 
@@ -104,7 +104,7 @@ def scheduler_short_from_eval_mode(mode: str, strategy: str) -> str:
 
 
 def train_checkpoint_names(name_token: Optional[str]) -> tuple[str, str, str]:
-    """Return ``(latest_pt, best_pt, state_json)``; named token or fixed legacy basenames."""
+    """Return ``(latest_pt, best_pt, state_json)``; long names with ``name_token``, or short fixed basenames."""
     if name_token:
         base = f"cst_{name_token}"
         return f"{base}_latest.pt", f"{base}_best.pt", f"{base}_state.json"
@@ -112,7 +112,7 @@ def train_checkpoint_names(name_token: Optional[str]) -> tuple[str, str, str]:
 
 
 def resolve_train_resume_latest(ckpt_dir: Path, name_token: str) -> Optional[Path]:
-    """Prefer new ``cst_{name_token}_latest.pt``; else legacy ``cst_latest.pt``."""
+    """Prefer ``cst_{name_token}_latest.pt``; else ``cst_latest.pt`` if present."""
     n = Path(ckpt_dir) / f"cst_{name_token}_latest.pt"
     o = Path(ckpt_dir) / "cst_latest.pt"
     if n.is_file():

@@ -1,4 +1,4 @@
-"""Persist resumable CST eval scalars (named path; legacy `cst_eval_agg.json` still loads)."""
+"""Persist resumable CST eval scalars; loads named JSON or ``cst_eval_agg.json`` if the former is missing."""
 
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ def load_cst_eval_agg(
     expect_checkpoint: str,
     expect_name_token: str,
 ) -> Optional[Tuple[Dict[str, List[float]], int, int, str]]:
-    """Load named file first, else legacy ``cst_eval_agg.json``; validate checkpoint and name token match."""
+    """Try the named aggregate file, then ``cst_eval_agg.json``; require checkpoint and name token to match."""
     for p in _agg_paths_to_try(output_dir, cst_eval_name_token):
         if not os.path.isfile(p):
             continue

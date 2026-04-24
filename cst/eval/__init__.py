@@ -1,4 +1,4 @@
-from .logits_head import logits_from_prelogit_hidden
+from .logits_head import logits_from_prelogit_hidden, unembedding_weight_matrix
 from .metrics import (
     compute_l0,
     compute_nmse,
@@ -23,6 +23,7 @@ from .run_eval_cst import (
 
 __all__ = [
     "logits_from_prelogit_hidden",
+    "unembedding_weight_matrix",
     "compute_l0",
     "compute_nmse",
     "compute_ntf_logits",

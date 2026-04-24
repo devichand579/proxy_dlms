@@ -1,6 +1,6 @@
 # Scheduler Tracing: Characterization of Unmasking Schedulers in Diffusion Language Models
 
-Diffusion-based text generation with LLaDA-style **schedulers**, **lm-evaluation-harness** integration, batched generation, **tracing**, optional **interventions**, optional **pre-logit hidden capture** and **CST** training/eval (`cst/`), and **mixed training prompt pools** (`cst.train_data`).
+Diffusion-based text generation with LLaDA-style **schedulers**, **lm-evaluation-harness** integration, batched generation, **tracing**, optional **interventions**, optional **pre-logit hidden capture** and **CST** training/eval (`cst/`), **TAG** on one prompt or hidden chunk (`tag/`), and **mixed training prompt pools** (`cst.train_data`).
 
 ## Quick start
 
@@ -23,6 +23,12 @@ CST training (collect, fit, checkpoints):
 # or: python launch_cst.py mode=train
 ```
 
+TAG (temporal attribution graph on CST; see [docs/tag.md](docs/tag.md)):
+
+```bash
+./tag.sh --help
+```
+
 ## Documentation
 
 | | |
@@ -31,16 +37,17 @@ CST training (collect, fit, checkpoints):
 | [Setup (env & models)](docs/setup.md) | Conda, requirements, Hugging Face downloads |
 | [Evaluation](docs/evaluation.md) | `eval.sh`, `launch_eval.py`, resumable runs, Hydra/SLURM, outputs |
 | [CST: training & eval](docs/cst.md) | Pre-logit capture, checkpoint naming, training, lm-eval+CST, offline eval, `train_data` |
+| [TAG (attribution graph)](docs/tag.md) | `tag.sh`, `launch_tag.py`, one prompt or `.pt` chunk |
 | [Parallel runs](docs/parallel-runs.md) | Concurrent train/eval without clobbering paths |
 | [Scheduler smoke tests](docs/scheduler-testing.md) | `test_schedulers.py` / `.sh` |
 
 
 ## Repository layout (high level)
 
-- `config/` — Hydra YAML (`config.yaml` for `launch_eval`, `cst.yaml` for `launch_cst`)
+- `config/` — Hydra YAML (`config.yaml` for `launch_eval`, `cst.yaml` for `launch_cst`, `tag.yaml` for `launch_tag`)
 - `cst/` — pre-logit capture, CST model bank, training and eval utilities
 - `eval.py` — lm-eval model implementation
-- `launch_eval.py`, `launch_cst.py` — Hydra entry points
-- `eval.sh`, `cst.sh` — shell wrappers
+- `launch_eval.py`, `launch_cst.py`, `launch_tag.py` — Hydra entry points
+- `eval.sh`, `cst.sh`, `tag.sh` — shell wrappers
 - `schedulers/` — generator-facing scheduler implementations
 - `docs/` — detailed documentation
