@@ -296,12 +296,16 @@ class LLaDAEvalHarness(LM):
             trace_name: Optional trace name. If provided, trace will be saved to disk and uploaded to wandb as artifact.
             intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
             capture_pre_logits: If True, wrap the model to record pre-logit hiddens (fp32 in memory) on every forward.
-            hidden_capture_path: If set (directory path) and capture_pre_logits is True, writes one ``.pt`` file per
-                chunk inside generate_until (each file: tensors stored as bfloat16 on disk).
+                **Ignored in the sense of default—when ``cst_checkpoint`` is set, capture is turned on automatically**
+                so the model is always ``PreLogitsCaptureWrapper`` before load (CST needs written hiddens).
+            hidden_capture_path: Directory for per-chunk ``.pt`` files when capture is on. If ``cst_checkpoint`` is set
+                and this is omitted, a default is chosen (``<output_dir>/hidden`` when resumable, else
+                ``outputs/<trace_name>/hidden``).
             cst_checkpoint: If set, load this CST weight file and, for each written hidden ``.pt``, run CST eval
                 metrics. **Tied to the current lm-eval ``task_name``** (one dataset per run) — for per-dataset
                 numbers, use ``launch_eval.py task_name=...`` and multirun over tasks, not the mixed
-                :mod:`cst.train_data` sampler.
+                :mod:`cst.train_data` sampler. Implies pre-logit capture and wrapping; you do not need to pass
+                ``capture_pre_logits=true`` separately (``launch_eval.py`` does the same).
             cst_config_path: YAML with a ``cst:`` block (defaults to ``config/cst.yaml`` under project root).
             cst_ntf_conf_low, cst_ntf_conf_high: High-confidence filter for the NTF logit comparison (if enabled).
             cst_target_staging_gb: Like training: buffer hidden ``.pt`` until this total size (decimal GB) on disk, then
@@ -312,6 +316,23 @@ class LLaDAEvalHarness(LM):
 
         self._model_path = str(model_path)
         self.device = torch.device(device)
+
+        # CST metrics need hidden .pt files → must use PreLogitsCaptureWrapper from first load.
+        cst_s_pre = str(cst_checkpoint).strip() if cst_checkpoint is not None else ""
+        cst_active = bool(cst_s_pre and cst_s_pre.lower() not in ("null", "none", ""))
+        self._cst_forced_capture = cst_active
+        if cst_active:
+            capture_pre_logits = True
+            hcp_s = str(hidden_capture_path).strip() if hidden_capture_path is not None else ""
+            if not hcp_s or hcp_s.lower() in ("null", "none", ""):
+                res_b = _to_bool(resumable) if resumable is not None else False
+                out_d = str(output_dir) if output_dir else (os.environ.get("CHECKPOINT_DIR", "") or "")
+                if res_b and out_d:
+                    hidden_capture_path = str(Path(out_d) / "hidden")
+                else:
+                    tr = str(trace_name) if trace_name else "cst_hiddens"
+                    hidden_capture_path = str(Path("outputs") / tr / "hidden")
+
         self._capture_pre_logits = _to_bool(capture_pre_logits)
         self._hidden_capture_path = str(hidden_capture_path) if hidden_capture_path else None
         self.model, self.tokenizer = load_model_and_tokenizer(
@@ -419,6 +440,12 @@ class LLaDAEvalHarness(LM):
         self.logger.info(f"Intervention mode: {self.intervention_mode}")
         self.logger.info(f"Intervention steps: {self.intervention_steps}")
         self.logger.info(f"Intervention k: {self.intervention_k}")
+        if self._cst_forced_capture:
+            self.logger.info(
+                "cst_checkpoint is set: using PreLogitsCaptureWrapper (capture_pre_logits=True); "
+                "hidden_capture_path=%s",
+                self._hidden_capture_path,
+            )
 
         _sched_tag = scheduler_short_from_eval_mode(self.mode, self.strategy)
         cst_s = cst_checkpoint
@@ -449,8 +476,8 @@ class LLaDAEvalHarness(LM):
         self._cst_checkpoint_path: str = ""
         if cst_enabled:
             if not self._capture_pre_logits or not self._hidden_capture_path:
-                raise ValueError(
-                    "cst_checkpoint requires capture_pre_logits=True and hidden_capture_path (set via launch or capture)"
+                raise RuntimeError(
+                    "cst_checkpoint requires pre-logit capture; this should be unreachable (see __init__ coercion)."
                 )
             assert ccfg is not None
             self._cst_eval_bank = CSTBank(
