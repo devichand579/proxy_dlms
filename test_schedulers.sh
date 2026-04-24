@@ -148,7 +148,7 @@ export TRACING_ENABLED
 export WANDB_API_KEY
 export WANDB_PROJECT
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 
 # Build Python command array
 PYTHON_CMD_ARGS=("test_schedulers.py")
