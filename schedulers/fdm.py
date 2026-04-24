@@ -11,9 +11,10 @@ import math
 import os
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
+from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
 from schedulers.utils import add_gumbel_noise, check_eos_stop_condition, mask_eos_eot_logits
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
@@ -184,9 +185,9 @@ def generate_fdm(
     eta2=0.7,
     gamma=0.5,
     temperature=0.,
-    mask_id=126336,
-    eos_id=126081,
-    eot_id: Optional[int] = 126348,
+    mask_id=LLADA_DEFAULT_MASK_ID,
+    eos_id=LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     global_scale=1.0,

@@ -2,13 +2,14 @@
  Tracing wrapper for schedulers.
 """
 
-from typing import Optional, Callable, List
+from typing import Callable, List, Optional
 import contextvars
 import functools
 import time
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
+from load_model import LLADA_DEFAULT_MASK_ID
 from traces.trace_generator import TracingContext, InterventionHook
 from traces.utils import is_negative_inf, was_position_masked, was_positions_masked, extract_tensor_value, get_value_item, value_matches_x0, build_transfer_index, build_x0_for_trace, ensure_2d_shape, shapes_match, get_x0_trace, _is_tensor_like
 
@@ -24,7 +25,7 @@ class ModelTracer:
     def __init__(
         self,
         scheduler_fn: Callable,
-        mask_id: int = 126336,
+        mask_id: int = LLADA_DEFAULT_MASK_ID,
         tracing_context: Optional[TracingContext] = None,
         intervention_hook: Optional[InterventionHook] = None,
         trace_name: Optional[str] = None
@@ -623,7 +624,7 @@ class ModelTracer:
 
 def trace_scheduler(
     scheduler_fn: Optional[Callable] = None,
-    mask_id: int = 126336,
+    mask_id: int = LLADA_DEFAULT_MASK_ID,
     intervention_hook: Optional[InterventionHook] = None,
     trace_name: Optional[str] = None,
     save_predictions: bool = True,

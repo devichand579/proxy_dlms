@@ -10,7 +10,7 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
-
+from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
 from schedulers.utils import (
     add_gumbel_noise,
     get_mask_by_confidence,
@@ -37,9 +37,9 @@ def generate_EB(
     gamma=0.1,
     E='confidence',
     temperature=0.,
-    mask_id=126336,
-    eos_id=126081,
-    eot_id: Optional[int] = 126348,
+    mask_id=LLADA_DEFAULT_MASK_ID,
+    eos_id=LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     trace_name=None,  

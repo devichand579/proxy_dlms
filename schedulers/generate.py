@@ -1,7 +1,15 @@
-import torch
 import time
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 
+import torch
+
+from load_model import (
+    LLADA_DEFAULT_EOS_ID,
+    LLADA_DEFAULT_EOT_ID,
+    LLADA_DEFAULT_MASK_ID,
+    infer_diffusion_token_ids,
+)
 from schedulers.llada_schedulers import generate_llada
 from schedulers.top_k import generate_topk
 from schedulers.fhs import generate_fhs
@@ -26,9 +34,10 @@ def generate(
     intervention_mode=None,
     intervention_steps=None,
     intervention_k=1,
-    mask_id=126336,
-    eos_id=126081,
-    eot_id: Optional[int] = 126348,
+    mask_id=LLADA_DEFAULT_MASK_ID,
+    eos_id=LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+    model_path: Optional[Union[str, Path]] = None,
 ):
     """
     Run batched diffusion generation. All samples in input_ids are processed in one batch.
@@ -36,7 +45,12 @@ def generate(
     Modes: pure_diffusion, block_diffusion, top_k_confidence, top_k_margin, FHS, EB_sampler, Dilated Scheduling, FDM
     Strategies: confidence, random, top_margin, entropy
     top_k: Number of tokens to transfer per step (top_k scheduler only). Default 1.
+
+    If ``model_path`` is set, ``mask_id``, ``eos_id``, and ``eot_id`` are read from that checkpoint's
+    ``config.json`` via :func:`load_model.infer_diffusion_token_ids` (overriding the other arguments).
     """
+    if model_path is not None:
+        mask_id, eos_id, eot_id = infer_diffusion_token_ids(model_path)
     start_time = time.time()
     num_samples = input_ids.shape[0]
     assert num_samples >= 1, "Need at least one sample"

@@ -35,9 +35,7 @@ All schedulers follow a reverse diffusion process:
 ### Notation
 
 - `x`: Current sequence state (contains both prompt and generated tokens)
-- `mask_id`: Token ID for `[MASK]` (default: 126336)
-- `eos_id`: End-of-sequence token ID (default: 126081)
-- `eot_id`: End-of-turn token ID (default: 126348)
+- `mask_id` / `eos_id` / `eot_id`: from the model config, or use `load_model.infer_diffusion_token_ids(model_path)`. Code fallbacks: `load_model.LLADA_DEFAULT_MASK_ID` (126336), `LLADA_DEFAULT_EOS_ID` (126081), `LLADA_DEFAULT_EOT_ID` (126348) for LLaDA-style checkpoints. In `schedulers.generate.generate`, pass `model_path` to set all three from `config.json`. Dream uses `eot_id=None`.
 - `logits`: Model predictions (shape: `[batch, length, vocab_size]`)
 - `x0`: Predicted tokens (argmax of logits after Gumbel noise)
 - `confidence`: Ranking score for each position

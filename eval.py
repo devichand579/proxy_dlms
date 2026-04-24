@@ -273,7 +273,7 @@ class LLaDAEvalHarness(LM):
             model_path: Local checkpoint directory (e.g. ./models/llada, ./models/llada1_5, ./models/dream).
             mask_id: [MASK] token id; default from config.json (mask_token_id).
             eos_id: EOS id for schedulers; default from config.
-            eot_id: LLaDA EoT id; default 126348 for model_type llada, else None (e.g. Dream).
+            eot_id: EoT id for logit suppression; from checkpoint (see load_model.infer_diffusion_token_ids) for model_type llada, else None (e.g. Dream).
             batch_size: mini batch size.
             mc_num: Monte Carlo estimation iterations
             is_check_greedy: For certain metrics like LAMBADA, the evaluation requires the model to verify whether the answer

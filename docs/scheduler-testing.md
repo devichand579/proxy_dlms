@@ -4,7 +4,7 @@ Use `test_schedulers.py` or `test_schedulers.sh` to run one or all schedulers on
 
 ## Model path
 
-By default, checkpoints are loaded from `./models/llada` (same idea as `model_path` elsewhere in the repo). Use **`--model_path DIR`** to point at another local model directory. Repeat **`--model_path`** to run the same test suite on **several** models, **one after another** on the same device; the process frees GPU memory after each model so the next can load. Models are not run in parallel.
+By default, checkpoints are loaded from `./models/llada` (same idea as `model_path` elsewhere in the repo). Use **`--model_path DIR`** to point at another local model directory. Mask / EOS / EoT token ids for schedulers are read from each checkpoint’s `config.json` via `load_model.infer_diffusion_token_ids` (so LLaDA, LLaDA 1.5, and Dream are handled correctly). Repeat **`--model_path`** to run the same test suite on **several** models, **one after another** on the same device; the process frees GPU memory after each model so the next can load. Models are not run in parallel.
 
 **Single scheduler, default (single-sample) tests:**
 
