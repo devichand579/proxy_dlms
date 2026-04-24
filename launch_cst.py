@@ -14,7 +14,7 @@ _CONFIG_DIR = Path(__file__).resolve().parent / "config"
 # Defaults when ``mode=eval`` and user omits an ``eval:`` block in config (overrides: ``eval.hidden_dir=...`` etc.)
 _OFFLINE_EVAL_DEFAULTS = {
     "hidden_dir": "outputs/eval_hidden",
-    # Prefer explicit path. If missing, run_eval falls back: legacy cst_best.pt, then newest cst_*_train_best.pt
+    # Prefer explicit path. If missing, run_eval falls back: cst_best.pt, then newest cst_*_train_best.pt
     "checkpoint": "outputs/cst_ckpt/cst_best.pt",
     "model_path": None,
     "ntf_conf_low": 0.2,

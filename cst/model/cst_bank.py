@@ -12,7 +12,7 @@ from .cst import CST
 
 
 def effective_window_size(step: int, w: int, max_steps: int) -> int:
-    """How many decoders this step has: offsets ``1 .. w`` predict ``t+1 .. t+w``, capped by ``max_steps``."""
+    """How many ``decode(1)…`` slots are valid for bank key ``step`` (cap near trajectory end)."""
     return min(w, max(0, max_steps - step))
 
 

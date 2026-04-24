@@ -55,7 +55,7 @@ class CST(nn.Module):
         return A, y_hats
 
     def decoder_sparsity_penalty(self, A: torch.Tensor, c: float = 1.0) -> torch.Tensor:
-        """Sum over decoders and positions of ``tanh(c * ||column_i|| * A[..., i])``; ``A`` is ``[B,L,k]``."""
+        """Sparsity via tanh on column-weighted A; A is [B,L,k]."""
         if A.shape[-1] != self.k:
             raise ValueError(f"A last dim must be k={self.k}, got {A.shape}")
         penalty = torch.zeros((), device=A.device, dtype=torch.float32)

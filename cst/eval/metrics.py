@@ -14,7 +14,7 @@ def unmasked_masked_token_masks(
     *,
     device: torch.device,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Legacy split at index ``split_at`` (left vs right). Prefer saved per-step masks in the chunk."""
+    """Prompt/response split at ``split_at`` (left vs right). Prefer per-step masks from the chunk when available."""
     pl = max(0, min(int(split_at), L))
     idx = torch.arange(L, device=device, dtype=torch.long)
     unmasked = (idx < pl).view(1, L).expand(B, L)

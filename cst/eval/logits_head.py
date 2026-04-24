@@ -42,3 +42,21 @@ def logits_from_prelogit_hidden(model: nn.Module, h: torch.Tensor) -> torch.Tens
         f"Cannot build logits from pre-logit hiddens for model type {type(m).__name__}. "
         "Expected Dream (lm_head) or LLaDA (transformer + config)."
     )
+
+
+def unembedding_weight_matrix(model: nn.Module) -> torch.Tensor:
+    """``[V, d]`` unembed weights; same linear as :func:`logits_from_prelogit_hidden` (F.linear(h, W_U))."""
+    m = unwrap_inner(model)
+    if hasattr(m, "lm_head") and isinstance(getattr(m, "lm_head"), nn.Linear):
+        return m.lm_head.weight.detach()
+    if hasattr(m, "transformer") and hasattr(m, "config"):
+        tr = m.transformer
+        cfg = m.config
+        if getattr(cfg, "weight_tying", True):
+            return tr.wte.weight.detach()
+        if hasattr(tr, "ff_out") and isinstance(tr.ff_out, nn.Linear):
+            return tr.ff_out.weight.detach()
+    raise TypeError(
+        f"Cannot get unembedding weights for {type(m).__name__}. "
+        "Expected Dream (lm_head) or LLaDA (wte / ff_out)."
+    )

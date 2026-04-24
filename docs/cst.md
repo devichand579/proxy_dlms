@@ -47,7 +47,7 @@ To avoid clobbering runs, **CST training checkpoints** and **collect staging** `
 
 Checkpoint **`.pt`** files store float tensors in **bfloat16** to save space; loading promotes them to float32 for the CST module, optimizer, and ramp.
 
-**Resume:** `train.resume_from_latest=true` loads the matching `*_train_latest.pt`, or legacy `cst_latest.pt` if present. You can set **`train.resume_checkpoint`** to an explicit path (old or new naming).
+**Resume:** `train.resume_from_latest=true` loads the matching `*_train_latest.pt`, or `cst_latest.pt` if you still have that filename from an older run. You can set **`train.resume_checkpoint`** to an explicit path regardless of naming style.
 
 **Staging files** (under `train.staging_dir`):  
 `<same_token_prefix>_e{epoch}_seg{segment}_{batch:06d}.pt`
@@ -106,7 +106,7 @@ The **hidden file names** on disk use the **same** `k`/`w` as in your CST config
 
 - **What CST does on resume:** Hidden `.pt` files and CST **buffer / segment** processing run **only for chunks that still run the model** in this process. Chunks that are **fully** satisfied from `checkpoint.jsonl` do not write hiddens and do not re-run CST on them.
 
-- **Persisted CST summary (resumable):** This is **not** the hidden **`.pt` tensors** — those are still **deleted** after each CST segment (eval then remove), same as before. We only persist a small **JSON** next to `checkpoint.jsonl`, with the same naming policy as hiddens: **`outputs/{run_id}/cst_<model>_scheduler_<sched>_k<K>_w<W>_task_<task>_eval_agg.json`** (e.g. `cst_llada_scheduler_pd_k4096_w4_task_gsm8k_eval_agg.json`). It stores the running lists of per-chunk **scalars** (e.g. mean NMSE / L0 / cos per file) that feed the final summary. On resume, that aggregate is **reloaded** so new segments **append**; you cannot reconstruct old hiddens from it. The loader also accepts the legacy name **`cst_eval_agg.json`** in the same folder if the new file is missing. If you change `cst_checkpoint` or config so the name token no longer matches, the JSON is **ignored** (with a log) to avoid mixing runs.
+- **Persisted CST summary (resumable):** This is **not** the hidden **`.pt` tensors** — those are still **deleted** after each CST segment (eval then remove), same as before. We only persist a small **JSON** next to `checkpoint.jsonl`, with the same naming policy as hiddens: **`outputs/{run_id}/cst_<model>_scheduler_<sched>_k<K>_w<W>_task_<task>_eval_agg.json`** (e.g. `cst_llada_scheduler_pd_k4096_w4_task_gsm8k_eval_agg.json`). It stores the running lists of per-chunk **scalars** (e.g. mean NMSE / L0 / cos per file) that feed the final summary. On resume, that aggregate is **reloaded** so new segments **append**; you cannot reconstruct old hiddens from it. If the new-style file is missing, the same folder is checked for **`cst_eval_agg.json`**. If you change `cst_checkpoint` or config so the name token no longer matches, the JSON is **ignored** (with a log) to avoid mixing runs.
 
 - **Limitation — staging buffer** (`cst_target_staging_gb`): if the process dies **before** a segment is fully evaluated and **persisted**, in-memory progress for that in-flight segment is lost. **After** a segment completes, the `*_eval_agg.json` file is updated so a resume keeps prior segments’ CST stats.
 
