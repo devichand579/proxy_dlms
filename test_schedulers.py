@@ -3,7 +3,15 @@ import time
 import traceback
 import argparse
 from datetime import datetime
-from load_model import load_model_and_tokenizer
+from typing import Optional
+
+from load_model import (
+    LLADA_DEFAULT_EOS_ID,
+    LLADA_DEFAULT_EOT_ID,
+    LLADA_DEFAULT_MASK_ID,
+    infer_diffusion_token_ids,
+    load_model_and_tokenizer,
+)
 from schedulers.llada_schedulers import generate_llada
 from schedulers.top_k import generate_topk
 from schedulers.fhs import generate_fhs
@@ -21,15 +29,21 @@ except ImportError:
     wandb = None
 
 
-def test_pure_diffusion(model, input_ids, attention_mask, tokenizer, trace_name=None, 
-                       intervention_mode=None, intervention_steps=None, intervention_k=1):
+def test_pure_diffusion(
+    model, input_ids, attention_mask, tokenizer, trace_name=None,
+    intervention_mode=None, intervention_steps=None, intervention_k=1,
+    mask_id: int = LLADA_DEFAULT_MASK_ID,
+    eos_id: int = LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+):
     """Test pure diffusion scheduler"""
     print("Generating with pure diffusion (block_length=256)...")
     start_time = time.time()
     out_pure_diffusion, steps_pure, blocks_pure = generate_llada(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=256, temperature=0., remasking='confidence',
-        trace_name=trace_name,intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name,intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
     )
     pure_diffusion_time = time.time() - start_time
     print(f"Pure diffusion generation time: {pure_diffusion_time:.2f} seconds")
@@ -42,15 +56,21 @@ def test_pure_diffusion(model, input_ids, attention_mask, tokenizer, trace_name=
     return output, "Pure diffusion"
 
 
-def test_block_diffusion(model, input_ids, attention_mask, tokenizer, trace_name=None, 
-                        intervention_mode=None, intervention_steps=None, intervention_k=1):
+def test_block_diffusion(
+    model, input_ids, attention_mask, tokenizer, trace_name=None,
+    intervention_mode=None, intervention_steps=None, intervention_k=1,
+    mask_id: int = LLADA_DEFAULT_MASK_ID,
+    eos_id: int = LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+):
     """Test block diffusion scheduler"""
     print("Generating with block diffusion (block_length=32)...")
     start_time = time.time()
     out_block_diffusion, steps_block, blocks_block = generate_llada(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=32, temperature=0., remasking='confidence',
-        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
     )
     block_diffusion_time = time.time() - start_time
     print(f"Block diffusion generation time: {block_diffusion_time:.2f} seconds")
@@ -63,8 +83,13 @@ def test_block_diffusion(model, input_ids, attention_mask, tokenizer, trace_name
     return output, "Block diffusion"
 
 
-def test_top_k_confidence(model, input_ids, attention_mask, tokenizer, trace_name=None,
-                        intervention_mode=None, intervention_steps=None, intervention_k=1):
+def test_top_k_confidence(
+    model, input_ids, attention_mask, tokenizer, trace_name=None,
+    intervention_mode=None, intervention_steps=None, intervention_k=1,
+    mask_id: int = LLADA_DEFAULT_MASK_ID,
+    eos_id: int = LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+):
     """Test top-k scheduler with confidence metric"""
     print("Generating with top-k (confidence metric, block_length=256)...")
     start_time = time.time()
@@ -73,7 +98,8 @@ def test_top_k_confidence(model, input_ids, attention_mask, tokenizer, trace_nam
         model, input_ids, attention_mask, 
         steps=256, gen_length=256, 
         block_length=256, temperature=0., top_k=1, metric='confidence',
-        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
     )
     top_k_time = time.time() - start_time
     print(f"Top-k generation time: {top_k_time:.2f} seconds")
@@ -86,15 +112,21 @@ def test_top_k_confidence(model, input_ids, attention_mask, tokenizer, trace_nam
     return output, "Top-k (confidence)"
 
 
-def test_top_k_margin(model, input_ids, attention_mask, tokenizer, trace_name=None,
-                        intervention_mode=None, intervention_steps=None, intervention_k=1):
+def test_top_k_margin(
+    model, input_ids, attention_mask, tokenizer, trace_name=None,
+    intervention_mode=None, intervention_steps=None, intervention_k=1,
+    mask_id: int = LLADA_DEFAULT_MASK_ID,
+    eos_id: int = LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+):
     """Test top-k scheduler with margin metric"""
     print("Generating with top-k (margin metric, block_length=256)...")
     start_time = time.time()
     out_top_k_margin, steps_top_k_margin, blocks_top_k_margin = generate_topk(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=256, temperature=0., top_k=1, metric='top_margin',
-        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
     )
     top_k_time = time.time() - start_time
     print(f"Top-k generation time: {top_k_time:.2f} seconds")
@@ -107,15 +139,21 @@ def test_top_k_margin(model, input_ids, attention_mask, tokenizer, trace_name=No
     return output, "Top-k (margin)"
 
 
-def test_fhs(model, input_ids, attention_mask, tokenizer, trace_name=None,
-                        intervention_mode=None, intervention_steps=None, intervention_k=1):
+def test_fhs(
+    model, input_ids, attention_mask, tokenizer, trace_name=None,
+    intervention_mode=None, intervention_steps=None, intervention_k=1,
+    mask_id: int = LLADA_DEFAULT_MASK_ID,
+    eos_id: int = LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+):
     """Test FHS scheduler"""
     print("Generating with FHS (steps=256)...")
     start_time = time.time()
     out_fhs, steps_fhs = generate_fhs(
         model, input_ids, attention_mask=attention_mask, steps=256, 
         gen_length=256, temperature=1.0, pass_time_to_model=True,
-        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
     )
     fhs_time = time.time() - start_time
     print(f"FHS generation time: {fhs_time:.2f} seconds")
@@ -127,15 +165,21 @@ def test_fhs(model, input_ids, attention_mask, tokenizer, trace_name=None,
     return output, "FHS"
 
 
-def test_eb_sampler(model, input_ids, attention_mask, tokenizer, trace_name=None,
-                        intervention_mode=None, intervention_steps=None, intervention_k=1):
+def test_eb_sampler(
+    model, input_ids, attention_mask, tokenizer, trace_name=None,
+    intervention_mode=None, intervention_steps=None, intervention_k=1,
+    mask_id: int = LLADA_DEFAULT_MASK_ID,
+    eos_id: int = LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+):
     """Test EB sampler scheduler"""
     print("Generating with EB_sampler (confidence metric, block_length=256)...")
     start_time = time.time()
     out_eb_sampler, steps_eb_sampler, blocks_eb_sampler = generate_EB(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=256, gamma=0.1, E='confidence', temperature=0.,
-        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
     )
     eb_sampler_time = time.time() - start_time
     print(f"EB_sampler generation time: {eb_sampler_time:.2f} seconds")
@@ -148,15 +192,21 @@ def test_eb_sampler(model, input_ids, attention_mask, tokenizer, trace_name=None
     return output, "EB_sampler (confidence)"
 
 
-def test_dus(model, input_ids, attention_mask, tokenizer, trace_name=None,
-                        intervention_mode=None, intervention_steps=None, intervention_k=1):
+def test_dus(
+    model, input_ids, attention_mask, tokenizer, trace_name=None,
+    intervention_mode=None, intervention_steps=None, intervention_k=1,
+    mask_id: int = LLADA_DEFAULT_MASK_ID,
+    eos_id: int = LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+):
     """Test DUS scheduler"""
     print("Generating with DUS (dilated schedule, block_length=16)...")
     start_time = time.time()
     out_dus, steps_dus, blocks_dus = generate_dus(
         model, input_ids, attention_mask, gen_length=256,
         block_length=16, temperature=0., remasking='confidence', scheduler='dilated',
-        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
     )
     dus_time = time.time() - start_time
     print(f"DUS generation time: {dus_time:.2f} seconds")
@@ -169,14 +219,20 @@ def test_dus(model, input_ids, attention_mask, tokenizer, trace_name=None,
     return output, "DUS (dilated)"
 
 
-def test_fdm(model, input_ids, attention_mask, tokenizer, trace_name=None,
-                        intervention_mode=None, intervention_steps=None, intervention_k=1):
+def test_fdm(
+    model, input_ids, attention_mask, tokenizer, trace_name=None,
+    intervention_mode=None, intervention_steps=None, intervention_k=1,
+    mask_id: int = LLADA_DEFAULT_MASK_ID,
+    eos_id: int = LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+):
     """Test FDM scheduler"""
     print("Generating with FDM (steps=256, block_length=64)...")
     start_time = time.time()
     out_fdm, steps_fdm, blocks_fdm = generate_fdm(
         model, input_ids, attention_mask, steps=256, gen_length=256, block_length=64,
-        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+        trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
     )
     fdm_time = time.time() - start_time
     print(f"FDM generation time: {fdm_time:.2f} seconds")
@@ -206,8 +262,18 @@ BATCH_TEST_MODES = {
 }
 
 
-def run_batch_tests(model, tokenizer, device, batch_size=2, scheduler_name=None, trace_name_base=None, upload_to_wandb=False):
+def run_batch_tests(
+    model,
+    tokenizer,
+    device,
+    batch_size=2,
+    scheduler_name=None,
+    trace_name_base=None,
+    upload_to_wandb=False,
+    model_path=None,
+):
     """Run batched generation via schedulers.generate.generate() and assert shapes/outputs.
+    When ``model_path`` is set, token ids are read from that checkpoint (``config.json``).
     When upload_to_wandb is True, traces are uploaded to wandb."""
     prompts = [
         "Joy can read 8 pages of a book in 20 minutes. How many hours will it take her to read 120 pages?",
@@ -250,6 +316,8 @@ def run_batch_tests(model, tokenizer, device, batch_size=2, scheduler_name=None,
             )
             if strategy is not None:
                 kwargs["strategy"] = strategy
+            if model_path is not None:
+                kwargs["model_path"] = model_path
 
             generated, steps_taken, blocks, gen_time = generate_batch(
                 model, input_ids, attention_mask, **kwargs
@@ -326,7 +394,8 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
             model, tokenizer = load_model_and_tokenizer(model_dir, device=device, compile_model=False)
             if tokenizer.padding_side != "left":
                 tokenizer.padding_side = "left"
-            assert tokenizer.pad_token_id != 126336
+            _mid, _eos, _eot = infer_diffusion_token_ids(model_dir)
+            assert tokenizer.pad_token_id != _mid, "pad token must differ from [MASK] for batched tests"
             print(
                 f"Running batch tests (batch_size={batch_size}, model={mlabel}, "
                 f"tracing={'on' if trace_name_base else 'off'})..."
@@ -338,6 +407,7 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
                     scheduler_name=scheduler_name,
                     trace_name_base=trace_name_base,
                     upload_to_wandb=use_wandb,
+                    model_path=model_dir,
                 )
             finally:
                 _free_model(model, tokenizer, device)
@@ -398,11 +468,12 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
         mlabel = _model_label(model_dir)
         print(f"\n{'=' * 60}\nModel: {model_dir}  ({mlabel})\n{'=' * 60}\n")
         model, tokenizer = load_model_and_tokenizer(model_dir, device=device, compile_model=False)
+        mask_id, eos_id, eot_id = infer_diffusion_token_ids(model_dir)
 
         if tokenizer.padding_side != 'left':
             tokenizer.padding_side = 'left'
 
-        assert tokenizer.pad_token_id != 126336
+        assert tokenizer.pad_token_id != mask_id, "pad token must differ from [MASK] for correct inference"
 
         prompt = "Joy can read 8 pages of a book in 20 minutes. How many hours will it take her to read 120 pages?"
 
@@ -428,7 +499,8 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
 
                 output, label = test_func(
                     model, input_ids, attention_mask, tokenizer, 
-                    trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+                    trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
+                    mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
                 )
                 results.append((label, output))
             except Exception as e:

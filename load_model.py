@@ -11,6 +11,13 @@ from transformers import AutoModel, AutoTokenizer
 
 BASE_DIR = Path(__file__).parent.resolve()
 
+# Default token ids when a caller has no local ``config.json`` and no per-call overrides.
+# Matches standard LLaDA / LLaDA 1.5 checkpoints in this repo; schedulers use these as
+# fallbacks. Prefer :func:`infer_diffusion_token_ids` from the selected ``model_path``.
+LLADA_DEFAULT_MASK_ID = 126336
+LLADA_DEFAULT_EOS_ID = 126081
+LLADA_DEFAULT_EOT_ID: Optional[int] = 126348
+
 
 def _read_config(model_dir: Path) -> Dict[str, Any]:
     config_path = model_dir / "config.json"
@@ -22,7 +29,11 @@ def _read_config(model_dir: Path) -> Dict[str, Any]:
 
 def infer_diffusion_token_ids(model_dir: Union[str, Path]) -> Tuple[int, int, Optional[int]]:
     """
-    Read mask / EOS / optional EoT ids from config. LLaDA models use a fixed EoT id (126348); Dream has no EoT.
+    Read mask / EOS / optional EoT ids from a checkpoint's ``config.json``.
+
+    * ``model_type == "llada"`` (LLaDA and LLaDA 1.5): EoT is ``LLADA_DEFAULT_EOT_ID``.
+    * Other model types (e.g. Dream): EoT is None — schedulers only suppress EoS/EoT in logits when
+      ``eot_id`` is not None.
     """
     model_dir = Path(model_dir).resolve()
     cfg = _read_config(model_dir)
@@ -30,7 +41,7 @@ def infer_diffusion_token_ids(model_dir: Union[str, Path]) -> Tuple[int, int, Op
     mask_id = int(cfg["mask_token_id"])
     eos_id = int(cfg["eos_token_id"])
     if model_type == "llada":
-        eot_id: Optional[int] = 126348
+        eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID
     else:
         eot_id = None
     return mask_id, eos_id, eot_id

@@ -6,7 +6,7 @@ import sys
 
 # Add parent directory to path to import load_tokenizer
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from load_model import load_tokenizer
+from load_model import LLADA_DEFAULT_MASK_ID, load_tokenizer
 
 # Import for GIF conversion
 try:
@@ -131,8 +131,8 @@ def convert_html_to_png_for_gif(html_dir: str, output_dir: str, size: tuple = (1
         except Exception as e:
             print(f"Error converting step {step}: {e}")
 
-# Default mask token ID (LLaDA); overridden by get_mask_token_id(tokenizer) when model is loaded
-DEFAULT_MASK_ID = 126336
+# Default when no tokenizer; prefer get_mask_token_id(tokenizer) or infer_diffusion_token_ids from checkpoint
+DEFAULT_MASK_ID = LLADA_DEFAULT_MASK_ID
 
 def get_mask_token_id(tokenizer) -> int:
     """

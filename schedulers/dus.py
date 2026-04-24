@@ -16,7 +16,8 @@
 
 
 import torch
-from typing import Optional, List
+from typing import List, Optional
+from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
 from schedulers.utils import (
     add_gumbel_noise,
     get_mask_by_confidence,
@@ -143,9 +144,9 @@ def generate_dus(
     block_length=16,
     temperature=0.,
     remasking='confidence',
-    mask_id=126336,
-    eos_id=126081,
-    eot_id: Optional[int] = 126348,
+    mask_id=LLADA_DEFAULT_MASK_ID,
+    eos_id=LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     scheduler='binary',
     base=2,
     base_skip=1,

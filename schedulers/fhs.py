@@ -14,12 +14,13 @@
 '''
 
 
+import os
 from typing import Optional
 
 import torch
 import torch.nn.functional as F
+from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
 from schedulers.utils import check_eos_stop_condition, mask_eos_eot_logits
-import os
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
     from traces.trace_wrapper import trace_scheduler
@@ -128,9 +129,9 @@ def generate_fhs_extrapolation(
     gen_length=128,
     steps=128,
     temperature=1.0,
-    mask_id=126336,
-    eos_id=126081,
-    eot_id: Optional[int] = 126348,
+    mask_id=LLADA_DEFAULT_MASK_ID,
+    eos_id=LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     pass_time_to_model=True,
@@ -270,9 +271,9 @@ def generate_fhs_predictor_corrector(
     gen_length=256,
     steps=256,
     temperature=1.0,
-    mask_id=126336,
-    eos_id=126081,
-    eot_id: Optional[int] = 126348,
+    mask_id=LLADA_DEFAULT_MASK_ID,
+    eos_id=LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     pass_time_to_model=True,
@@ -402,9 +403,9 @@ def generate_fhs(
     gen_length=128,
     steps=128,
     temperature=1.0,
-    mask_id=126336,
-    eos_id=126081,
-    eot_id: Optional[int] = 126348,
+    mask_id=LLADA_DEFAULT_MASK_ID,
+    eos_id=LLADA_DEFAULT_EOS_ID,
+    eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     logits_eos_inf=False,
     confidence_eos_eot_inf=False,
     pass_time_to_model=True,
