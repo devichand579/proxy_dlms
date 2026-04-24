@@ -3,20 +3,6 @@ import torch.nn.functional as F
 from typing import List, Optional
 
 
-def attention_mask_to_bool(
-    attention_mask: Optional[torch.Tensor],
-) -> Optional[torch.Tensor]:
-    """
-    Tokenizers return int64 {0, 1} masks. PyTorch SDPA with bfloat16 (e.g. Dream) can raise:
-    ``attn_mask.dtype: long int`` vs ``query.dtype: BFloat16``. Bool masks are accepted everywhere.
-    """
-    if attention_mask is None:
-        return None
-    if attention_mask.dtype == torch.bool:
-        return attention_mask
-    return attention_mask.ne(0)
-
-
 def mask_eos_eot_logits(
     logits: torch.Tensor,
     logits_eos_inf: bool,

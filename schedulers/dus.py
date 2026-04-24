@@ -20,7 +20,6 @@ from typing import List, Optional
 from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
 from schedulers.utils import (
     add_gumbel_noise,
-    attention_mask_to_bool,
     get_mask_by_confidence,
     get_mask_by_entropy,
     check_eos_stop_condition,
@@ -191,7 +190,6 @@ def generate_dus(
 
     if attention_mask is not None:
         attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
-        attention_mask = attention_mask_to_bool(attention_mask)
 
     assert gen_length % block_length == 0
     num_blocks = gen_length // block_length

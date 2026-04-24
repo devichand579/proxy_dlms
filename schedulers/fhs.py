@@ -20,7 +20,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
-from schedulers.utils import attention_mask_to_bool, check_eos_stop_condition, mask_eos_eot_logits
+from schedulers.utils import check_eos_stop_condition, mask_eos_eot_logits
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
     from traces.trace_wrapper import trace_scheduler
@@ -164,7 +164,6 @@ def generate_fhs_extrapolation(
 
     if attention_mask is not None:
         attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
-        attention_mask = attention_mask_to_bool(attention_mask)
 
     assert gen_length % steps == 0
     schedule = make_equal_schedule(gen_length, steps)
@@ -307,7 +306,6 @@ def generate_fhs_predictor_corrector(
 
     if attention_mask is not None:
         attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
-        attention_mask = attention_mask_to_bool(attention_mask)
 
     assert gen_length % steps == 0
     schedule = make_equal_schedule(gen_length, steps)

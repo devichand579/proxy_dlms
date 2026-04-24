@@ -409,9 +409,27 @@ class DreamSdpaAttention(DreamAttention):
         # if attention_mask is not None:  # no matter the length, we just slice it
         #     causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
 
+        # 2D (batch, seq) padding masks (HF: 1 = not padded) cannot be passed straight to ``scaled_dot_product_attention``;
+        # SDPA expects a broadcastable additive mask, typically (B, 1, 1, S) in float, not (B, S) int/bool.
+        sdpa_attn_mask: Optional[torch.Tensor] = None
+        if attention_mask is not None and isinstance(attention_mask, torch.Tensor):
+            if attention_mask.dim() == 2:
+                if attention_mask.dtype == torch.bool:
+                    keep = attention_mask
+                else:
+                    keep = attention_mask > 0
+                min_f = torch.finfo(query_states.dtype).min
+                # (B, 1, 1, S): large negative on padding key columns for SDPA
+                pad_col = ~keep
+                sdpa_attn_mask = (
+                    pad_col.to(dtype=query_states.dtype)[:, None, None, :].contiguous() * min_f
+                )
+            else:
+                sdpa_attn_mask = attention_mask
+
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
+        if query_states.device.type == "cuda" and sdpa_attn_mask is not None:
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
@@ -425,9 +443,9 @@ class DreamSdpaAttention(DreamAttention):
             query_states,
             key_states,
             value_states,
-            attn_mask=attention_mask if isinstance(attention_mask, torch.Tensor) else None,
+            attn_mask=sdpa_attn_mask,
             dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=False, # hard coded
+            is_causal=False,  # hard coded
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
