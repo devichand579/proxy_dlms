@@ -34,9 +34,11 @@ train:
   # (or legacy cst_latest.pt) under checkpoint_dir
   resume_checkpoint: null
   resume_from_latest: false
-  # One epoch = sample_uniform(samples_per_epoch) then fixed batch order; collect in segments of
-  # target_staging_gb (last segment may be smaller), train CST, checkpoint, delete chunks; repeat num_epochs.
+  # Draw samples_per_epoch row once (train.seed) and reuse the same batches for every epoch when
+  # resample_each_epoch=false. Segments within an epoch still follow target_staging_gb / max_collect_batches.
+  # Set resample_each_epoch=true to resample each epoch (legacy; seed offsets by epoch).
   samples_per_epoch: 2048
+  resample_each_epoch: false
   num_epochs: 1
   # Collection stops when total written chunk size reaches this (decimal GB, 1e9 bytes per GB).
   # A final segment can be smaller than this when fewer batches remain in the epoch.

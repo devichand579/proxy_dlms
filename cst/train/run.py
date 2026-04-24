@@ -218,23 +218,30 @@ def run_train(cfg: DictConfig) -> int:
     max_collect_batches = int(tr.get("max_collect_batches", 50_000))
     gsm_fs = int(tr.get("gsm8k_num_fewshot", 4))
     arc_fs = int(tr.get("arc_csqa_num_fewshot", 5))
+    # If false: one draw of samples_per_epoch at start (seed only); all epochs reuse the same row_batches.
+    # If true (legacy): resample each epoch with seed + epoch * 1_000_000.
+    resample_each_epoch = bool(tr.get("resample_each_epoch", True))
+    row_batches: Optional[List[List[Dict[str, Any]]]] = None
 
     for epoch in range(num_epochs):
-        row_batches = sample_uniform_batched(
-            n_sp,
-            inference_bs,
-            seed=seed + epoch * 1_000_000,
-            gsm8k_num_fewshot=gsm_fs,
-            arc_csqa_num_fewshot=arc_fs,
-        )
+        if resample_each_epoch or row_batches is None:
+            draw_seed = seed + epoch * 1_000_000 if resample_each_epoch else seed
+            row_batches = sample_uniform_batched(
+                n_sp,
+                inference_bs,
+                seed=draw_seed,
+                gsm8k_num_fewshot=gsm_fs,
+                arc_csqa_num_fewshot=arc_fs,
+            )
         nbat = len(row_batches)
         logger.info(
-            "=== epoch %d / %d: %d row batches (samples=%d, batch=%d) ===",
+            "=== epoch %d / %d: %d row batches (samples=%d, batch=%d, resample_each_epoch=%s) ===",
             epoch + 1,
             num_epochs,
             nbat,
             n_sp,
             inference_bs,
+            resample_each_epoch,
         )
         if nbat == 0:
             logger.warning("epoch %d: no batches, skipping", epoch)
