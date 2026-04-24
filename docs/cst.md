@@ -4,7 +4,7 @@
 
 - **Code:** `cst/` (pre-logit wrapper, `CSTBank`, training loop, eval helpers)  
 - **Train config:** `config/cst.yaml` (Hydra for `launch_cst.py` and `cst.sh`)  
-- **LM eval config:** `config/config.yaml` (flags like `cst_checkpoint`, `capture_pre_logits`)
+- **LM eval config:** `config/config.yaml` (e.g. `cst_checkpoint`; pre-logit capture is **automatic** when it is set — see `eval.py`)
 
 ---
 
@@ -83,9 +83,8 @@ python launch_cst.py mode=train train.target_staging_gb=0.5 cst.w=8
 
 To **load** trained CST weights and run **per-chunk** metrics (and optional staging+flush like training), set on the **eval** side:
 
-- `capture_pre_logits=true`  
-- `hidden_capture_path=...` (or rely on auto paths)  
-- `cst_checkpoint=/path/to/cst_<...>_train_best.pt` (match `k`/`w` to the YAML in `cst_config_path`)  
+- `cst_checkpoint=/path/to/cst_<...>_train_best.pt` (match `k`/`w` to the YAML in `cst_config_path`) — this **turns on** pre-logit capture and wrapping in `eval.py` (you do not need to set `capture_pre_logits` separately)
+- Optional: `hidden_capture_path=...` (default: `outputs/<trace>/hidden` or `<output_dir>/hidden` when resumable)
 - `cst_config_path` if not default `config/cst.yaml`
 
 **`eval.sh`** passes through CST-related flags; see `eval.sh --help` or the table in [Evaluation](evaluation.md).
@@ -93,14 +92,14 @@ To **load** trained CST weights and run **per-chunk** metrics (and optional stag
 **`launch_eval.py` example:**
 
 ```text
-python launch_eval.py task_name=gsm8k cst_checkpoint=outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt capture_pre_logits=true
+python launch_eval.py task_name=gsm8k cst_checkpoint=outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt
 ```
 
 The **hidden file names** on disk use the **same** `k`/`w` as in your CST config YAML so they align with the checkpoint you expect.
 
 ### Resumable eval and CST (same `resumable` flag)
 
-- **Yes — it is supported.** The harness uses one **`resumable`** flag (e.g. `./eval.sh --resumable` or `resumable=true` in [launch_eval / config](evaluation.md#resumable-evaluation)). `launch_eval.py` passes `resumable=true` and `output_dir=outputs/{run_id}/` together with `cst_checkpoint` / `capture_pre_logits` so hidden dumps live under **`outputs/{run_id}/hidden/`** next to **`checkpoint.jsonl`**.
+- **Yes — it is supported.** The harness uses one **`resumable`** flag (e.g. `./eval.sh --resumable` or `resumable=true` in [launch_eval / config](evaluation.md#resumable-evaluation)). `launch_eval.py` passes `resumable=true` and `output_dir=outputs/{run_id}/` together with `cst_checkpoint` (pre-logit capture is implied) so hidden dumps live under **`outputs/{run_id}/hidden/`** next to **`checkpoint.jsonl`**.
 
 - **What resumes:** The **`checkpoint.jsonl`** file stores **finished generations** (prompt + response) so those `(task_name, doc_id)` rows **skip the forward pass** on restart. That is the same resume mechanism as plain lm-eval (no extra CST flag).
 
@@ -150,7 +149,7 @@ python -m cst.train_data --samples 8
 | File | Role |
 |------|------|
 | `config/cst.yaml` | `launch_cst` train defaults, `cst` hyperparameters |
-| `config/config.yaml` | lm-eval + `cst_checkpoint`, `capture_pre_logits` |
+| `config/config.yaml` | lm-eval + `cst_checkpoint` (capture auto when set) |
 | `cst.sh` / `eval.sh` | Shell entry points |
 | `launch_cst.py` | Hydra: `mode=train` or `mode=eval` |
 | `launch_eval.py` | Hydra: lm-eval + CST flags |

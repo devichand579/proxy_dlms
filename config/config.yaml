@@ -28,11 +28,12 @@ intervention:
   k: 1
 
 # Pre-logit hidden states (see cst/): saved as bfloat16 .pt per generate_until chunk
+# When cst_checkpoint is set below, eval.py forces capture_pre_logits=true and a default hidden dir — no need to set capture here.
 capture_pre_logits: false
 hidden_capture_path: null  # null = auto (outputs/<run>/hidden, or <checkpoint_dir>/hidden if resumable)
 
 # Optional CST metrics on each hidden chunk, *per lm-eval task* (task_name = one dataset).
-# Requires capture_pre_logits (forced true when cst_checkpoint is set). NTF uses the same loaded LM as the eval harness.
+# Implies PreLogitsCaptureWrapper + hidden writes (see eval.py). NTF uses the same loaded LM as the eval harness.
 cst_checkpoint: null  # e.g. outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt
 cst_config_path: null  # null = use config/cst.yaml ``cst:`` block for architecture
 cst_ntf_conf_low: 0.2
