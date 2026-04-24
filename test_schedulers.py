@@ -1,3 +1,4 @@
+import os
 import time
 import traceback
 import argparse
@@ -186,6 +187,12 @@ def test_fdm(model, input_ids, attention_mask, tokenizer, trace_name=None,
     output = tokenizer.batch_decode(out_fdm[:, input_ids.shape[1]:], skip_special_tokens=True)
     return output, "FDM"
 
+def _model_label(model_dir: str) -> str:
+    """Short name for logs/traces (last path component)."""
+    base = os.path.basename(os.path.normpath(model_dir))
+    return base or "model"
+
+
 # (mode, strategy, block_length) for batch tests via schedulers.generate.generate()
 BATCH_TEST_MODES = {
     "pure_diffusion": ("pure_diffusion", "confidence", 256),
@@ -274,11 +281,20 @@ def run_batch_tests(model, tokenizer, device, batch_size=2, scheduler_name=None,
     print(f"Batch tests passed for {len(modes_to_run)} scheduler(s).")
 
 
-def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=None,
-         intervention_mode=None, intervention_steps=None, intervention_k=1, run_batch_tests_only=False, batch_size=2):
-    device = "cuda"
+def _free_model(model, tokenizer, device: str) -> None:
+    del model, tokenizer
+    if device == "cuda":
+        import torch
+        torch.cuda.empty_cache()
 
-    # Batch tests: run batched generation 
+
+def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=None,
+         intervention_mode=None, intervention_steps=None, intervention_k=1, run_batch_tests_only=False, batch_size=2,
+         model_paths=None):
+    device = "cuda"
+    paths = list(model_paths) if model_paths else ["./models/llada"]
+
+    # Batch tests: run batched generation
     if run_batch_tests_only:
         if use_wandb:
             if not WANDB_AVAILABLE:
@@ -294,25 +310,37 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
                     settings=wandb.Settings(init_timeout=120),
                     project=wandb_project or "strace",
                     name=wandb_name,
-                    config={"scheduler": scheduler_name or "all", "device": device, "batch_size": batch_size},
+                    config={
+                        "scheduler": scheduler_name or "all",
+                        "device": device,
+                        "batch_size": batch_size,
+                        "model_paths": paths,
+                    },
                 )
                 print(f"Initialized wandb run: {wandb_name}")
-        # Enable tracing for batch tests (saves to trace_outputs/; one trace per sample, suffixed _b0, _b1, ...)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        trace_name_base = f"batch_{timestamp}"
-        model_dir = "./models/llada"
-        model, tokenizer = load_model_and_tokenizer(model_dir, device=device, compile_model=False)
-        if tokenizer.padding_side != "left":
-            tokenizer.padding_side = "left"
-        assert tokenizer.pad_token_id != 126336
-        print(f"Running batch tests (batch_size={batch_size}, tracing={'on' if trace_name_base else 'off'})...")
-        run_batch_tests(
-            model, tokenizer, device,
-            batch_size=batch_size,
-            scheduler_name=scheduler_name,
-            trace_name_base=trace_name_base,
-            upload_to_wandb=use_wandb,
-        )
+        for model_dir in paths:
+            mlabel = _model_label(model_dir)
+            print(f"\n{'=' * 60}\nModel: {model_dir}  ({mlabel})\n{'=' * 60}\n")
+            trace_name_base = f"batch_{timestamp}_{mlabel}"
+            model, tokenizer = load_model_and_tokenizer(model_dir, device=device, compile_model=False)
+            if tokenizer.padding_side != "left":
+                tokenizer.padding_side = "left"
+            assert tokenizer.pad_token_id != 126336
+            print(
+                f"Running batch tests (batch_size={batch_size}, model={mlabel}, "
+                f"tracing={'on' if trace_name_base else 'off'})..."
+            )
+            try:
+                run_batch_tests(
+                    model, tokenizer, device,
+                    batch_size=batch_size,
+                    scheduler_name=scheduler_name,
+                    trace_name_base=trace_name_base,
+                    upload_to_wandb=use_wandb,
+                )
+            finally:
+                _free_model(model, tokenizer, device)
         if use_wandb and WANDB_AVAILABLE and wandb.run is not None:
             wandb.finish()
         return
@@ -337,34 +365,12 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
                 config={
                     "scheduler": scheduler_name or "all",
                     "device": device,
+                    "model_paths": paths,
                 }
             )
             print(f"Initialized wandb run: {wandb_name}")
         else:
             print("Wandb already initialized, using existing run")
-
-    # Example usage
-    model_dir = "./models/llada"
-    model, tokenizer = load_model_and_tokenizer(model_dir, device=device, compile_model=False)
-
-    # The LLaDA architecture theoretically supports both left-padding and right-padding. 
-    # However, the sampling code implementation is simpler with left-padding.
-    if tokenizer.padding_side != 'left':
-        tokenizer.padding_side = 'left'
-
-    # If the padding ID equals the mask ID, you need to modify our generate function to achieve correct inference.
-    assert tokenizer.pad_token_id != 126336
-
-    prompt = "Joy can read 8 pages of a book in 20 minutes. How many hours will it take her to read 120 pages?"
-
-    encoded_outputs = tokenizer(
-        prompt,
-        add_special_tokens=False,
-        padding=True,
-        return_tensors="pt"
-    )
-    input_ids = encoded_outputs['input_ids'].to(device)
-    attention_mask = encoded_outputs['attention_mask'].to(device)
 
     # Define available schedulers
     schedulers = {
@@ -377,7 +383,7 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
         'dus': test_dus,
         'fdm': test_fdm,
     }
-    
+
     # Determine which schedulers to run
     if scheduler_name:
         if scheduler_name not in schedulers:
@@ -387,38 +393,59 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
         schedulers_to_run = {scheduler_name: schedulers[scheduler_name]}
     else:
         schedulers_to_run = schedulers
-    
-    # Run selected schedulers
-    results = []
-    for name, test_func in schedulers_to_run.items():
-        try:
-            # Generate trace name if wandb is enabled
-            trace_name = None
-            if use_wandb:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                trace_name = f"{name}_{timestamp}"
-                if intervention_mode is not None:
-                    trace_name = f"{name}_{intervention_mode}_{timestamp}"
-            
-            output, label = test_func(
-                model, input_ids, attention_mask, tokenizer, 
-                trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
-            )
-            results.append((label, output))
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"Error running {name}: {e}")
-            print()
-    
-    # Print outputs
-    if results:
-        print("Output:")
-        for label, output in results:
-            for o in output:
-                print(f"{label}:")
-                print(o)
-                print('-' * 50)
+
+    for model_dir in paths:
+        mlabel = _model_label(model_dir)
+        print(f"\n{'=' * 60}\nModel: {model_dir}  ({mlabel})\n{'=' * 60}\n")
+        model, tokenizer = load_model_and_tokenizer(model_dir, device=device, compile_model=False)
+
+        if tokenizer.padding_side != 'left':
+            tokenizer.padding_side = 'left'
+
+        assert tokenizer.pad_token_id != 126336
+
+        prompt = "Joy can read 8 pages of a book in 20 minutes. How many hours will it take her to read 120 pages?"
+
+        encoded_outputs = tokenizer(
+            prompt,
+            add_special_tokens=False,
+            padding=True,
+            return_tensors="pt"
+        )
+        input_ids = encoded_outputs['input_ids'].to(device)
+        attention_mask = encoded_outputs['attention_mask'].to(device)
+
+        results = []
+        for name, test_func in schedulers_to_run.items():
+            try:
+                trace_name = None
+                if use_wandb:
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    if intervention_mode is not None:
+                        trace_name = f"{mlabel}_{name}_{intervention_mode}_{ts}"
+                    else:
+                        trace_name = f"{mlabel}_{name}_{ts}"
+
+                output, label = test_func(
+                    model, input_ids, attention_mask, tokenizer, 
+                    trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k
+                )
+                results.append((label, output))
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"Error running {name} on {mlabel}: {e}")
+                print()
+
+        if results:
+            print("Output:")
+            for label, output in results:
+                for o in output:
+                    print(f"[{mlabel}] {label}:")
+                    print(o)
+                    print('-' * 50)
+
+        _free_model(model, tokenizer, device)
     
     # Finish wandb run if it was initialized
     if use_wandb and WANDB_AVAILABLE and wandb.run is not None:
@@ -467,6 +494,14 @@ if __name__ == "__main__":
         default=2,
         help='Batch size for --batch tests (default: 2)'
     )
+    parser.add_argument(
+        '--model_path',
+        type=str,
+        action='append',
+        default=None,
+        metavar='DIR',
+        help='Local model directory (same as config model_path; repeat for multiple models). Default: ./models/llada',
+    )
     args = parser.parse_args()
 
     # Set default intervention parameters (steps=[0], k=1 when mode is specified)
@@ -475,6 +510,8 @@ if __name__ == "__main__":
 
     if args.batch:
         print("... Running batch tests ...")
+        if args.model_path:
+            print(f"Model path(s): {', '.join(args.model_path)}")
         main(
             scheduler_name=args.scheduler,
             run_batch_tests_only=True,
@@ -482,6 +519,7 @@ if __name__ == "__main__":
             use_wandb=args.wandb,
             wandb_project=args.wandb_project,
             wandb_name=args.wandb_name,
+            model_paths=args.model_path,
         )
     else:
         print("... Testing scheduler ...")
@@ -489,6 +527,10 @@ if __name__ == "__main__":
             print(f"Running scheduler: {args.scheduler}")
         else:
             print("Running all schedulers")
+        if args.model_path:
+            print(f"Model path(s): {', '.join(args.model_path)}")
+        else:
+            print("Model path: ./models/llada (default)")
         if args.wandb:
             print("Wandb logging enabled")
         if args.intervention_mode:
@@ -504,5 +546,6 @@ if __name__ == "__main__":
         wandb_name=args.wandb_name,
         intervention_mode=args.intervention_mode,
         intervention_steps=intervention_steps,
-        intervention_k=intervention_k
+        intervention_k=intervention_k,
+        model_paths=args.model_path,
         )
