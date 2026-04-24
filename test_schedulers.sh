@@ -38,6 +38,10 @@ BATCH OPTIONS:
   --batch                     Run batch execution tests only (batched generation)
   --batch_size N              Batch size for --batch tests (default: 2)
 
+MODEL OPTIONS:
+  --model_path DIR            Local checkpoint directory; repeat to test several models
+                              (e.g. ./models/llada and ./models/dream). Default: ./models/llada
+
 OTHER OPTIONS:
   --help, -h                  Show this help message
 
@@ -57,7 +61,10 @@ EXAMPLES:
   # Run batch tests for one scheduler with batch_size 4
   $0 --batch --scheduler pure_diffusion --batch_size 4
 
-  # Test all schedulers (default behavior)
+  # Test all schedulers on two local models
+  $0 --model_path ./models/llada --model_path ./models/dream
+
+  # Test all schedulers (default behavior, default model)
   $0
 
 EOF
@@ -75,6 +82,7 @@ SCHEDULER=""
 INTERVENTION_MODE=""
 USE_BATCH=false
 BATCH_SIZE=2
+MODEL_PATHS=()
 PYTHON_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -119,6 +127,10 @@ while [[ $# -gt 0 ]]; do
             BATCH_SIZE="$2"
             shift 2
             ;;
+        --model_path)
+            MODEL_PATHS+=("$2")
+            shift 2
+            ;;
         *)
             # Pass through any other arguments to the Python script
             PYTHON_ARGS+=("$1")
@@ -160,6 +172,10 @@ fi
 if [ -n "$INTERVENTION_MODE" ]; then
     PYTHON_CMD_ARGS+=("--intervention_mode" "$INTERVENTION_MODE")
 fi
+
+for mp in "${MODEL_PATHS[@]}"; do
+    PYTHON_CMD_ARGS+=("--model_path" "$mp")
+done
 
 if [ "$USE_BATCH" = true ]; then
     PYTHON_CMD_ARGS+=("--batch")
