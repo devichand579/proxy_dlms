@@ -115,7 +115,7 @@ python launch_eval.py task_name=gsm8k mode=pd
 python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun
 ```
 
-**Multirun on SLURM** (one job per config): launchers live in `config/launcher/`: `local`, `slurm_a40`, `slurm_dgx`, `slurm_h100`, `slurm_l40`, `slurm_v100`.
+**Multirun on SLURM** (one job per config): launchers live in `config/launcher/`: `local`, `slurm_a40`, `slurm_a100`, `slurm_dgx`, `slurm_h100`, `slurm_l40`.
 
 ```bash
 python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm_a40
