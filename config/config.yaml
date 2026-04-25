@@ -15,6 +15,8 @@ mode: pd
 task_name: gsm8k
 model: llada  # dirname under ./models/: llada | llada1_5 | dream
 compile_model: false
+# false = reference LLaDA-style: full diffusion steps, no truncate-at-first-EOS in chunk decode (see eval.LLaDAEvalHarness)
+use_eos_harness: true
 block_length: null  # null = use mode default (block_diffusion 32, fdm 64, dus 16, else gen_length). Set to int to override.
 top_k: 2  # null = 1. Number of tokens to transfer per step (top_k scheduler only). Set to int to override.
 wandb: true

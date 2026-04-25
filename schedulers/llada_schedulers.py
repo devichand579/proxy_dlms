@@ -51,7 +51,8 @@ def generate_llada(
     upload_to_wandb=True,
     intervention_mode=None, 
     intervention_steps=None, 
-    intervention_k=1  
+    intervention_k=1,
+    use_eos_harness: bool = True,
 ):
     '''
     Args:
@@ -71,6 +72,7 @@ def generate_llada(
         intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
         intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
         intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
+        use_eos_harness: If False, never return early on EOS (full step budget / reference-style).
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -136,7 +138,7 @@ def generate_llada(
             x[transfer_index] = x0[transfer_index]
             
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
-            if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
+            if use_eos_harness and check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
                 return x, steps_taken, num_block + 1  # Stop generation early
 
     return x, steps_taken, num_blocks

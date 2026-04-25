@@ -38,6 +38,7 @@ def generate(
     eos_id=LLADA_DEFAULT_EOS_ID,
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     model_path: Optional[Union[str, Path]] = None,
+    use_eos_harness: bool = True,
 ):
     """
     Run batched diffusion generation. All samples in input_ids are processed in one batch.
@@ -48,6 +49,11 @@ def generate(
 
     If ``model_path`` is set, ``mask_id``, ``eos_id``, and ``eot_id`` are read from that checkpoint's
     ``config.json`` via :func:`load_model.infer_diffusion_token_ids` (overriding the other arguments).
+
+    If ``use_eos_harness`` is False (reference LLaDA-style): schedulers do not return early when
+    :func:`schedulers.utils.check_eos_stop_condition` would be satisfied; decode with
+    ``tokenizer.batch_decode(generated[:, prompt_len:], ...)`` without truncating at the first EOS.
+    When True (default), EOS early exit and pre-EOS truncation in eval/tests apply as before.
     """
     if model_path is not None:
         mask_id, eos_id, eot_id = infer_diffusion_token_ids(model_path)
@@ -65,6 +71,7 @@ def generate(
         mask_id=mask_id,
         eos_id=eos_id,
         eot_id=eot_id,
+        use_eos_harness=use_eos_harness,
     )
 
     if mode == "pure_diffusion":

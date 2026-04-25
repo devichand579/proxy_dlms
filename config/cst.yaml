@@ -52,6 +52,8 @@ train:
   top_k: 1
   max_prompt_length: 512
   compile_model: false
+  # Match eval.launch_eval: false = full steps + no truncate-at-EOS in collect (see collect_batch.generate)
+  use_eos_harness: true
   seed: 0
   learning_rate: 0.0003
   lambda_sparsity: 0.001

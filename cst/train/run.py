@@ -15,6 +15,12 @@ from cst.naming import cst_train_name_token, cst_train_staging_prefix, model_lab
 logger = logging.getLogger("cst.run")
 
 
+def _coerce_use_eos_harness(v: Any) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "1", "yes", "on")
+    return True if v is None else bool(v)
+
+
 def _train_cst_on_chunks_and_checkpoint(
     batch_paths: List[str],
     *,
@@ -264,6 +270,7 @@ def run_train(cfg: DictConfig) -> int:
                 device=str(device),
                 compile_model=bool(tr.get("compile_model", False)),
             )
+            ueh = _coerce_use_eos_harness(tr.get("use_eos_harness", True))
             batch_paths: List[str] = []
             try:
                 batch_paths, next_bi, coll_sum = collect_hidden_until_size_gb_from_row_batches(
@@ -286,6 +293,7 @@ def run_train(cfg: DictConfig) -> int:
                     ),
                     max_batches=this_max,
                     staging_name_token=cst_name_token,
+                    use_eos_harness=ueh,
                 )
                 if not batch_paths:
                     logger.warning(

@@ -31,24 +31,67 @@ except ImportError:
     wandb = None
 
 
-def _decode_generated_tails_at_eos(
-    tokenizer,
+def _generation_tails(
     generated: torch.Tensor,
     prompt_len: int,
     eos_id: int,
-) -> List[str]:
+    use_eos_harness: bool,
+) -> List[torch.Tensor]:
     """
-    For each row, take ``generated[b, prompt_len:]`` and truncate before the first ``eos_id``,
-    matching ``eval.py`` (see ``LLaDAEvalHarness.generate_until`` chunk decoding) so
-    ``batch_decode`` is not swamped with mask or post-EOS noise.
+    One 1D tail tensor per batch row — same slice/truncation as ``_decode_generated_tails``,
+    before ``skip_special_tokens`` stripping.
     """
-    gen_tails = []
+    if not use_eos_harness:
+        return [generated[b, prompt_len:].contiguous() for b in range(generated.shape[0])]
+    gen_tails: List[torch.Tensor] = []
     for b in range(generated.shape[0]):
         tail = generated[b, prompt_len:].contiguous()
         eos_positions = (tail == eos_id).nonzero(as_tuple=False)
         if eos_positions.numel() > 0:
             tail = tail[: int(eos_positions[0].item())]
         gen_tails.append(tail)
+    return gen_tails
+
+
+def _print_original_tokens(
+    tokenizer,
+    gen_tails: List[torch.Tensor],
+    label: str = "",
+) -> None:
+    """Print full token id lists and string decode with ``skip_special_tokens=False``."""
+    header = f" ({label})" if label else ""
+    print(f"--- original generation tail{header} (before skip_special_tokens) ---")
+    for b, t in enumerate(gen_tails):
+        ids = t.detach().cpu().tolist()
+        dec = tokenizer.decode(ids, skip_special_tokens=False)
+        print(f"  [batch {b}] token_ids ({len(ids)}): {ids}")
+        print(f"  [batch {b}] decoded (skip_special_tokens=False): {dec!r}")
+    print("--- end original tokens ---")
+
+
+def _decode_generated_tails(
+    tokenizer,
+    generated: torch.Tensor,
+    prompt_len: int,
+    eos_id: int,
+    use_eos_harness: bool = True,
+    show_original_tokens: bool = False,
+    original_tokens_label: str = "",
+) -> List[str]:
+    """
+    If ``use_eos_harness`` (default), truncate each row's generation tail at the first
+    ``eos_id`` then ``batch_decode`` (aligns with ``LLaDAEvalHarness.generate_until``).
+
+    If False (reference LLaDA-style), decode the full ``generated[:, prompt_len:]`` tail
+    without EOS truncation, like ``batch_decode(out[:, prompt_len:])`` in the upstream
+    sampling script.
+
+    If ``show_original_tokens`` is True, print each tail's full id list and a decode with
+    ``skip_special_tokens=False`` before the usual stripped decode.
+    """
+    gen_tails = _generation_tails(generated, prompt_len, eos_id, use_eos_harness)
+    if show_original_tokens:
+        _print_original_tokens(tokenizer, gen_tails, label=original_tokens_label)
     return tokenizer.batch_decode(gen_tails, skip_special_tokens=True)
 
 
@@ -58,6 +101,8 @@ def test_pure_diffusion(
     mask_id: int = LLADA_DEFAULT_MASK_ID,
     eos_id: int = LLADA_DEFAULT_EOS_ID,
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+    use_eos_harness: bool = True,
+    show_original_tokens: bool = False,
 ):
     """Test pure diffusion scheduler"""
     print("Generating with pure diffusion (block_length=256)...")
@@ -66,7 +111,7 @@ def test_pure_diffusion(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=256, temperature=0., remasking='confidence',
         trace_name=trace_name,intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
-        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
     )
     pure_diffusion_time = time.time() - start_time
     print(f"Pure diffusion generation time: {pure_diffusion_time:.2f} seconds")
@@ -74,8 +119,11 @@ def test_pure_diffusion(
     print(f"Blocks generated: {blocks_pure}")
     print(f"output Shape: {out_pure_diffusion.shape}")
     print()
-    output = _decode_generated_tails_at_eos(
-        tokenizer, out_pure_diffusion, int(input_ids.shape[1]), eos_id
+    output = _decode_generated_tails(
+        tokenizer, out_pure_diffusion, int(input_ids.shape[1]), eos_id,
+        use_eos_harness=use_eos_harness,
+        show_original_tokens=show_original_tokens,
+        original_tokens_label="Pure diffusion",
     )
     return output, "Pure diffusion"
 
@@ -86,6 +134,8 @@ def test_block_diffusion(
     mask_id: int = LLADA_DEFAULT_MASK_ID,
     eos_id: int = LLADA_DEFAULT_EOS_ID,
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+    use_eos_harness: bool = True,
+    show_original_tokens: bool = False,
 ):
     """Test block diffusion scheduler"""
     print("Generating with block diffusion (block_length=32)...")
@@ -94,7 +144,7 @@ def test_block_diffusion(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=32, temperature=0., remasking='confidence',
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
-        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
     )
     block_diffusion_time = time.time() - start_time
     print(f"Block diffusion generation time: {block_diffusion_time:.2f} seconds")
@@ -102,8 +152,11 @@ def test_block_diffusion(
     print(f"Blocks generated: {blocks_block}")
     print(f"output Shape: {out_block_diffusion.shape}")
     print()
-    output = _decode_generated_tails_at_eos(
-        tokenizer, out_block_diffusion, int(input_ids.shape[1]), eos_id
+    output = _decode_generated_tails(
+        tokenizer, out_block_diffusion, int(input_ids.shape[1]), eos_id,
+        use_eos_harness=use_eos_harness,
+        show_original_tokens=show_original_tokens,
+        original_tokens_label="Block diffusion",
     )
     return output, "Block diffusion"
 
@@ -114,6 +167,8 @@ def test_top_k_confidence(
     mask_id: int = LLADA_DEFAULT_MASK_ID,
     eos_id: int = LLADA_DEFAULT_EOS_ID,
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+    use_eos_harness: bool = True,
+    show_original_tokens: bool = False,
 ):
     """Test top-k scheduler with confidence metric"""
     print("Generating with top-k (confidence metric, block_length=256)...")
@@ -124,7 +179,7 @@ def test_top_k_confidence(
         steps=256, gen_length=256, 
         block_length=256, temperature=0., top_k=1, metric='confidence',
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
-        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
     )
     top_k_time = time.time() - start_time
     print(f"Top-k generation time: {top_k_time:.2f} seconds")
@@ -132,8 +187,11 @@ def test_top_k_confidence(
     print(f"Blocks generated: {blocks_top_k_confidence}")
     print(f"output Shape: {out_top_k_confidence.shape}")
     print()
-    output = _decode_generated_tails_at_eos(
-        tokenizer, out_top_k_confidence, int(input_ids.shape[1]), eos_id
+    output = _decode_generated_tails(
+        tokenizer, out_top_k_confidence, int(input_ids.shape[1]), eos_id,
+        use_eos_harness=use_eos_harness,
+        show_original_tokens=show_original_tokens,
+        original_tokens_label="Top-k (confidence)",
     )
     return output, "Top-k (confidence)"
 
@@ -144,6 +202,8 @@ def test_top_k_margin(
     mask_id: int = LLADA_DEFAULT_MASK_ID,
     eos_id: int = LLADA_DEFAULT_EOS_ID,
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+    use_eos_harness: bool = True,
+    show_original_tokens: bool = False,
 ):
     """Test top-k scheduler with margin metric"""
     print("Generating with top-k (margin metric, block_length=256)...")
@@ -152,7 +212,7 @@ def test_top_k_margin(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=256, temperature=0., top_k=1, metric='top_margin',
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
-        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
     )
     top_k_time = time.time() - start_time
     print(f"Top-k generation time: {top_k_time:.2f} seconds")
@@ -160,8 +220,11 @@ def test_top_k_margin(
     print(f"Blocks generated: {blocks_top_k_margin}")
     print(f"output Shape: {out_top_k_margin.shape}")
     print()
-    output = _decode_generated_tails_at_eos(
-        tokenizer, out_top_k_margin, int(input_ids.shape[1]), eos_id
+    output = _decode_generated_tails(
+        tokenizer, out_top_k_margin, int(input_ids.shape[1]), eos_id,
+        use_eos_harness=use_eos_harness,
+        show_original_tokens=show_original_tokens,
+        original_tokens_label="Top-k (margin)",
     )
     return output, "Top-k (margin)"
 
@@ -172,6 +235,8 @@ def test_fhs(
     mask_id: int = LLADA_DEFAULT_MASK_ID,
     eos_id: int = LLADA_DEFAULT_EOS_ID,
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+    use_eos_harness: bool = True,
+    show_original_tokens: bool = False,
 ):
     """Test FHS scheduler"""
     print("Generating with FHS (steps=256)...")
@@ -180,15 +245,18 @@ def test_fhs(
         model, input_ids, attention_mask=attention_mask, steps=256, 
         gen_length=256, temperature=1.0, pass_time_to_model=True,
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
-        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
     )
     fhs_time = time.time() - start_time
     print(f"FHS generation time: {fhs_time:.2f} seconds")
     print(f"Steps taken: {steps_fhs}")
     print(f"output Shape: {out_fhs.shape}")
     print()
-    output = _decode_generated_tails_at_eos(
-        tokenizer, out_fhs, int(input_ids.shape[1]), eos_id
+    output = _decode_generated_tails(
+        tokenizer, out_fhs, int(input_ids.shape[1]), eos_id,
+        use_eos_harness=use_eos_harness,
+        show_original_tokens=show_original_tokens,
+        original_tokens_label="FHS",
     )
     return output, "FHS"
 
@@ -199,6 +267,8 @@ def test_eb_sampler(
     mask_id: int = LLADA_DEFAULT_MASK_ID,
     eos_id: int = LLADA_DEFAULT_EOS_ID,
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+    use_eos_harness: bool = True,
+    show_original_tokens: bool = False,
 ):
     """Test EB sampler scheduler"""
     print("Generating with EB_sampler (confidence metric, block_length=256)...")
@@ -207,7 +277,7 @@ def test_eb_sampler(
         model, input_ids, attention_mask, steps=256, gen_length=256, 
         block_length=256, gamma=0.1, E='confidence', temperature=0.,
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
-        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
     )
     eb_sampler_time = time.time() - start_time
     print(f"EB_sampler generation time: {eb_sampler_time:.2f} seconds")
@@ -215,8 +285,11 @@ def test_eb_sampler(
     print(f"Blocks generated: {blocks_eb_sampler}")
     print(f"output Shape: {out_eb_sampler.shape}")
     print()
-    output = _decode_generated_tails_at_eos(
-        tokenizer, out_eb_sampler, int(input_ids.shape[1]), eos_id
+    output = _decode_generated_tails(
+        tokenizer, out_eb_sampler, int(input_ids.shape[1]), eos_id,
+        use_eos_harness=use_eos_harness,
+        show_original_tokens=show_original_tokens,
+        original_tokens_label="EB_sampler (confidence)",
     )
     return output, "EB_sampler (confidence)"
 
@@ -227,6 +300,8 @@ def test_dus(
     mask_id: int = LLADA_DEFAULT_MASK_ID,
     eos_id: int = LLADA_DEFAULT_EOS_ID,
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+    use_eos_harness: bool = True,
+    show_original_tokens: bool = False,
 ):
     """Test DUS scheduler"""
     print("Generating with DUS (dilated schedule, block_length=16)...")
@@ -235,7 +310,7 @@ def test_dus(
         model, input_ids, attention_mask, gen_length=256,
         block_length=16, temperature=0., remasking='confidence', scheduler='dilated',
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
-        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
     )
     dus_time = time.time() - start_time
     print(f"DUS generation time: {dus_time:.2f} seconds")
@@ -243,8 +318,11 @@ def test_dus(
     print(f"Blocks generated: {blocks_dus}")
     print(f"output Shape: {out_dus.shape}")
     print()
-    output = _decode_generated_tails_at_eos(
-        tokenizer, out_dus, int(input_ids.shape[1]), eos_id
+    output = _decode_generated_tails(
+        tokenizer, out_dus, int(input_ids.shape[1]), eos_id,
+        use_eos_harness=use_eos_harness,
+        show_original_tokens=show_original_tokens,
+        original_tokens_label="DUS (dilated)",
     )
     return output, "DUS (dilated)"
 
@@ -255,6 +333,8 @@ def test_fdm(
     mask_id: int = LLADA_DEFAULT_MASK_ID,
     eos_id: int = LLADA_DEFAULT_EOS_ID,
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
+    use_eos_harness: bool = True,
+    show_original_tokens: bool = False,
 ):
     """Test FDM scheduler"""
     print("Generating with FDM (steps=256, block_length=64)...")
@@ -262,15 +342,18 @@ def test_fdm(
     out_fdm, steps_fdm, blocks_fdm = generate_fdm(
         model, input_ids, attention_mask, steps=256, gen_length=256, block_length=64,
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
-        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
+        mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
     )
     fdm_time = time.time() - start_time
     print(f"FDM generation time: {fdm_time:.2f} seconds")
     print(f"Steps taken: {steps_fdm}, blocks: {blocks_fdm}")
     print(f"output Shape: {out_fdm.shape}")
     print()
-    output = _decode_generated_tails_at_eos(
-        tokenizer, out_fdm, int(input_ids.shape[1]), eos_id
+    output = _decode_generated_tails(
+        tokenizer, out_fdm, int(input_ids.shape[1]), eos_id,
+        use_eos_harness=use_eos_harness,
+        show_original_tokens=show_original_tokens,
+        original_tokens_label="FDM",
     )
     return output, "FDM"
 
@@ -302,6 +385,8 @@ def run_batch_tests(
     trace_name_base=None,
     upload_to_wandb=False,
     model_path=None,
+    use_eos_harness: bool = True,
+    show_original_tokens: bool = False,
 ):
     """Run batched generation via schedulers.generate.generate() and assert shapes/outputs.
     When ``model_path`` is set, token ids are read from that checkpoint (``config.json``).
@@ -355,6 +440,7 @@ def run_batch_tests(
                 kwargs["strategy"] = strategy
             if model_path is not None:
                 kwargs["model_path"] = model_path
+            kwargs["use_eos_harness"] = use_eos_harness
 
             generated, steps_taken, blocks, gen_time = generate_batch(
                 model, input_ids, attention_mask, **kwargs
@@ -366,8 +452,11 @@ def run_batch_tests(
                 f"{name}: expected seq_len == prompt_len + gen_length, "
                 f"got {generated.shape[1]} vs {input_ids.shape[1]} + {gen_length}"
             )
-            decoded = _decode_generated_tails_at_eos(
-                tokenizer, generated, prompt_len, batch_eos_id
+            decoded = _decode_generated_tails(
+                tokenizer, generated, prompt_len, batch_eos_id,
+                use_eos_harness=use_eos_harness,
+                show_original_tokens=show_original_tokens,
+                original_tokens_label=f"[batch] {name}",
             )
             assert len(decoded) == batch_size, (
                 f"{name}: expected {batch_size} decoded strings, got {len(decoded)}"
@@ -395,7 +484,7 @@ def _free_model(model, tokenizer, device: str) -> None:
 
 def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=None,
          intervention_mode=None, intervention_steps=None, intervention_k=1, run_batch_tests_only=False, batch_size=2,
-         model_paths=None):
+         model_paths=None, use_eos_harness: bool = True, show_original_tokens: bool = False):
     device = "cuda"
     paths = list(model_paths) if model_paths else ["./models/llada"]
 
@@ -445,6 +534,8 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
                     trace_name_base=trace_name_base,
                     upload_to_wandb=use_wandb,
                     model_path=model_dir,
+                    use_eos_harness=use_eos_harness,
+                    show_original_tokens=show_original_tokens,
                 )
             finally:
                 _free_model(model, tokenizer, device)
@@ -538,6 +629,8 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
                     model, input_ids, attention_mask, tokenizer, 
                     trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
                     mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
+                    use_eos_harness=use_eos_harness,
+                    show_original_tokens=show_original_tokens,
                 )
                 results.append((label, output))
             except Exception as e:
@@ -611,6 +704,23 @@ if __name__ == "__main__":
         metavar='DIR',
         help='Local model directory (same as config model_path; repeat for multiple models). Default: ./models/llada',
     )
+    parser.add_argument(
+        '--no-eos-harness',
+        action='store_true',
+        help=(
+            "Reference LLaDA-style: run full step budget (no EOS early return in schedulers) and "
+            "decode the full generated tail (no truncate at first EOS). Default is harness on."
+        ),
+    )
+    parser.add_argument(
+        '--show-original-tokens',
+        action='store_true',
+        dest='show_original_tokens',
+        help=(
+            "Before the usual skipped-special-token decode, print each batch row's full token id list "
+            "and a string decode with skip_special_tokens=False (same tail as the harness, post-EOS trim when harness is on)."
+        ),
+    )
     args = parser.parse_args()
 
     # Set default intervention parameters (steps=[0], k=1 when mode is specified)
@@ -619,8 +729,12 @@ if __name__ == "__main__":
 
     if args.batch:
         print("... Running batch tests ...")
+        if args.no_eos_harness:
+            print("EOS harness: off (full steps + full-tail decode, reference LLaDA-style).")
         if args.model_path:
             print(f"Model path(s): {', '.join(args.model_path)}")
+        if args.show_original_tokens:
+            print("show_original_tokens: on (print full id lists + decode before skip_special_tokens).")
         main(
             scheduler_name=args.scheduler,
             run_batch_tests_only=True,
@@ -629,6 +743,8 @@ if __name__ == "__main__":
             wandb_project=args.wandb_project,
             wandb_name=args.wandb_name,
             model_paths=args.model_path,
+            use_eos_harness=not args.no_eos_harness,
+            show_original_tokens=args.show_original_tokens,
         )
     else:
         print("... Testing scheduler ...")
@@ -646,6 +762,10 @@ if __name__ == "__main__":
             print(f"Intervention mode: {args.intervention_mode}")
             print(f"Intervention steps: {intervention_steps} (default)")
             print(f"Intervention k: {intervention_k} (default)")
+        if args.no_eos_harness:
+            print("EOS harness: off (full steps + full-tail decode, reference LLaDA-style).")
+        if args.show_original_tokens:
+            print("show_original_tokens: on (print full id lists + decode before skip_special_tokens).")
         print()
 
         main(
@@ -657,4 +777,6 @@ if __name__ == "__main__":
         intervention_steps=intervention_steps,
         intervention_k=intervention_k,
         model_paths=args.model_path,
+        use_eos_harness=not args.no_eos_harness,
+        show_original_tokens=args.show_original_tokens,
         )

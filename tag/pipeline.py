@@ -176,6 +176,7 @@ def run_tag_full(
     top_output_mass: float = 0.95,
     max_output_tokens: int = 10,
     write_html: bool = True,
+    use_eos_harness: bool = True,
 ) -> Dict[str, Any]:
     """Capture hidden trace, build TAG, write tag_graph.json and tag_view.html under out_dir."""
     out = Path(out_dir)
@@ -189,6 +190,7 @@ def run_tag_full(
         mode_key=mode_key,
         gen_length=gen_length,
         steps=steps,
+        use_eos_harness=use_eos_harness,
     )
     gout = run_tag_from_chunk(
         pt,

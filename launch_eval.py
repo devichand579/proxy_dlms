@@ -62,6 +62,11 @@ def run(cfg: DictConfig) -> int:
     task_name = str(cfg.get("task_name", "gsm8k"))
     model = str(cfg.get("model", "llada"))
     compile_model = _to_bool(cfg.get("compile_model", False))
+    ueh = cfg.get("use_eos_harness", True)
+    if isinstance(ueh, str):
+        use_eos_harness = ueh.strip().lower() in ("true", "1", "yes", "on")
+    else:
+        use_eos_harness = True if ueh is None else bool(ueh)
     wandb = _to_bool(cfg.get("wandb", True))
     tracing_enabled = _to_bool(cfg.get("tracing_enabled", True))
 
@@ -124,7 +129,7 @@ def run(cfg: DictConfig) -> int:
     model_args = (
         f"model_path={model_path},gen_length={gen_length},steps={steps},"
         f"block_length={block_length},mode={mode},strategy={str(strategy)},top_k={top_k},compile_model={str(compile_model).lower()},"
-        f"task_name={task_name},trace_name={output_suffix}"
+        f"task_name={task_name},trace_name={output_suffix},use_eos_harness={str(use_eos_harness).lower()}"
     )
     if resumable and checkpoint_dir:
         model_args += f",resumable=true,output_dir={checkpoint_dir}"
@@ -190,7 +195,10 @@ def run(cfg: DictConfig) -> int:
 
     print("Configuration:")
     print(f"  batch_size={batch_size} mode={mode} task_name={task_name} model={model}")
-    print(f"  compile_model={compile_model} gen_length={gen_length} steps={steps} block_length={block_length} top_k={top_k}")
+    print(
+        f"  compile_model={compile_model} use_eos_harness={use_eos_harness} "
+        f"gen_length={gen_length} steps={steps} block_length={block_length} top_k={top_k}"
+    )
     print(f"  num_fewshot={num_fewshot} wandb={wandb} tracing_enabled={tracing_enabled} resumable={resumable}")
     if capture_pre_logits:
         print(f"  capture_pre_logits=true hidden_capture_path={hidden_dir}")
