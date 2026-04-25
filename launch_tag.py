@@ -32,6 +32,16 @@ def main(cfg: DictConfig) -> int:
     cst_config_path = str(cconf) if cconf not in (None, "null", "") else None
     mpath = str(c.get("model_path", ""))
     device = str(c.get("device", "cuda"))
+    oee = c.get("output_exclude_eos", False)
+    if isinstance(oee, str):
+        oee = oee.strip().lower() in ("true", "1", "yes", "on")
+    else:
+        oee = bool(oee)
+    eid = c.get("eos_id", None)
+    if eid in (None, "null", "none", ""):
+        eid = None
+    else:
+        eid = int(eid)
     hpt = c.get("hidden_pt")
     if hpt and str(hpt) not in ("null", "none", ""):
         g = run_tag_from_chunk(
@@ -46,6 +56,8 @@ def main(cfg: DictConfig) -> int:
             influence_edge_mass=float(c.get("influence_edge_mass", 0.98)),
             mix_uniform=float(c.get("mix_uniform", 1e-4)),
             with_residual=bool(c.get("with_residual", False)),
+            output_exclude_eos=oee,
+            eos_id=eid,
         )
         write_graph_json(g["graph"], out_dir / "tag_graph.json")
         if bool(c.get("write_html", True)):
@@ -73,6 +85,8 @@ def main(cfg: DictConfig) -> int:
         mix_uniform=float(c.get("mix_uniform", 1e-4)),
         with_residual=bool(c.get("with_residual", False)),
         write_html=bool(c.get("write_html", True)),
+        output_exclude_eos=oee,
+        eos_id=eid,
     )
     print(json.dumps(r.get("paths", {}), indent=0))
     return 0

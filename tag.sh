@@ -48,6 +48,7 @@ Options (shell only):
   --device STR           e.g. cuda, cuda:0
   --no_html              do not write tag_view.html
   --with_residual        add residual err nodes/edges
+  --output_exclude_eos   TAG out nodes: mask EOS in logits before softmax (lexical readout)
   --slurm                set SLURM_WRAPPED=1 (use with srun when already under Slurm)
   -h, --help             show this message
 
@@ -102,6 +103,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --with_residual)
       EXTRA+=(with_residual=true)
+      shift
+      ;;
+    --output_exclude_eos)
+      EXTRA+=(output_exclude_eos=true)
       shift
       ;;
     --slurm)
