@@ -8,6 +8,7 @@ from load_model import (
     LLADA_DEFAULT_EOS_ID,
     LLADA_DEFAULT_EOT_ID,
     LLADA_DEFAULT_MASK_ID,
+    infer_b44_eos_unmask_safety,
     infer_diffusion_token_ids,
 )
 from schedulers.llada_schedulers import generate_llada
@@ -40,23 +41,16 @@ def generate(
     model_path: Optional[Union[str, Path]] = None,
     use_eos_harness: bool = True,
 ):
+    """Batched mask-diffusion `generate` for all rows in `input_ids`.
+
+    With `model_path`, ids come from `infer_diffusion_token_ids` and B.4 may apply
+    (`infer_b44_eos_unmask_safety`, e.g. `llada1_5`). `use_eos_harness=False` disables
+    early EOS return in schedulers (reference-style full tail decode in eval).
     """
-    Run batched diffusion generation. All samples in input_ids are processed in one batch.
-
-    Modes: pure_diffusion, block_diffusion, top_k_confidence, top_k_margin, FHS, EB_sampler, Dilated Scheduling, FDM
-    Strategies: confidence, random, top_margin, entropy
-    top_k: Number of tokens to transfer per step (top_k scheduler only). Default 1.
-
-    If ``model_path`` is set, ``mask_id``, ``eos_id``, and ``eot_id`` are read from that checkpoint's
-    ``config.json`` via :func:`load_model.infer_diffusion_token_ids` (overriding the other arguments).
-
-    If ``use_eos_harness`` is False (reference LLaDA-style): schedulers do not return early when
-    :func:`schedulers.utils.check_eos_stop_condition` would be satisfied; decode with
-    ``tokenizer.batch_decode(generated[:, prompt_len:], ...)`` without truncating at the first EOS.
-    When True (default), EOS early exit and pre-EOS truncation in eval/tests apply as before.
-    """
+    b44 = False
     if model_path is not None:
         mask_id, eos_id, eot_id = infer_diffusion_token_ids(model_path)
+        b44 = infer_b44_eos_unmask_safety(model_path)
     start_time = time.time()
     num_samples = input_ids.shape[0]
     assert num_samples >= 1, "Need at least one sample"
@@ -72,6 +66,8 @@ def generate(
         eos_id=eos_id,
         eot_id=eot_id,
         use_eos_harness=use_eos_harness,
+        logits_eos_inf=b44,
+        confidence_eos_eot_inf=b44,
     )
 
     if mode == "pure_diffusion":
@@ -134,7 +130,6 @@ def generate(
             model, input_ids, attention_mask,
             steps=steps, gen_length=gen_length, block_length=block_length,
             K1=2, N=4, eta1=0.8, eta2=0.7, gamma=0.5, temperature=0.0,
-            logits_eos_inf=False, confidence_eos_eot_inf=False,
             global_scale=1.0, **common_trace_kw,
         )
     else:

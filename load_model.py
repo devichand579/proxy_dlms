@@ -1,6 +1,4 @@
-"""
-Load diffusion LMs (LLaDA, LLaDA 1.5, Dream, …) from local checkpoints via HuggingFace Auto classes.
-"""
+"""Load diffusion LMs (LLaDA family, Dream) with AutoModel/AutoTokenizer from local dirs."""
 
 import json
 from pathlib import Path
@@ -12,9 +10,7 @@ from transformers import AutoModel, AutoTokenizer
 
 BASE_DIR = Path(__file__).parent.resolve()
 
-# Default token ids when a caller has no local ``config.json`` and no per-call overrides.
-# Matches standard LLaDA / LLaDA 1.5 checkpoints in this repo; schedulers use these as
-# fallbacks. Prefer :func:`infer_diffusion_token_ids` from the selected ``model_path``.
+# Defaults if no per-checkpoint read; prefer infer_diffusion_token_ids(model_path).
 LLADA_DEFAULT_MASK_ID = 126336
 LLADA_DEFAULT_EOS_ID = 126081
 LLADA_DEFAULT_EOT_ID: Optional[int] = 126348
@@ -29,13 +25,7 @@ def _read_config(model_dir: Path) -> Dict[str, Any]:
 
 
 def infer_diffusion_token_ids(model_dir: Union[str, Path]) -> Tuple[int, int, Optional[int]]:
-    """
-    Read mask / EOS / optional EoT ids from a checkpoint's ``config.json``.
-
-    * ``model_type == "llada"`` (LLaDA and LLaDA 1.5): EoT is ``LLADA_DEFAULT_EOT_ID``.
-    * Other model types (e.g. Dream): EoT is None — schedulers only suppress EoS/EoT in logits when
-      ``eot_id`` is not None.
-    """
+    """Return (mask_token_id, eos_token_id, eot_id). LLaDA uses fixed EoT; Dream has eot_id=None."""
     model_dir = Path(model_dir).resolve()
     cfg = _read_config(model_dir)
     model_type = str(cfg.get("model_type", "")).lower()
@@ -48,15 +38,23 @@ def infer_diffusion_token_ids(model_dir: Union[str, Path]) -> Tuple[int, int, Op
     return mask_id, eos_id, eot_id
 
 
+def infer_b44_eos_unmask_safety(model_dir: Union[str, Path]) -> bool:
+    """B.4 EOS/EoT suppression in schedulers: on for `.../llada1_5` or `strace_b44_eos_unmask` in config."""
+    model_dir = Path(model_dir).resolve()
+    cfg_path = model_dir / "config.json"
+    if not cfg_path.is_file():
+        return False
+    cfg = _read_config(model_dir)
+    if "strace_b44_eos_unmask" in cfg:
+        v = cfg["strace_b44_eos_unmask"]
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "on")
+        return bool(v)
+    return model_dir.name == "llada1_5"  # e.g. ./models/llada1_5
+
+
 class DreamSchedulersCompatWrapper(nn.Module):
-    """
-    When Dream is run through this repo's LLaDA-style schedulers, ``forward`` must
-    follow ``models.dream.generation_utils.DreamGenerationMixin._sample``: RoPE
-    ``position_ids`` (``tok_idx``) derived from the padding mask, and a one-step logits
-    alignment ``torch.cat([logits[:, :1], logits[:, :-1]], dim=1)`` for the MaskGIT
-    head. Native ``model.generate`` still uses the inner :class:`~DreamModel` and is
-    unchanged.
-    """
+    """Dream forward for schedulers: pad-derived position_ids + logits align like Dream's _sample."""
 
     def __init__(self, model: nn.Module) -> None:
         super().__init__()
@@ -99,9 +97,7 @@ def load_model(
     compile_model: bool = True,
     capture_pre_logits: bool = False,
 ):
-    """
-    Load model weights from a local directory (config + safetensors). Uses trust_remote_code for LLaDA / Dream modeling files shipped next to config.
-    """
+    """Load weights from a local dir (trust_remote_code). Dream may be wrapped for scheduler forward."""
     model_dir = Path(model_dir).resolve()
     _read_config(model_dir)
 
@@ -135,7 +131,7 @@ def load_model(
 
 
 def load_tokenizer(model_dir: str):
-    """Load tokenizer from local files (fast JSON, Dream BPE, etc.)."""
+    """Tokenizer from the same directory as the model."""
     model_dir = Path(model_dir).resolve()
     if not model_dir.is_dir():
         raise FileNotFoundError(f"Model directory not found: {model_dir}")

@@ -11,6 +11,7 @@ from load_model import (
     LLADA_DEFAULT_EOS_ID,
     LLADA_DEFAULT_EOT_ID,
     LLADA_DEFAULT_MASK_ID,
+    infer_b44_eos_unmask_safety,
     infer_diffusion_token_ids,
     load_model_and_tokenizer,
 )
@@ -37,10 +38,7 @@ def _generation_tails(
     eos_id: int,
     use_eos_harness: bool,
 ) -> List[torch.Tensor]:
-    """
-    One 1D tail tensor per batch row — same slice/truncation as ``_decode_generated_tails``,
-    before ``skip_special_tokens`` stripping.
-    """
+    """Per-row generation tails (same truncation as decode, pre `skip_special_tokens`)."""
     if not use_eos_harness:
         return [generated[b, prompt_len:].contiguous() for b in range(generated.shape[0])]
     gen_tails: List[torch.Tensor] = []
@@ -78,17 +76,7 @@ def _decode_generated_tails(
     show_original_tokens: bool = False,
     original_tokens_label: str = "",
 ) -> List[str]:
-    """
-    If ``use_eos_harness`` (default), truncate each row's generation tail at the first
-    ``eos_id`` then ``batch_decode`` (aligns with ``LLaDAEvalHarness.generate_until``).
-
-    If False (reference LLaDA-style), decode the full ``generated[:, prompt_len:]`` tail
-    without EOS truncation, like ``batch_decode(out[:, prompt_len:])`` in the upstream
-    sampling script.
-
-    If ``show_original_tokens`` is True, print each tail's full id list and a decode with
-    ``skip_special_tokens=False`` before the usual stripped decode.
-    """
+    """Decode gen tails: harness truncates at first EOS; `use_eos_harness=False` decodes full tail. Optional pre-strip dump."""
     gen_tails = _generation_tails(generated, prompt_len, eos_id, use_eos_harness)
     if show_original_tokens:
         _print_original_tokens(tokenizer, gen_tails, label=original_tokens_label)
@@ -103,6 +91,7 @@ def test_pure_diffusion(
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     use_eos_harness: bool = True,
     show_original_tokens: bool = False,
+    eos_unmask_b44: bool = False,
 ):
     """Test pure diffusion scheduler"""
     print("Generating with pure diffusion (block_length=256)...")
@@ -112,6 +101,7 @@ def test_pure_diffusion(
         block_length=256, temperature=0., remasking='confidence',
         trace_name=trace_name,intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
         mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
+        logits_eos_inf=eos_unmask_b44, confidence_eos_eot_inf=eos_unmask_b44,
     )
     pure_diffusion_time = time.time() - start_time
     print(f"Pure diffusion generation time: {pure_diffusion_time:.2f} seconds")
@@ -136,6 +126,7 @@ def test_block_diffusion(
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     use_eos_harness: bool = True,
     show_original_tokens: bool = False,
+    eos_unmask_b44: bool = False,
 ):
     """Test block diffusion scheduler"""
     print("Generating with block diffusion (block_length=32)...")
@@ -145,6 +136,7 @@ def test_block_diffusion(
         block_length=32, temperature=0., remasking='confidence',
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
         mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
+        logits_eos_inf=eos_unmask_b44, confidence_eos_eot_inf=eos_unmask_b44,
     )
     block_diffusion_time = time.time() - start_time
     print(f"Block diffusion generation time: {block_diffusion_time:.2f} seconds")
@@ -169,6 +161,7 @@ def test_top_k_confidence(
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     use_eos_harness: bool = True,
     show_original_tokens: bool = False,
+    eos_unmask_b44: bool = False,
 ):
     """Test top-k scheduler with confidence metric"""
     print("Generating with top-k (confidence metric, block_length=256)...")
@@ -180,6 +173,7 @@ def test_top_k_confidence(
         block_length=256, temperature=0., top_k=1, metric='confidence',
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
         mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
+        logits_eos_inf=eos_unmask_b44, confidence_eos_eot_inf=eos_unmask_b44,
     )
     top_k_time = time.time() - start_time
     print(f"Top-k generation time: {top_k_time:.2f} seconds")
@@ -204,6 +198,7 @@ def test_top_k_margin(
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     use_eos_harness: bool = True,
     show_original_tokens: bool = False,
+    eos_unmask_b44: bool = False,
 ):
     """Test top-k scheduler with margin metric"""
     print("Generating with top-k (margin metric, block_length=256)...")
@@ -213,6 +208,7 @@ def test_top_k_margin(
         block_length=256, temperature=0., top_k=1, metric='top_margin',
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
         mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
+        logits_eos_inf=eos_unmask_b44, confidence_eos_eot_inf=eos_unmask_b44,
     )
     top_k_time = time.time() - start_time
     print(f"Top-k generation time: {top_k_time:.2f} seconds")
@@ -237,6 +233,7 @@ def test_fhs(
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     use_eos_harness: bool = True,
     show_original_tokens: bool = False,
+    eos_unmask_b44: bool = False,
 ):
     """Test FHS scheduler"""
     print("Generating with FHS (steps=256)...")
@@ -246,6 +243,7 @@ def test_fhs(
         gen_length=256, temperature=1.0, pass_time_to_model=True,
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
         mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
+        logits_eos_inf=eos_unmask_b44, confidence_eos_eot_inf=eos_unmask_b44,
     )
     fhs_time = time.time() - start_time
     print(f"FHS generation time: {fhs_time:.2f} seconds")
@@ -269,6 +267,7 @@ def test_eb_sampler(
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     use_eos_harness: bool = True,
     show_original_tokens: bool = False,
+    eos_unmask_b44: bool = False,
 ):
     """Test EB sampler scheduler"""
     print("Generating with EB_sampler (confidence metric, block_length=256)...")
@@ -278,6 +277,7 @@ def test_eb_sampler(
         block_length=256, gamma=0.1, E='confidence', temperature=0.,
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
         mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
+        logits_eos_inf=eos_unmask_b44, confidence_eos_eot_inf=eos_unmask_b44,
     )
     eb_sampler_time = time.time() - start_time
     print(f"EB_sampler generation time: {eb_sampler_time:.2f} seconds")
@@ -302,6 +302,7 @@ def test_dus(
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     use_eos_harness: bool = True,
     show_original_tokens: bool = False,
+    eos_unmask_b44: bool = False,
 ):
     """Test DUS scheduler"""
     print("Generating with DUS (dilated schedule, block_length=16)...")
@@ -311,6 +312,7 @@ def test_dus(
         block_length=16, temperature=0., remasking='confidence', scheduler='dilated',
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
         mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
+        logits_eos_inf=eos_unmask_b44, confidence_eos_eot_inf=eos_unmask_b44,
     )
     dus_time = time.time() - start_time
     print(f"DUS generation time: {dus_time:.2f} seconds")
@@ -335,6 +337,7 @@ def test_fdm(
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     use_eos_harness: bool = True,
     show_original_tokens: bool = False,
+    eos_unmask_b44: bool = False,
 ):
     """Test FDM scheduler"""
     print("Generating with FDM (steps=256, block_length=64)...")
@@ -343,6 +346,7 @@ def test_fdm(
         model, input_ids, attention_mask, steps=256, gen_length=256, block_length=64,
         trace_name=trace_name, intervention_mode=intervention_mode, intervention_steps=intervention_steps, intervention_k=intervention_k,
         mask_id=mask_id, eos_id=eos_id, eot_id=eot_id, use_eos_harness=use_eos_harness,
+        logits_eos_inf=eos_unmask_b44, confidence_eos_eot_inf=eos_unmask_b44,
     )
     fdm_time = time.time() - start_time
     print(f"FDM generation time: {fdm_time:.2f} seconds")
@@ -522,6 +526,8 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
                 tokenizer.padding_side = "left"
             _mid, _eos, _eot = infer_diffusion_token_ids(model_dir)
             assert tokenizer.pad_token_id != _mid, "pad token must differ from [MASK] for batched tests"
+            if infer_b44_eos_unmask_safety(model_dir):
+                print("B.4 EOS unmask safety: on (LLaDA 1.5 / strace_b44_eos_unmask)")
             print(
                 f"Running batch tests (batch_size={batch_size}, model={mlabel}, "
                 f"tracing={'on' if trace_name_base else 'off'})..."
@@ -597,6 +603,9 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
         print(f"\n{'=' * 60}\nModel: {model_dir}  ({mlabel})\n{'=' * 60}\n")
         model, tokenizer = load_model_and_tokenizer(model_dir, device=device, compile_model=False)
         mask_id, eos_id, eot_id = infer_diffusion_token_ids(model_dir)
+        b44 = infer_b44_eos_unmask_safety(model_dir)
+        if b44:
+            print("B.4 EOS unmask safety: on (LLaDA 1.5 / strace_b44_eos_unmask)")
 
         if tokenizer.padding_side != 'left':
             tokenizer.padding_side = 'left'
@@ -631,6 +640,7 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
                     mask_id=mask_id, eos_id=eos_id, eot_id=eot_id,
                     use_eos_harness=use_eos_harness,
                     show_original_tokens=show_original_tokens,
+                    eos_unmask_b44=b44,
                 )
                 results.append((label, output))
             except Exception as e:

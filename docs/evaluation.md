@@ -7,6 +7,8 @@ STrace plugs into the **lm-evaluation-harness** with a custom `llada` / `llada1_
 
 Config defaults: `config/config.yaml`. Override on the CLI: `task_name=gsm8k mode=pd batch_size=4`.
 
+**LLaDA 1.5:** when `model` points at `./models/llada1_5` (or any checkpoint whose directory name is `llada1_5`), the harness passes that path into `schedulers.generate`, which turns on B.4-style EOS/EoT suppression during unmasking (`load_model.infer_b44_eos_unmask_safety`) so generation matches the smoke tests. Other `model` directories are unchanged. Optional `config.json` override: `strace_b44_eos_unmask`. Background: [LLaDA 1.5 sampling (B.4)](llada1_5-sampling.md).
+
 ---
 
 ## `eval.sh`
