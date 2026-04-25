@@ -19,6 +19,7 @@ _OFFLINE_EVAL_DEFAULTS = {
     "model_path": None,
     "ntf_conf_low": 0.2,
     "ntf_conf_high": 0.8,
+    "ntf_first_non_eos": False,
     "device": "cuda",
     "w": None,
     "wandb_name": "cst-eval",
@@ -52,6 +53,11 @@ def _run_offline_eval(cfg: DictConfig) -> int:
         alt = resolve_train_best_in_dir(ckp.parent)
         if alt is not None and alt.is_file():
             ck = str(alt)
+    ntf_1st = ev.get("ntf_first_non_eos", _OFFLINE_EVAL_DEFAULTS["ntf_first_non_eos"])
+    if isinstance(ntf_1st, str):
+        ntf_1st_b = ntf_1st.strip().lower() in ("true", "1", "yes", "on")
+    else:
+        ntf_1st_b = bool(ntf_1st)
     out = run_eval_on_dir(
         hidden_dir=str(ev.get("hidden_dir", _OFFLINE_EVAL_DEFAULTS["hidden_dir"])),
         ckpt_path=ck,
@@ -61,6 +67,7 @@ def _run_offline_eval(cfg: DictConfig) -> int:
         model_path=str(mp) if mp not in (None, "", "null") else None,
         ntf_conf_low=float(ev.get("ntf_conf_low", 0.2)),
         ntf_conf_high=float(ev.get("ntf_conf_high", 0.8)),
+        ntf_first_non_eos=ntf_1st_b,
     )
     print(OmegaConf.to_yaml(out))
     use_wb = ev.get("wandb")

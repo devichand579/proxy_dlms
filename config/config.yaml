@@ -40,6 +40,8 @@ cst_checkpoint: null  # e.g. outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_tr
 cst_config_path: null  # null = use config/cst.yaml ``cst:`` block for architecture
 cst_ntf_conf_low: 0.2
 cst_ntf_conf_high: 0.8
+# NTF: if true, match argmax with EOS masked out (first non-EOS) on teacher and substitute; else raw top-1
+cst_ntf_first_non_eos: false
 # Buffer hiddens until this on-disk size, then CST eval + delete (same idea as training ``target_staging_gb``)
 cst_target_staging_gb: 1.0
 

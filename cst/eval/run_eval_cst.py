@@ -36,6 +36,8 @@ def evaluate_chunk_file(
     base_model: Optional[torch.nn.Module] = None,
     ntf_conf_low: float = 0.2,
     ntf_conf_high: float = 0.8,
+    ntf_first_non_eos: bool = False,
+    eos_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """NMSE, L0, cos, TC on one chunk; NTF and masks if base_model is given."""
     H, meta, segs = load_chunk_H(chunk_path)
@@ -151,7 +153,12 @@ def evaluate_chunk_file(
             logits_t = logits_from_prelogit_hidden(base_model, tgt)
             logits_c = logits_from_prelogit_hidden(base_model, H_hat)
             ntf = compute_ntf_logits(
-                logits_t, logits_c, conf_low=ntf_conf_low, conf_high=ntf_conf_high
+                logits_t,
+                logits_c,
+                conf_low=ntf_conf_low,
+                conf_high=ntf_conf_high,
+                ntf_first_non_eos=ntf_first_non_eos,
+                eos_id=eos_id,
             )
             if not math.isnan(ntf):
                 ntf_list.append(ntf)
@@ -162,6 +169,8 @@ def evaluate_chunk_file(
                     conf_low=ntf_conf_low,
                     conf_high=ntf_conf_high,
                     token_mask=u_tgt,
+                    ntf_first_non_eos=ntf_first_non_eos,
+                    eos_id=eos_id,
                 )
                 ntm = compute_ntf_logits(
                     logits_t,
@@ -169,6 +178,8 @@ def evaluate_chunk_file(
                     conf_low=ntf_conf_low,
                     conf_high=ntf_conf_high,
                     token_mask=m_tgt,
+                    ntf_first_non_eos=ntf_first_non_eos,
+                    eos_id=eos_id,
                 )
                 if _ok(ntu):
                     ntf_u_list.append(ntu)
@@ -267,12 +278,15 @@ def run_eval_on_dir(
     model_path: str | None = None,
     ntf_conf_low: float = 0.2,
     ntf_conf_high: float = 0.8,
+    ntf_first_non_eos: bool = False,
+    eos_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Evaluate all ``*.pt`` under ``hidden_dir``; return per-file list and mean ``summary``."""
     dev = torch.device(device)
     base_model: Optional[torch.nn.Module] = None
+    eos_id_for_ntf: Optional[int] = eos_id
     if model_path:
-        from load_model import load_model
+        from load_model import infer_diffusion_token_ids, load_model
 
         base_model = load_model(
             str(model_path),
@@ -281,6 +295,8 @@ def run_eval_on_dir(
             capture_pre_logits=False,
         )
         base_model.eval()
+        if eos_id_for_ntf is None and ntf_first_non_eos:
+            _mid, eos_id_for_ntf, _eot = infer_diffusion_token_ids(str(model_path))
     cst_bank = CSTBank(
         max_steps=int(cfg_bank["max_steps"]),
         d=int(cfg_bank["d_model"]),
@@ -310,6 +326,8 @@ def run_eval_on_dir(
             base_model=base_model,
             ntf_conf_low=ntf_conf_low,
             ntf_conf_high=ntf_conf_high,
+            ntf_first_non_eos=ntf_first_non_eos,
+            eos_id=eos_id_for_ntf,
         )
         per_file.append(m)
         merge_eval_file_into_agg(agg, m)

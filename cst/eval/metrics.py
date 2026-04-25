@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import torch
 
@@ -51,14 +51,35 @@ def compute_l0(A: torch.Tensor, token_mask: Optional[torch.Tensor] = None) -> fl
     return per[token_mask].mean().item()
 
 
+def _argmax_excluding_token_ids(
+    logits: torch.Tensor, exclude_ids: Optional[Sequence[int]]
+) -> torch.Tensor:
+    """Argmax over vocab, optionally setting given token ids to -inf (e.g. first non-EOS)."""
+    if not exclude_ids:
+        return logits.argmax(dim=-1)
+    lf = logits.float().clone()
+    for tid in exclude_ids:
+        ti = int(tid)
+        if 0 <= ti < lf.shape[-1]:
+            lf[..., ti] = float("-inf")
+    return lf.argmax(dim=-1)
+
+
 def compute_ntf_logits(
     logits_teacher: torch.Tensor,
     logits_substitute: torch.Tensor,
     conf_low: float = 0.2,
     conf_high: float = 0.8,
     token_mask: Optional[torch.Tensor] = None,
+    *,
+    ntf_first_non_eos: bool = False,
+    eos_id: Optional[int] = None,
 ) -> float:
-    """Argmax match where teacher confidence is in band; optional extra mask ``[B,L]``."""
+    """Argmax match on positions where teacher max-prob is in (conf_low, conf_high). Uncertainty from full softmax.
+
+    If ``ntf_first_non_eos`` and ``eos_id`` is set, compare argmax on logits with ``eos_id`` masked to -inf
+    (same for teacher and substitute) so NTF is not driven only by agreement on EOS.
+    """
     probs = torch.softmax(logits_teacher.float(), dim=-1)
     conf = probs.max(dim=-1).values
     uncertain = (conf > conf_low) & (conf < conf_high)
@@ -66,7 +87,10 @@ def compute_ntf_logits(
         uncertain = uncertain & token_mask
     if uncertain.sum() == 0:
         return float("nan")
-    match = (logits_teacher.argmax(dim=-1) == logits_substitute.argmax(dim=-1)).float()
+    excl = (int(eos_id),) if ntf_first_non_eos and eos_id is not None else None
+    pred_t = _argmax_excluding_token_ids(logits_teacher, excl)
+    pred_s = _argmax_excluding_token_ids(logits_substitute, excl)
+    match = (pred_t == pred_s).float()
     return match[uncertain].mean().item()
 
 
