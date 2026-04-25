@@ -73,6 +73,15 @@ train:
   trace_name: cst_collect
   wandb: true
   wandb_name: cst-train
+  # After a full run: push ``cst_*_train_best.pt`` and ``cst_*_train_state.json`` to a Hugging Face bucket
+  # (https://huggingface.co/docs/hub/buckets), then delete local latest/best/state to save disk.
+  # Requires ``huggingface-cli login`` or ``HF_TOKEN`` with bucket write access.
+  push_best_to_hf_bucket: false
+  hf_bucket_id: devichand/strace
+  hf_bucket_path_prefix: ""
+  delete_local_checkpoints_after_hf_push: true
+  # Optional: explicit token string; default uses the Hub cached login / ``HF_TOKEN``.
+  hf_token: null
 
 hydra:
   run:

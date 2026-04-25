@@ -45,6 +45,8 @@ To avoid clobbering runs, **CST training checkpoints** and **collect staging** `
 - `cst_..._train_best.pt` — best mean loss so far  
 - `cst_..._train_state.json` — best-loss bookkeeping  
 
+Optional: after a **full** training run, set **`train.push_best_to_hf_bucket`** (see `config/cst.yaml`) to upload the best checkpoint and state json to a [Hugging Face bucket](https://huggingface.co/docs/hub/buckets) (e.g. `devichand/strace`), then delete the local `latest` / `best` / `state` files to free disk. Requires a Hub token with write access to the bucket.
+
 Checkpoint **`.pt`** files store float tensors in **bfloat16** to save space; loading promotes them to float32 for the CST module, optimizer, and ramp.
 
 **Resume (weights):** `train.resume_from_latest=true` loads the matching `*_train_latest.pt`, or `cst_latest.pt` if you still have that filename from an older run. You can set **`train.resume_checkpoint`** to an explicit path regardless of naming style.
