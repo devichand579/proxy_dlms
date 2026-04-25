@@ -198,7 +198,7 @@ class GenerationTrace:
             prompt=_list_to_tensor(trace_dict.get("prompt"), dtype=torch.long) if trace_dict.get("prompt") is not None else None,
             final_sequence=_list_to_tensor(trace_dict.get("final_sequence"), dtype=torch.long) if trace_dict.get("final_sequence") is not None else None,
             step_traces=[StepTrace.from_dict(st) for st in trace_dict.get("step_traces", [])],
-            unmasking_order=trace_dict.get("unmasking_order", {}),
+            unmasking_order={int(k): v for k, v in trace_dict.get("unmasking_order", {}).items()},
             start_time=trace_dict.get("start_time"),
             end_time=trace_dict.get("end_time")
         )
@@ -252,6 +252,7 @@ class TracingContext:
         self.trace_name = trace_name
         self.base_dir = base_dir
         self._saved_steps = 0  # Track how many steps have been saved
+        self._total_flushed = 0  # Absolute step count across all flushes (for unique filenames)
 
         # Performance options
         self.save_predictions = save_predictions
@@ -433,21 +434,24 @@ class TracingContext:
         if not steps_to_save:
             return
         
-        # Create incremental save file
-        inc_filepath = os.path.join(self.base_dir, f"{self.trace_name}_steps_{self._saved_steps}_{len(self.trace.step_traces)}.json")
+        # Create incremental save file — use absolute step count so filenames are unique across flushes
+        n_new = len(steps_to_save)
+        inc_filepath = os.path.join(self.base_dir, f"{self.trace_name}_steps_{self._total_flushed}_{self._total_flushed + n_new}.json")
         os.makedirs(self.base_dir, exist_ok=True)
-        
+
         steps_data = [st.to_dict() for st in steps_to_save]
         with open(inc_filepath, 'w') as f:
             json.dump(steps_data, f, indent=2)
-        
+
+        self._total_flushed += n_new
+
         # Delete saved step traces from memory if requested
         if clear_memory:
             del self.trace.step_traces[self._saved_steps:]
-            
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        
+
         self._saved_steps = len(self.trace.step_traces)
 
 def create_intervention_hook(
