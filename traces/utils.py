@@ -7,12 +7,11 @@ import numpy as np
 
 def _is_tensor_like(obj):
     """Check if object is tensor-like without using isinstance to avoid recursion."""
-    # Avoid hasattr, isinstance, and attribute access that could trigger recursion
     try:
         obj_type_name = type(obj).__name__
         obj_module = type(obj).__module__
         return obj_type_name == 'Tensor' and obj_module == 'torch'
-    except:
+    except Exception:
         return False
 
 
@@ -24,16 +23,10 @@ def extract_tensor_value(value, device=None, dtype=torch.long):
             val_item = value.item()
             val_tensor = value.unsqueeze(0) if device is None else torch.tensor([val_item], device=device, dtype=dtype)
         elif value.numel() == 1:
-            if value.dim() == 0:
-                val_item = value.item()
-                val_tensor = value.unsqueeze(0)
-            else:
-                val_item = value[0].item() if value[0].dim() == 0 else value.item()
-                val_tensor = value
-            if device is not None:
-                val_tensor = val_tensor.to(device)
+            val_item = value[0].item()
+            val_tensor = value if device is None else value.to(device)
         elif value.numel() > 0:
-            val_item = value[0].item() if value.dim() > 0 and value[0].dim() == 0 else value[0].item()
+            val_item = value[0].item()
             val_tensor = value[0:1]
             if device is not None:
                 val_tensor = val_tensor.to(device)
@@ -61,14 +54,14 @@ def get_value_item(value, mask_id):
             if value.dim() == 0:
                 return value.item()
             elif value.numel() == 1:
-                return value[0].item() if value[0].dim() == 0 else value.item()
+                return value[0].item()
             elif value.numel() > 0:
-                return value[0].item() if value[0].dim() == 0 else value[0].item()
+                return value[0].item()
             return mask_id
         elif (isinstance(value, (int, float)) or (hasattr(type(value), '__module__') and type(value).__module__ == 'numpy')):
             return int(value)
         return mask_id
-    except:
+    except Exception:
         return mask_id
 
 def is_negative_inf(value):
@@ -83,11 +76,11 @@ def is_negative_inf(value):
         elif hasattr(value, '__float__'):
             val_float = float(value)
             return (val_float == float('-inf')) or (val_float < -1e10)
-    except:
+    except Exception:
         try:
             if isinstance(value, (int, float)):
                 return value < -1e10
-        except:
+        except Exception:
             pass
     return False
 

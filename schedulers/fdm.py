@@ -24,7 +24,7 @@ else:
         return lambda x: x
 
 
-@ torch.no_grad()
+@torch.no_grad()
 def _global_confidence_expected_logp(model, x_hyp, attention_mask, mask_id,
                                      block_start=None, block_end=None,
                                      eos_id=None, eot_id=None,
@@ -170,7 +170,7 @@ def _fdm_single_step(
     x[b, chosen_pos] = x0[b, chosen_pos]
 
 
-@ torch.no_grad()
+@torch.no_grad()
 @trace_scheduler()  # tracing decorator
 def generate_fdm(
     model,

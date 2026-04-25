@@ -134,7 +134,7 @@ def merge_last_level(levels: List[List[int]]) -> List[List[int]]:
     return levels
 
 
-@ torch.no_grad()
+@torch.no_grad()
 @trace_scheduler()  # tracing decorator
 def generate_dus(
     model,

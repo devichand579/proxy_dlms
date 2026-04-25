@@ -6,6 +6,7 @@ from typing import Callable, List, Optional
 import contextvars
 import functools
 import time
+import warnings
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -373,7 +374,6 @@ class ModelTracer:
             return self._process_transfer(tensor_self, key, transfer_index, x0_trace, x)
         except Exception as e:
             if not self._in_intervention:
-                import warnings
                 warnings.warn(f"Tracing failed: {e}")
             return False
     
@@ -482,7 +482,6 @@ class ModelTracer:
         intervention_steps = kwargs.get('intervention_steps', None)
         intervention_k = kwargs.get('intervention_k', 1)
 
-        from traces.trace_generator import InterventionHook, TracingContext
         if intervention_mode is not None:
             if intervention_steps is None:
                 intervention_steps = set()
@@ -572,20 +571,17 @@ class ModelTracer:
                     try:
                         task_trace_list.append(ctx.trace.to_dict())
                     except Exception as e:
-                        import warnings
                         warnings.warn(f"Failed to append batch trace {b} to task list: {e}")
                 else:
                     if ctx.upload_to_wandb and ctx.trace_name is not None:
                         try:
                             ctx.trace.upload_to_wandb(ctx.trace_name, base_dir=ctx.base_dir)
                         except Exception as e:
-                            import warnings
                             warnings.warn(f"Failed to upload batch trace {b} to wandb: {e}")
                     if ctx.trace_name is not None and ctx.save_to_disk and not ctx.upload_to_wandb:
                         try:
                             ctx.save_trace()
                         except Exception as e:
-                            import warnings
                             warnings.warn(f"Failed to save batch trace {b} to disk: {e}")
         else:
             if final_seq is not None and self.tracing_context.trace.final_sequence is None:
@@ -595,7 +591,6 @@ class ModelTracer:
                 try:
                     task_trace_list.append(self.tracing_context.trace.to_dict())
                 except Exception as e:
-                    import warnings
                     warnings.warn(f"Failed to append trace to task list: {e}")
             else:
                 if self.tracing_context.upload_to_wandb and self.tracing_context.trace_name is not None:
@@ -605,7 +600,6 @@ class ModelTracer:
                             base_dir=self.tracing_context.base_dir
                         )
                     except Exception as e:
-                        import warnings
                         warnings.warn(f"Failed to upload trace to wandb: {e}")
                 should_save_to_disk = (
                     self.tracing_context.trace_name is not None
@@ -616,7 +610,6 @@ class ModelTracer:
                     try:
                         self.tracing_context.save_trace()
                     except Exception as e:
-                        import warnings
                         warnings.warn(f"Failed to save trace: {e}")
 
         return result

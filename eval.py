@@ -10,8 +10,6 @@ from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
-from tqdm import tqdm
-
 from load_model import load_model_and_tokenizer, infer_diffusion_token_ids
 from cst import save_hidden_records
 from cst.naming import cst_resumable_eval_agg_path, cst_eval_task_name_token, model_label_from_path, scheduler_short_from_eval_mode
@@ -406,17 +404,10 @@ class LLaDAEvalHarness(LM):
         # Set up logger
         self.logger = setup_logger(trace_name)
 
-        # Initialize wandb if available (check if already initialized by lm-eval)
         self.use_wandb = WANDB_AVAILABLE
         if self.use_wandb:
             try:
-                # Check if wandb is already initialized (by lm-eval-harness)
-                if wandb.run is None:
-                    # Not initialized yet, will be initialized by lm-eval-harness
-                    self.use_wandb = True
-                else:
-                    # Already initialized
-                    self.use_wandb = True
+                if wandb.run is not None:
                     self.logger.info("Wandb already initialized by lm-eval-harness")
             except Exception as e:
                 self.logger.warning(f"Wandb initialization check failed: {e}, disabling wandb logging")
@@ -689,24 +680,6 @@ class LLaDAEvalHarness(LM):
 
     @torch.no_grad()
     def get_loglikelihood(self, prefix, target):
-        # seq = torch.concatenate([prefix, target])[None, :]
-        # seq = seq.repeat((self.batch_size, 1)).to(self.device)
-
-        # prompt_index = torch.arange(seq.shape[1], device=self.device) < len(prefix)
-
-        # loss_acc = []
-        # for _ in range(self.mc_num // self.batch_size):
-        #     perturbed_seq, p_mask = self._forward_process(seq, prompt_index)
-
-        #     mask_indices = perturbed_seq == self.mask_id
-
-        #     logits = self.get_logits(perturbed_seq, prompt_index)
-
-        #     loss = F.cross_entropy(logits[mask_indices], seq[mask_indices], reduction='none') / p_mask[mask_indices]
-        #     loss = loss.sum() / self.batch_size
-        #     loss_acc.append(loss.item())
-
-        # return - sum(loss_acc) / len(loss_acc)
         raise NotImplementedError
 
     @torch.no_grad()
@@ -748,37 +721,6 @@ class LLaDAEvalHarness(LM):
         return context_enc, continuation_enc
 
     def loglikelihood(self, requests):
-        # def _tokenize(e):
-        #     prefix, target = self._encode_pair(e["prefix"], e["target"])
-        #     return {
-        #         "prefix_text": e["prefix"],
-        #         "target_text": e["target"],
-        #         "prefix": prefix,
-        #         "target": target,
-        #     }
-
-        # ds = []
-        # ds = [{"prefix": req.args[0], "target": req.args[1]} for req in requests]
-        # ds = Dataset.from_list(ds)
-        # ds = ds.map(_tokenize)
-        # ds = ds.with_format("torch")
-        # prompt_len = [len(x["prefix"]) + len(x["target"]) for x in ds]
-
-        # assert max(prompt_len) <= 4096
-
-        # out = []
-        # with torch.no_grad():
-        #     for elem in tqdm(ds, desc="Computing likelihood..."):
-        #         prefix = elem["prefix"]
-        #         target = elem["target"]
-
-        #         ll = self.get_loglikelihood(prefix, target)
-
-        #         is_target_greedy_dec = self.suffix_greedy_prediction(prefix, target)
-
-        #         out.append((ll, 1.0 if is_target_greedy_dec else 0.0))
-        # torch.cuda.empty_cache()
-        # return out
         raise NotImplementedError
 
     def loglikelihood_rolling(self, requests):
