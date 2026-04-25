@@ -35,7 +35,7 @@
 # CST (optional, via eval.LLaDAEvalHarness in eval.py):
 #   --cst_checkpoint PATH         forces --capture_pre_logits true, buffers .pt to cst_target_staging_gb, eval+delete
 #   [--cst_config_path PATH]      default config/cst.yaml
-#   [--cst_ntf_conf_low HIGH]   [--cst_ntf_conf_high HIGH]  [--cst_target_staging_gb GB]
+#   [--cst_ntf_conf_low HIGH]   [--cst_ntf_conf_high HIGH]  [--cst_ntf_first_non_eos true|false]  [--cst_target_staging_gb GB]
 # Example: --capture_pre_logits true --cst_checkpoint ./outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt
 
 
@@ -73,6 +73,7 @@ CST_CHECKPOINT=""
 CST_CONFIG_PATH=""
 CST_NTF_LO=""
 CST_NTF_HI=""
+CST_NTF_FIRST_NON_EOS=""
 CST_TGB=""
 USE_EOS_HARNESS="true"
 while [[ $# -gt 0 ]]; do
@@ -166,6 +167,10 @@ while [[ $# -gt 0 ]]; do
             CST_NTF_HI="$2"
             shift 2
             ;;
+        --cst_ntf_first_non_eos)
+            CST_NTF_FIRST_NON_EOS="$2"
+            shift 2
+            ;;
         --cst_target_staging_gb)
             CST_TGB="$2"
             shift 2
@@ -203,7 +208,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Optional - Top-k: --top_k <n> for top_k scheduler (default 2, tokens to transfer per step)"
     echo "  Optional - Tracing: --tracing_enabled True to enable scheduler tracing (writes trace_outputs/<trace_name>.json)"
             echo "  Optional - Hidden states: --capture_pre_logits True [--hidden_capture_path <dir>] (default dir under outputs/ or checkpoint/hidden)"
-            echo "  Optional - CST: --cst_checkpoint <.pt> (implies capture; also --cst_config_path, --cst_target_staging_gb, --cst_ntf_conf_low/high)"
+            echo "  Optional - CST: --cst_checkpoint <.pt> (implies capture; also --cst_config_path, --cst_target_staging_gb, --cst_ntf_conf_low/high, --cst_ntf_first_non_eos)"
     echo "  Optional - SLURM: --slurm to run the eval under srun (for sbatch submissions)"
     echo "  Optional - Resumable: --resumable writes outputs/{run_id}/checkpoint.jsonl and resumes skipped samples; traces use JSONL when tracing is on. Use --run_id for custom id."
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
@@ -388,8 +393,9 @@ fi
 if [[ -n "$CST_CHECKPOINT" ]]; then
     NLO="${CST_NTF_LO:-0.2}"
     NHI="${CST_NTF_HI:-0.8}"
+    FNE="${CST_NTF_FIRST_NON_EOS:-false}"
     TGB="${CST_TGB:-1.0}"
-    MODEL_ARGS="${MODEL_ARGS},cst_checkpoint=${CST_CHECKPOINT},cst_ntf_conf_low=${NLO},cst_ntf_conf_high=${NHI},cst_target_staging_gb=${TGB}"
+    MODEL_ARGS="${MODEL_ARGS},cst_checkpoint=${CST_CHECKPOINT},cst_ntf_conf_low=${NLO},cst_ntf_conf_high=${NHI},cst_ntf_first_non_eos=${FNE},cst_target_staging_gb=${TGB}"
     if [[ -n "$CST_CONFIG_PATH" ]]; then
         MODEL_ARGS="${MODEL_ARGS},cst_config_path=${CST_CONFIG_PATH}"
     fi
@@ -420,7 +426,7 @@ if [[ "${CAPTURE_PRE_LOGITS,,}" == "true" ]]; then
     echo "  Capture pre-logit hiddens: yes (dir=${HIDDEN_DIR})"
 fi
 if [[ -n "$CST_CHECKPOINT" ]]; then
-    echo "  CST: checkpoint=${CST_CHECKPOINT} target_gb=${CST_TGB:-1.0} ntf=[$NLO,$NHI]"
+    echo "  CST: checkpoint=${CST_CHECKPOINT} target_gb=${CST_TGB:-1.0} ntf=[$NLO,$NHI] ntf_first_non_eos=${FNE}"
     [[ -n "$CST_CONFIG_PATH" ]] && echo "  CST config: ${CST_CONFIG_PATH}"
 fi
 echo "  SLURM mode (srun): ${SLURM_MODE}"

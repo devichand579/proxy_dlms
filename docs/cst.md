@@ -86,6 +86,7 @@ To **load** trained CST weights and run **per-chunk** metrics (and optional stag
 - `cst_checkpoint=/path/to/cst_<...>_train_best.pt` (match `k`/`w` to the YAML in `cst_config_path`) — this **turns on** pre-logit capture and wrapping in `eval.py` (you do not need to set `capture_pre_logits` separately)
 - Optional: `hidden_capture_path=...` (default: `outputs/<trace>/hidden` or `<output_dir>/hidden` when resumable)
 - `cst_config_path` if not default `config/cst.yaml`
+- **NTF:** `cst_ntf_conf_low` / `cst_ntf_conf_high` define the teacher–max-probability “uncertainty” band for which positions enter the metric. Optional `cst_ntf_first_non_eos=true` makes the teacher vs. substitute comparison use **argmax with `eos_id` masked to −∞** (same on both sides), so NTF is not dominated by trivial EOS-as-top-1 agreement; default `false` keeps raw top-1.
 
 **`eval.sh`** passes through CST-related flags; see `eval.sh --help` or the table in [Evaluation](evaluation.md).
 
@@ -119,7 +120,7 @@ Score a **directory of saved hidden `.pt` files** with a saved CST checkpoint (n
 python launch_cst.py mode=eval eval.hidden_dir=/path/to/hiddens eval.checkpoint=/path/to/cst_..._train_best.pt
 ```
 
-Defaults merged in `launch_cst.py` if you omit an `eval:` block in `cst.yaml`. See also `./cst.sh --mode eval --hidden_dir ... --checkpoint ...`.
+Optional `eval.ntf_first_non_eos=true` (and `eval.model_path` so EOS id can be inferred if needed) matches [lm-eval NTF](#lm-eval-with-a-cst-checkpoint) behavior. Defaults merged in `launch_cst.py` if you omit an `eval:` block in `cst.yaml`. See also `./cst.sh --mode eval --hidden_dir ... --checkpoint ...`.
 
 For **on-task** numbers with the same prompts as a benchmark, prefer **lm-eval + `cst_checkpoint`** (previous section) so `task_name` and data match.
 

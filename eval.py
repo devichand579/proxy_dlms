@@ -264,6 +264,7 @@ class LLaDAEvalHarness(LM):
         cst_config_path=None,
         cst_ntf_conf_low=0.2,
         cst_ntf_conf_high=0.8,
+        cst_ntf_first_non_eos=False,
         cst_target_staging_gb=1.0,
         use_eos_harness: bool = True,
     ):
@@ -307,6 +308,8 @@ class LLaDAEvalHarness(LM):
                 ``capture_pre_logits=true`` separately (``launch_eval.py`` does the same).
             cst_config_path: YAML with a ``cst:`` block (defaults to ``config/cst.yaml`` under project root).
             cst_ntf_conf_low, cst_ntf_conf_high: High-confidence filter for the NTF logit comparison (if enabled).
+            cst_ntf_first_non_eos: If True, NTF compares argmax after masking ``eos_id`` to -inf (teacher and substitute),
+                so agreement is not driven only by EOS as top-1. Default False (raw top-1 match).
             cst_target_staging_gb: Like training: buffer hidden ``.pt`` until this total size (decimal GB) on disk, then
                 run CST metrics on the batch and **delete** files; remainder is flushed at end of the task. lm-eval
                 generate loop is unchanged.
@@ -479,6 +482,7 @@ class LLaDAEvalHarness(LM):
         self._cst_n_chunks = 0
         self._cst_ntf_lo = float(cst_ntf_conf_low)
         self._cst_ntf_hi = float(cst_ntf_conf_high)
+        self._cst_ntf_first_non_eos = _to_bool(cst_ntf_first_non_eos)
         self._cst_checkpoint_path: str = ""
         if cst_enabled:
             if not self._capture_pre_logits or not self._hidden_capture_path:
@@ -501,9 +505,10 @@ class LLaDAEvalHarness(LM):
             self._cst_checkpoint_path = cst_s
             self._cst_agg = new_eval_aggregator()
             self.logger.info(
-                "CST eval enabled: weights=%s task_name=%s (per-dataset: align with launch_eval task_name)",
+                "CST eval enabled: weights=%s task_name=%s ntf_first_non_eos=%s (per-dataset: align with launch_eval task_name)",
                 cst_s,
                 self.task_name,
+                self._cst_ntf_first_non_eos,
             )
             gbf = float(cst_target_staging_gb)
             if gbf <= 0:
@@ -590,6 +595,8 @@ class LLaDAEvalHarness(LM):
                     base_model=self.model,
                     ntf_conf_low=self._cst_ntf_lo,
                     ntf_conf_high=self._cst_ntf_hi,
+                    ntf_first_non_eos=self._cst_ntf_first_non_eos,
+                    eos_id=self.eos_id,
                 )
                 merge_eval_file_into_agg(self._cst_agg, cst_m)
                 merge_eval_file_into_agg(seg_agg, cst_m)

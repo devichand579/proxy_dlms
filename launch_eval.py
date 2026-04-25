@@ -166,10 +166,11 @@ def run(cfg: DictConfig) -> int:
         cst_nlo = float(cfg.get("cst_ntf_conf_low", 0.2))
         cst_nhi = float(cfg.get("cst_ntf_conf_high", 0.8))
         cst_tgb = float(cfg.get("cst_target_staging_gb", 1.0))
+        cst_ntf_1st = str(_to_bool(cfg.get("cst_ntf_first_non_eos", False))).lower()
         model_args += f",cst_checkpoint={cst_ck_s}"
         if cst_config_arg:
             model_args += f",cst_config_path={cst_config_arg}"
-        model_args += f",cst_ntf_conf_low={cst_nlo},cst_ntf_conf_high={cst_nhi},cst_target_staging_gb={cst_tgb}"
+        model_args += f",cst_ntf_conf_low={cst_nlo},cst_ntf_conf_high={cst_nhi},cst_ntf_first_non_eos={cst_ntf_1st},cst_target_staging_gb={cst_tgb}"
 
     env = os.environ.copy()
     env.setdefault("HF_ALLOW_CODE_EVAL", "1")
@@ -204,8 +205,10 @@ def run(cfg: DictConfig) -> int:
         print(f"  capture_pre_logits=true hidden_capture_path={hidden_dir}")
     if cst_ck_s and cst_ck_s.lower() not in ("null", "none", ""):
         cst_tgb_p = float(cfg.get("cst_target_staging_gb", 1.0))
+        cst_fne_p = _to_bool(cfg.get("cst_ntf_first_non_eos", False))
         print(
-            f"  cst_checkpoint={cst_ck_s} cst_target_staging_gb={cst_tgb_p} (buffer .pt, eval+delete, lm-eval flow unchanged)"
+            f"  cst_checkpoint={cst_ck_s} cst_target_staging_gb={cst_tgb_p} "
+            f"cst_ntf_first_non_eos={cst_fne_p} (buffer .pt, eval+delete, lm-eval flow unchanged)"
         )
     if intervention_mode:
         print(f"  intervention: mode={intervention_mode} steps={intervention_steps} k={intervention_k}")

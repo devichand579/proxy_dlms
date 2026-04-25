@@ -123,7 +123,7 @@ python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=s
 
 Install: `pip install hydra-core hydra-submitit-launcher` (or `requirements.txt`).
 
-**Pre-logit / CST from YAML:** in `config/config.yaml`, set `capture_pre_logits: true` and optional `hidden_capture_path`. See [CST](cst.md).
+**Pre-logit / CST from YAML:** in `config/config.yaml`, set `capture_pre_logits: true` and optional `hidden_capture_path`. With `cst_checkpoint` set, optional `cst_ntf_first_non_eos` controls whether NTF uses first non-EOS argmax for the match (details: [CST](cst.md)).
 
 **EOS harness (`use_eos_harness`, default `true` in `config/config.yaml`):** when `true`, schedulers may exit early on the batch EOS stop condition and chunk decode truncates at the first EOS (legacy harness behavior). For reference LLaDA-style sampling (full step budget, `batch_decode` of the full generated tail), set **`use_eos_harness=false`** in YAML, e.g. `python launch_eval.py task_name=gsm8k mode=pd use_eos_harness=false`, or in **`eval.sh`:** `--no_eos_harness` or `--use_eos_harness false`. The same flag is passed into `LLaDAEvalHarness` via `model_args`. Scheduler smoke tests use **`--no-eos-harness`** (hyphens) on `test_schedulers.py` — see [Scheduler testing](scheduler-testing.md).
 
