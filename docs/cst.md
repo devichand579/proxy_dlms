@@ -47,7 +47,17 @@ To avoid clobbering runs, **CST training checkpoints** and **collect staging** `
 
 Checkpoint **`.pt`** files store float tensors in **bfloat16** to save space; loading promotes them to float32 for the CST module, optimizer, and ramp.
 
-**Resume:** `train.resume_from_latest=true` loads the matching `*_train_latest.pt`, or `cst_latest.pt` if you still have that filename from an older run. You can set **`train.resume_checkpoint`** to an explicit path regardless of naming style.
+**Resume (weights):** `train.resume_from_latest=true` loads the matching `*_train_latest.pt`, or `cst_latest.pt` if you still have that filename from an older run. You can set **`train.resume_checkpoint`** to an explicit path regardless of naming style.
+
+**Resume (data cursor + W&B + sampling):** After each successful **collect → train → save** segment, the checkpoint `meta` also records:
+
+- **Next collection position:** `data_next_epoch` (0-based), `data_next_batch_idx`, `data_next_segment` — so the next run can continue from the same row-batch index and segment (skipping completed work), as long as **`train.resume_data_from_checkpoint=true`** (default). Set **`train.resume_data_from_checkpoint=false`** to load only weights/optimizer/ramp and **restart** the data schedule from the beginning.
+- **W&B:** `wandb_global_step` and `wandb_run_id` so logging can use `resume=allow` and continue the same run without resetting step to zero.
+- **Row-batch fingerprint:** `train_seed`, `train_samples_per_epoch`, `train_inference_batch_size`, `train_resample_each_epoch`, `train_gsm8k_num_fewshot`, `train_arc_csqa_num_fewshot` — when **`train.resume_override_sampling=true`** (default) and **`resume_data_from_checkpoint`** is on, these values from the checkpoint **override** Hydra so `sample_uniform_batched` matches the original run even if you accidentally change YAML. Set **`train.resume_override_sampling=false`** to keep config as the source of truth.
+
+`num_epochs_checkpointed` is stored for logging if you change **`train.num_epochs`** between save and load. Checkpoints without these keys (older runs) still load weights; data position and fingerprint are ignored until the next save.
+
+**Limitation:** Resume is **segment-safe** (after a full train+checkpoint for a segment). If the process dies **during** collection or before the next checkpoint, the last good **latest** still points at the **previous** segment boundary.
 
 **Staging files** (under `train.staging_dir`):  
 `<same_token_prefix>_e{epoch}_seg{segment}_{batch:06d}.pt`
@@ -75,7 +85,7 @@ python launch_cst.py mode=train train.target_staging_gb=0.5 cst.w=8
 ./cst.sh train.target_staging_gb=2.0
 ```
 
-**Resume (YAML / CLI):** `train.resume_checkpoint=/path/to.pt` or `train.resume_from_latest=true` (and correct `train.checkpoint_dir`).
+**Resume (YAML / CLI):** `train.resume_checkpoint=/path/to.pt` or `train.resume_from_latest=true` (and correct `train.checkpoint_dir`). See **Resume (data cursor + W&B + sampling)** above for `resume_data_from_checkpoint`, `resume_override_sampling`, and fingerprint fields.
 
 ---
 
