@@ -49,6 +49,8 @@ def _run_tag_graph_only(
     mix_uniform: float,
     with_residual: bool,
     active_threshold: float,
+    output_exclude_eos: bool = False,
+    eos_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     t_steps, b, l, d = h.shape
     w = int(cst.w)
@@ -56,12 +58,17 @@ def _run_tag_graph_only(
     activations = compute_activation_list(h, cst, max_step=msteps)
     final_logits: Optional[torch.Tensor] = None
     unembed_w: Optional[torch.Tensor] = None
+    eos_for_readout: Optional[int] = eos_id
     if model_path and Path(model_path).is_dir():
-        from load_model import load_model
+        from load_model import infer_diffusion_token_ids, load_model
+
         m = load_model(model_path, device=device, capture_pre_logits=False, compile_model=False)
         h_last = h[-1, :1].to(device=device)
         lg = logits_from_prelogit_hidden(m, h_last)
         final_logits = lg.cpu()
+        if output_exclude_eos and eos_for_readout is None:
+            _mid, eos_inf, _eot = infer_diffusion_token_ids(str(model_path))
+            eos_for_readout = int(eos_inf) if eos_inf is not None else None
         try:
             unembed_w = unembedding_weight_matrix(m).float().cpu()
         except TypeError:
@@ -83,6 +90,8 @@ def _run_tag_graph_only(
         top_output_mass=top_output_mass,
         max_output_tokens=max_output_tokens,
         final_logits=final_logits,
+        output_exclude_eos=output_exclude_eos,
+        eos_id=eos_for_readout,
         unembed_weight=unembed_w,
         residual_l2=None,
         residual_d=res,
@@ -133,6 +142,8 @@ def run_tag_from_chunk(
     mix_uniform: float = 1e-4,
     with_residual: bool = False,
     active_threshold: float = 0.0,
+    output_exclude_eos: bool = False,
+    eos_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     h_cpu, meta, _ = load_chunk_H(hidden_pt)
     cst, ccfg = load_cst(cst_checkpoint, cst_config_path, device=device)
@@ -152,6 +163,8 @@ def run_tag_from_chunk(
         mix_uniform=mix_uniform,
         with_residual=with_residual,
         active_threshold=active_threshold,
+        output_exclude_eos=output_exclude_eos,
+        eos_id=eos_id,
     )
 
 
@@ -177,6 +190,8 @@ def run_tag_full(
     max_output_tokens: int = 10,
     write_html: bool = True,
     use_eos_harness: bool = True,
+    output_exclude_eos: bool = False,
+    eos_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Capture hidden trace, build TAG, write tag_graph.json and tag_view.html under out_dir."""
     out = Path(out_dir)
@@ -206,6 +221,8 @@ def run_tag_full(
         with_residual=with_residual,
         top_output_mass=top_output_mass,
         max_output_tokens=max_output_tokens,
+        output_exclude_eos=output_exclude_eos,
+        eos_id=eos_id,
     )
     g = gout["graph"]
     write_graph_json(g, out / "tag_graph.json")

@@ -25,5 +25,8 @@ influence_edge_mass: 0.98
 mix_uniform: 0.0001
 with_residual: false
 write_html: true
+# Output sinks: renormalize logits with EOS masked out (lexical readout; default false; needs model_path for logits)
+output_exclude_eos: false
+# eos_id: null  # optional override; else inferred from model_path via config.json
 # If you already have a .pt, set hidden_pt to skip generation (CLI only)
 # hidden_pt: null

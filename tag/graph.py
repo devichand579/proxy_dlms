@@ -47,6 +47,20 @@ def _nid_err(i: int, t: int) -> str:
     return f"err_{i}_{t}"
 
 
+def _logit_row_for_output_readout(
+    logits_1d: torch.Tensor,
+    *,
+    output_exclude_eos: bool,
+    eos_id: Optional[int],
+) -> torch.Tensor:
+    """1d logit row for TAG output sinks. Optionally mask EOS to -inf before softmax (renormalize over other vocab)."""
+    row = logits_1d.float().clone()
+    if output_exclude_eos and eos_id is not None:
+        e = int(eos_id)
+        if 0 <= e < row.shape[0]:
+            row[e] = float("-inf")
+    return row
+
 
 
 def _active_mask(a: torch.Tensor, thr: float = 0.0) -> torch.Tensor:
@@ -86,6 +100,8 @@ def build_tag_graph(
     top_output_mass: float = 0.95,
     max_output_tokens: int = 10,
     final_logits: Optional[torch.Tensor] = None,
+    output_exclude_eos: bool = False,
+    eos_id: Optional[int] = None,
     unembed_weight: Optional[torch.Tensor] = None,
     residual_l2: Optional[torch.Tensor] = None,
     residual_d: Optional[torch.Tensor] = None,
@@ -95,6 +111,8 @@ def build_tag_graph(
     Build input, feature, cross-step, optional output, and optional error nodes/edges.
     List index s maps to CST step t = s+1. ``V`` blocks are materialized in small submatrices only.
     With ``final_logits`` and ``unembed_weight``: out nodes and feat→out (else last-step a only).
+    If ``output_exclude_eos`` and ``eos_id`` is set, EOS is masked to -inf on each readout row before softmax so mass
+    and top tokens emphasize non-EOS structure (optional interpretability; default off).
     With ``residual_d``: err nodes and err→feat; with ``residual_l2`` only: err nodes, no err edges.
     """
     nodes: List[TAGNode] = []
@@ -308,7 +326,12 @@ def build_tag_graph(
         lg = final_logits[0, plp:].float()  # [Lr, V]
         Lr = lg.shape[0]
         for local_i, pos in enumerate(range(plp, plp + Lr)):
-            probs = torch.softmax(lg[local_i], dim=-1)
+            row = _logit_row_for_output_readout(
+                lg[local_i],
+                output_exclude_eos=output_exclude_eos,
+                eos_id=eos_id,
+            )
+            probs = torch.softmax(row, dim=-1)
             sorted_p, sorted_idx = torch.sort(probs, descending=True)
             c = 0.0
             out_ids: List[int] = []
@@ -340,6 +363,16 @@ def build_tag_graph(
                 logit_p_tokens = [{"id": int(out_ids[0]), "p": float(out_probs[0])}]
             p_sink = float(sum(x["p"] for x in logit_p_tokens))
             onid = _nid_out(pos)
+            out_meta: Dict[str, Any] = {
+                "top_ids": out_ids,
+                "p_mass": c,
+                "logit_p_tokens": logit_p_tokens,
+                "p_sink": p_sink,
+                "role": "logits_readout",
+            }
+            if output_exclude_eos and eos_id is not None:
+                out_meta["output_exclude_eos"] = True
+                out_meta["eos_id"] = int(eos_id)
             add_node(
                 TAGNode(
                     onid,
@@ -348,13 +381,7 @@ def build_tag_graph(
                     n_t + 1,
                     -1,
                     label=f"out@{pos}",
-                    meta={
-                        "top_ids": out_ids,
-                        "p_mass": c,
-                        "logit_p_tokens": logit_p_tokens,
-                        "p_sink": p_sink,
-                        "role": "logits_readout",
-                    },
+                    meta=out_meta,
                 )
             )
             if n_t < 1:

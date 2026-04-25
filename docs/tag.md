@@ -45,6 +45,8 @@ For **full** capture runs (`--prompt` + `--model_path`), optional **`--no_eos_ha
 
 Use `--no_logits` with `--hidden_pt` if you do not need output sink nodes (saves loading the backbone for a logits pass).
 
+**Output sinks and EOS (interpretability):** by default, each `out@pos` node uses a **full-vocab** softmax of last-step logits. If EOS soaks mass and you care about **lexical** top tokens, enable **`--output_exclude_eos`** (CLI) or `output_exclude_eos=true` in `config/tag.yaml` / `launch_tag.py` — the readout **masks `eos_id` to \(-\infty\)** on that logit row before softmax (same renormalization idea as `cst_ntf_first_non_eos` for NTF). `eos_id` defaults to the checkpoint’s `eos_token_id` from `model_path` unless you set `eos_id=...` explicitly.
+
 ## Outputs
 
 - `tag_trace.pt` — one `save_hidden_records` chunk (full run only).

@@ -54,6 +54,17 @@ def main() -> int:
     p.add_argument("--with_residual", action="store_true", help="Add error-typed nodes (residual L2 per step)")
     p.add_argument("--no_html", action="store_true")
     p.add_argument("--no_logits", action="store_true", help="Do not load model for last-step logits (no output sinks)")
+    p.add_argument(
+        "--output_exclude_eos",
+        action="store_true",
+        help="TAG output nodes: mask EOS in logits before softmax (renormalize); needs model for logits; eos_id from model unless --eos_id",
+    )
+    p.add_argument(
+        "--eos_id",
+        type=int,
+        default=None,
+        help="Optional EOS token id for --output_exclude_eos (overrides model config).",
+    )
     args = p.parse_args()
     mpath = args.model_path
     if args.hidden_pt and Path(args.hidden_pt).is_file():
@@ -68,6 +79,8 @@ def main() -> int:
             influence_node_mass=args.influence_node_mass,
             influence_edge_mass=args.influence_edge_mass,
             with_residual=args.with_residual,
+            output_exclude_eos=bool(args.output_exclude_eos),
+            eos_id=args.eos_id,
         )
         out = Path(args.out_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -107,6 +120,8 @@ def main() -> int:
         with_residual=args.with_residual,
         write_html=not args.no_html,
         use_eos_harness=not args.no_eos_harness,
+        output_exclude_eos=bool(args.output_exclude_eos),
+        eos_id=args.eos_id,
     )
     print(json.dumps(r.get("paths", {}), indent=0))
     return 0
