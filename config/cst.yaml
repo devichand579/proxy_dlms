@@ -34,6 +34,12 @@ train:
   # (or legacy cst_latest.pt) under checkpoint_dir
   resume_checkpoint: null
   resume_from_latest: false
+  # When resuming from a train-latest .pt, also restore row-batch cursor (epoch/batch/segment) and W&B step/run id.
+  # Set false to load weights/optimizer/ramp only and start data from the beginning (legacy).
+  resume_data_from_checkpoint: true
+  # If true, when resume_data_from_checkpoint is true, train.seed / samples_per_epoch / few-shot / resample
+  # are taken from the checkpoint (must match the run that produced the data cursor). Set false to keep YAML.
+  resume_override_sampling: true
   # Draw samples_per_epoch row once (train.seed) and reuse the same batches for every epoch when
   # resample_each_epoch=false. Segments within an epoch still follow target_staging_gb / max_collect_batches.
   # Set resample_each_epoch=true to resample each epoch (legacy; seed offsets by epoch).

@@ -373,16 +373,9 @@ class LLaDAEvalHarness(LM):
         self.task_name = task_name if task_name is not None else os.environ.get("TASK_NAME", "unknown")
         self.resumable = _to_bool(resumable) if resumable is not None else False
         self.output_dir = str(output_dir) if output_dir else os.environ.get("CHECKPOINT_DIR", "")
-        # Resumable: persist wandb run id on first run for resume
-        if self.resumable and self.output_dir and WANDB_AVAILABLE and wandb.run is not None:
-            os.makedirs(self.output_dir, exist_ok=True)
-            wandb_id_file = os.path.join(self.output_dir, ".wandb_id")
-            if not os.path.exists(wandb_id_file):
-                try:
-                    with open(wandb_id_file, "w") as f:
-                        f.write(wandb.run.id)
-                except Exception:
-                    pass
+        # Resumable: persist wandb run id for ``launch_eval`` / ``--wandb_args resume=allow,id=...``
+        # (W&B is often inited *after* the model, so this also runs in ``generate_until``.)
+        self._maybe_persist_wandb_run_id()
         if self.tokenizer.padding_side != 'left':
             self.tokenizer.padding_side = 'left'
 
@@ -524,6 +517,22 @@ class LLaDAEvalHarness(LM):
             self._cst_pending_paths = []
             self._cst_pending_bytes = 0
             self._cst_segment_idx = 0
+
+    def _maybe_persist_wandb_run_id(self) -> None:
+        """Write ``output_dir/.wandb_id`` on first success so a later process can pass ``resume=allow,id=...``."""
+        if not self.resumable or not self.output_dir or not WANDB_AVAILABLE or wandb is None:
+            return
+        if wandb.run is None:
+            return
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            wandb_id_file = os.path.join(self.output_dir, ".wandb_id")
+            if not os.path.exists(wandb_id_file):
+                with open(wandb_id_file, "w", encoding="utf-8") as f:
+                    f.write(wandb.run.id)
+        except OSError as e:
+            log = logging.getLogger(__name__)
+            log.warning("Could not write .wandb_id for W&B resume: %s", e)
 
     def _cst_load_resume_agg(self) -> None:
         """Load resumable CST scalar aggregate from disk if present."""
@@ -812,6 +821,8 @@ class LLaDAEvalHarness(LM):
                 self.logger.info(f"Resuming: loaded {len(completed_from_checkpoint)} completed samples from checkpoint")
             checkpoint_writer = open(checkpoint_path, "a")
             self._cst_load_resume_agg()
+        # W&B inits after model construction; persist run id for next resume once the run is active
+        self._maybe_persist_wandb_run_id()
 
         # Get prompt lengths and group request indices by length bucket for better batching
         question_texts = [req.args[0] for req in requests]
