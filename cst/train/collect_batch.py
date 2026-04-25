@@ -60,6 +60,7 @@ def collect_hidden_batch_loaded(
     max_prompt_length: int = 512,
     trace_name: Optional[str] = None,
     staging_name_token: Optional[str] = None,
+    use_eos_harness: bool = True,
 ) -> Dict[str, Any]:
     """One generate pass; writes ``save_hidden_records`` payload to ``out_path``."""
     mode, strategy = _mode_map(mode_key)
@@ -94,6 +95,7 @@ def collect_hidden_batch_loaded(
         mask_id=mask_id,
         eos_id=eos_id,
         eot_id=eot_id,
+        use_eos_harness=use_eos_harness,
     )
 
     if not hasattr(model, "records"):
@@ -176,6 +178,7 @@ def collect_hidden_until_size_gb_from_row_batches(
     trace_name_prefix: str = "cst_collect",
     max_batches: int = 50_000,
     staging_name_token: Optional[str] = None,
+    use_eos_harness: bool = True,
 ) -> Tuple[List[str], int, Dict[str, Any]]:
     """Stream row batches to ``.pt`` files until ``target_gb`` (or batches exhausted). Returns paths, next index, summary."""
     target_b = _bytes_from_gb(target_gb)
@@ -209,6 +212,7 @@ def collect_hidden_until_size_gb_from_row_batches(
             max_prompt_length=max_prompt_length,
             trace_name=f"{trace_name_prefix}_{b}",
             staging_name_token=staging_name_token,
+            use_eos_harness=use_eos_harness,
         )
         paths.append(str(out_path))
         total_bytes += out_path.stat().st_size

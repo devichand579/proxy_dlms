@@ -38,6 +38,12 @@ BATCH OPTIONS:
   --batch                     Run batch execution tests only (batched generation)
   --batch_size N              Batch size for --batch tests (default: 2)
 
+EOS HARNESS (pass-through; same as: python test_schedulers.py --no-eos-harness):
+  --no-eos-harness            Full step budget + full-tail decode (reference LLaDA-style; no EOS early stop)
+
+DEBUG (pass-through; python test_schedulers.py --show-original-tokens):
+  --show-original-tokens      Print full token id lists and decode (skip_special_tokens=False) before stripped decode
+
 MODEL OPTIONS:
   --model_path DIR            Local checkpoint directory; repeat to test several models
                               (e.g. ./models/llada and ./models/dream). Default: ./models/llada

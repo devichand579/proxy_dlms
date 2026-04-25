@@ -140,6 +140,7 @@ def generate_fhs_extrapolation(
     intervention_mode=None,
     intervention_steps=None,
     intervention_k=1,
+    use_eos_harness: bool = True,
 ):
     '''
     Args:
@@ -158,6 +159,7 @@ def generate_fhs_extrapolation(
         intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
         intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
         intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
+        use_eos_harness: If False, never return early on EOS (full step budget).
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -247,7 +249,7 @@ def generate_fhs_extrapolation(
                 )
 
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
-            if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
+            if use_eos_harness and check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
                 return x, steps_taken  # Stop generation early
 
         # Save previous network output for next extrapolation
@@ -282,6 +284,7 @@ def generate_fhs_predictor_corrector(
     intervention_mode=None,
     intervention_steps=None,
     intervention_k=1,
+    use_eos_harness: bool = True,
 ):
     '''
     Args:
@@ -300,6 +303,7 @@ def generate_fhs_predictor_corrector(
         intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
         intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
         intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
+        use_eos_harness: If False, never return early on EOS (full step budget).
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -384,7 +388,7 @@ def generate_fhs_predictor_corrector(
                 del logits_corr, mu_corr
 
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
-            if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
+            if use_eos_harness and check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
                 return x, steps_taken  # Stop generation early
 
         # Clear intermediate tensors to free memory
@@ -414,6 +418,7 @@ def generate_fhs(
     intervention_mode=None,
     intervention_steps=None,
     intervention_k=1,
+    use_eos_harness: bool = True,
 ):
     '''
     Matches paper recommendation:
@@ -436,6 +441,7 @@ def generate_fhs(
         intervention_mode: Optional intervention mode. "drop" to prevent tokens from being unmasked, "swap" to swap tokens.
         intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
         intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
+        use_eos_harness: If False, never return early on EOS (full step budget).
     '''
     trace_kw = dict(
         trace_name=trace_name,
@@ -443,6 +449,7 @@ def generate_fhs(
         intervention_mode=intervention_mode,
         intervention_steps=intervention_steps,
         intervention_k=intervention_k,
+        use_eos_harness=use_eos_harness,
     )
     if steps <= 128:
         return generate_fhs_extrapolation(

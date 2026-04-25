@@ -17,6 +17,8 @@ Implements a **prompt-specific, trajectory-specific** directed graph on top of t
   --model_path ./models/llada \
   --out_dir outputs/tag_demo \
   --prompt "Your question here"
+# Optional: match reference LLaDA-style capture (no EOS early stop / full-tail decode; same idea as eval `use_eos_harness=false`):
+#   add --no_eos_harness   (see `python -m tag --help`)
 ```
 
 Or Hydra only:
@@ -38,6 +40,8 @@ python -m tag \
   --hidden_pt path/to/file.pt \
   --out_dir outputs/tag_from_pt
 ```
+
+For **full** capture runs (`--prompt` + `--model_path`), optional **`--no_eos_harness`** turns off the EOS “harness” in the shared scheduler path (aligns with [Evaluation](evaluation.md) `use_eos_harness=false`).
 
 Use `--no_logits` with `--hidden_pt` if you do not need output sink nodes (saves loading the backbone for a logits pass).
 

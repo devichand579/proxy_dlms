@@ -14,6 +14,8 @@ out_dir: outputs/tag
 mode_key: pd
 gen_length: 256
 steps: 256
+# Optional reference-style gen (see tag.cli --no_eos_harness); capture.py defaults to true
+# use_eos_harness: true
 device: cuda
 prune_p: 0.1
 # influence (default) | bfs (per-destination in-edges) | none

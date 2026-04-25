@@ -74,6 +74,7 @@ CST_CONFIG_PATH=""
 CST_NTF_LO=""
 CST_NTF_HI=""
 CST_TGB=""
+USE_EOS_HARNESS="true"
 while [[ $# -gt 0 ]]; do
     case $1 in
         --batch_size)
@@ -168,6 +169,14 @@ while [[ $# -gt 0 ]]; do
         --cst_target_staging_gb)
             CST_TGB="$2"
             shift 2
+            ;;
+        --use_eos_harness)
+            USE_EOS_HARNESS="$2"
+            shift 2
+            ;;
+        --no_eos_harness)
+            USE_EOS_HARNESS="false"
+            shift
             ;;
         *)
             echo "Unknown option: $1"
@@ -352,7 +361,7 @@ else
 fi
 
 # Build model_args (base args + optional intervention params + checkpoint paths when resumable)
-MODEL_ARGS="model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},strategy=${STRATEGY},top_k=${TOP_K},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME},trace_name=${OUTPUT_SUFFIX}"
+MODEL_ARGS="model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},strategy=${STRATEGY},top_k=${TOP_K},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME},trace_name=${OUTPUT_SUFFIX},use_eos_harness=${USE_EOS_HARNESS}"
 if [[ "$RESUMABLE" == "true" ]]; then
     MODEL_ARGS="${MODEL_ARGS},resumable=true,output_dir=${CHECKPOINT_DIR}"
 fi
@@ -398,6 +407,7 @@ echo "  Steps: $STEPS"
 echo "  Block Length: $BLOCK_LENGTH"
 echo "  Top-k: $TOP_K"
 echo "  Compile Model: $COMPILE_MODEL"
+echo "  use_eos_harness: $USE_EOS_HARNESS (false = full steps + full-tail decode, reference LLaDA-style)"
 echo "  Num Fewshot: $NUM_FEWSHOT"
 if [[ -n "$INTERVENTION_MODE" ]]; then
     echo "  Intervention Mode: $INTERVENTION_MODE"

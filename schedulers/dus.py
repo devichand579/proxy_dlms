@@ -158,6 +158,7 @@ def generate_dus(
     intervention_mode=None,
     intervention_steps=None,
     intervention_k=1,
+    use_eos_harness: bool = True,
 ):
     '''
     Args:
@@ -184,6 +185,8 @@ def generate_dus(
     Note: Number of steps is determined automatically by the schedule algorithm,
     not by a parameter. Binary search and dilated schedules create hierarchical
     levels based on block_length.
+
+    use_eos_harness: If False, never return early on EOS (full schedule / reference-style).
     '''
     x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
@@ -258,7 +261,7 @@ def generate_dus(
                     raise NotImplementedError(remasking)
 
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
-            if check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
+            if use_eos_harness and check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
                 return x, steps_taken, num_block + 1  # Stop generation early
 
             del logits, logits_with_noise

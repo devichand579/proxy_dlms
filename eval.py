@@ -267,6 +267,7 @@ class LLaDAEvalHarness(LM):
         cst_ntf_conf_low=0.2,
         cst_ntf_conf_high=0.8,
         cst_target_staging_gb=1.0,
+        use_eos_harness: bool = True,
     ):
         '''
         Args:
@@ -311,6 +312,8 @@ class LLaDAEvalHarness(LM):
             cst_target_staging_gb: Like training: buffer hidden ``.pt`` until this total size (decimal GB) on disk, then
                 run CST metrics on the batch and **delete** files; remainder is flushed at end of the task. lm-eval
                 generate loop is unchanged.
+            use_eos_harness: If True (default), schedulers may return early on EOS and chunk decode truncates at first EOS.
+                If False, full step budget and ``batch_decode`` of the full generated slice (reference LLaDA-style).
         '''
         super().__init__()
 
@@ -361,6 +364,10 @@ class LLaDAEvalHarness(LM):
         else:
             self.intervention_steps = list(intervention_steps)
         self.intervention_k = int(intervention_k)
+        if isinstance(use_eos_harness, str):
+            self.use_eos_harness = use_eos_harness.strip().lower() in ("true", "1", "yes", "on")
+        else:
+            self.use_eos_harness = True if use_eos_harness is None else bool(use_eos_harness)
         self.trace_name = str(trace_name) if trace_name is not None else None
         self.task_name = task_name if task_name is not None else os.environ.get("TASK_NAME", "unknown")
         self.resumable = _to_bool(resumable) if resumable is not None else False
@@ -436,6 +443,7 @@ class LLaDAEvalHarness(LM):
         self.logger.info(f"Compile model: {compile_model}")
         self.logger.info(f"Mask id: {self.mask_id}")
         self.logger.info(f"EOS id: {self.eos_id}, EoT id: {self.eot_id}")
+        self.logger.info(f"use_eos_harness: {self.use_eos_harness}")
         self.logger.info(f"Trace name: {self.trace_name}")
         self.logger.info(f"Intervention mode: {self.intervention_mode}")
         self.logger.info(f"Intervention steps: {self.intervention_steps}")
@@ -875,19 +883,25 @@ class LLaDAEvalHarness(LM):
                         mask_id=self.mask_id,
                         eos_id=self.eos_id,
                         eot_id=self.eot_id,
+                        use_eos_harness=self.use_eos_harness,
                     )
 
                     prompt_len = int(input_ids.shape[1])
-                    gen_tails = []
-                    for b in range(generated.shape[0]):
-                        tail = generated[b, prompt_len:]
-                        eos_positions = (tail == self.eos_id).nonzero(as_tuple=False)
-                        if eos_positions.numel() > 0:
-                            tail = tail[: eos_positions[0].item()]
-                        gen_tails.append(tail)
-                    chunk_gen_texts = self.tokenizer.batch_decode(
-                        gen_tails, skip_special_tokens=True
-                    )
+                    if not self.use_eos_harness:
+                        chunk_gen_texts = self.tokenizer.batch_decode(
+                            generated[:, prompt_len:], skip_special_tokens=True
+                        )
+                    else:
+                        gen_tails = []
+                        for b in range(generated.shape[0]):
+                            tail = generated[b, prompt_len:]
+                            eos_positions = (tail == self.eos_id).nonzero(as_tuple=False)
+                            if eos_positions.numel() > 0:
+                                tail = tail[: int(eos_positions[0].item())]
+                            gen_tails.append(tail)
+                        chunk_gen_texts = self.tokenizer.batch_decode(
+                            gen_tails, skip_special_tokens=True
+                        )
                     for i, gen_text in enumerate(chunk_gen_texts):
                         for stop in stop_tokens:
                             if stop in gen_text:

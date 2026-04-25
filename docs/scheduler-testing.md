@@ -33,6 +33,10 @@ python test_schedulers.py --batch --scheduler pure_diffusion --batch_size 4
 python test_schedulers.py --batch --model_path ./models/llada --model_path ./models/dream
 ```
 
+**Reference-style generation** (no EOS early exit in schedulers, full generated tail decoded — like upstream LLaDA scripts): add **`--no-eos-harness`**.
+
+**Debug: tokens before `skip_special_tokens`:** add **`--show-original-tokens`** to print, for each batch row, the full integer tail that will be `batch_decode`d (and a string with `skip_special_tokens=False`) immediately before the usual stripped decode. The printed tail matches the harness (including truncate-at-first-EOS when the EOS harness is on).
+
 **W&B and tracing:**
 
 ```bash
@@ -48,8 +52,10 @@ The W&B run `config` includes the list of `model_paths` when set.
 ./test_schedulers.sh --batch --batch_size 2
 ./test_schedulers.sh --batch --wandb
 ./test_schedulers.sh --model_path ./models/llada --model_path ./models/dream
+# Pass-through to Python (reference-style gen + decode):
+./test_schedulers.sh --batch --no-eos-harness
 ```
 
-`./test_schedulers.sh --help` lists options: `--scheduler`, `--model_path` (repeatable), `--wandb`, `--wandb_project`, `--wandb_name`, `--intervention_mode`, `--batch`, `--batch_size`, `--tracing_enabled`, and others.
+`./test_schedulers.sh --help` lists options: `--scheduler`, `--model_path` (repeatable), `--wandb`, `--wandb_project`, `--wandb_name`, `--intervention_mode`, `--batch`, `--batch_size`, `--tracing_enabled`, `--no-eos-harness`, and other pass-through flags (e.g. **`--show-original-tokens`** for `test_schedulers.py`).
 
 For full **benchmark** evaluation, use [Evaluation](evaluation.md).

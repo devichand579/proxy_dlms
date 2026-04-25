@@ -25,6 +25,11 @@ def main() -> int:
     p.add_argument("--mode_key", type=str, default="pd", help="Short scheduler: pd, bd, top_k_m, fhs, …")
     p.add_argument("--gen_length", type=int, default=256)
     p.add_argument("--steps", type=int, default=256)
+    p.add_argument(
+        "--no_eos_harness",
+        action="store_true",
+        help="Reference-style: full generation steps and full-tail decode (no EOS early stop / truncate)",
+    )
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--prune_p", type=float, default=0.1, help="With --prune_mode bfs: keep this fraction of in-edges per node")
     p.add_argument(
@@ -101,6 +106,7 @@ def main() -> int:
         influence_edge_mass=args.influence_edge_mass,
         with_residual=args.with_residual,
         write_html=not args.no_html,
+        use_eos_harness=not args.no_eos_harness,
     )
     print(json.dumps(r.get("paths", {}), indent=0))
     return 0

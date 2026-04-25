@@ -3,7 +3,7 @@
 **CST** (context in this repo) refers to the optional path that **captures** last-layer pre-logit hidden states, **trains** a sparse dictionary / bank on those chunks, and **evaluates** alignment metrics—either during lm-eval (per task) or **offline** on a folder of saved `.pt` files.
 
 - **Code:** `cst/` (pre-logit wrapper, `CSTBank`, training loop, eval helpers)  
-- **Train config:** `config/cst.yaml` (Hydra for `launch_cst.py` and `cst.sh`)  
+- **Train config:** `config/cst.yaml` (Hydra for `launch_cst.py` and `cst.sh`) — under **`train`**, `use_eos_harness` (default `true`) is passed to `schedulers.generate` during hidden collection; set to `false` to match reference-style full-step / full-tail behavior, consistent with [Evaluation](evaluation.md).  
 - **LM eval config:** `config/config.yaml` (e.g. `cst_checkpoint`; pre-logit capture is **automatic** when it is set — see `eval.py`)
 
 ---

@@ -25,6 +25,7 @@ def capture_prompt_to_pt(
     top_k: int = 1,
     max_prompt_length: int = 512,
     compile_model: bool = False,
+    use_eos_harness: bool = True,
 ) -> Dict[str, Any]:
     """Generate from prompt, save hidden ``.pt``; returns capture meta."""
     model, tok = load_model_and_tokenizer(
@@ -47,6 +48,7 @@ def capture_prompt_to_pt(
         top_k=top_k,
         max_prompt_length=max_prompt_length,
         trace_name="tag_single",
+        use_eos_harness=use_eos_harness,
     )
 
 
