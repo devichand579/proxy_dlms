@@ -24,6 +24,118 @@ CKPT_LATEST = "cst_latest.pt"
 CKPT_BEST = "cst_best.pt"
 TRAIN_STATE_JSON = "cst_train_state.json"
 
+# Keys in training checkpoint ``meta`` (full-run resume at collect segment boundaries + W&B)
+META_DATA_NEXT_EPOCH = "data_next_epoch"
+# 0-based index of the epoch that will be trained next, or == ``num_epochs`` if already finished
+META_DATA_NEXT_BATCH_IDX = "data_next_batch_idx"
+META_DATA_NEXT_SEGMENT = "data_next_segment"
+META_WANDB_GLOBAL_STEP = "wandb_global_step"
+META_WANDB_RUN_ID = "wandb_run_id"
+# Saved so we can warn if the user changes ``num_epochs`` between save and load
+META_TRAIN_NUM_EPOCHS = "num_epochs_checkpointed"
+# Row-batch / dataset draw fingerprint (keeps ``sample_uniform_batched`` aligned on resume)
+META_TRAIN_SEED = "train_seed"
+META_TRAIN_SAMPLES_PER_EPOCH = "train_samples_per_epoch"
+META_TRAIN_INFERENCE_BATCH_SIZE = "train_inference_batch_size"
+META_TRAIN_RESAMPLE_EACH_EPOCH = "train_resample_each_epoch"
+META_TRAIN_GSM8K_NUM_FEWSHOT = "train_gsm8k_num_fewshot"
+META_TRAIN_ARC_CSQA_NUM_FEWSHOT = "train_arc_csqa_num_fewshot"
+
+
+def merge_resume_fields_into_meta(
+    meta: Dict[str, Any],
+    *,
+    data_next_epoch: int,
+    data_next_batch_idx: int,
+    data_next_segment: int,
+    wandb_global_step: int,
+    wandb_run_id: Optional[str] = None,
+    num_epochs: Optional[int] = None,
+) -> None:
+    """In-place: record full-run data position, W&B step/run id, and optional epoch count."""
+    meta[META_DATA_NEXT_EPOCH] = int(data_next_epoch)
+    meta[META_DATA_NEXT_BATCH_IDX] = int(data_next_batch_idx)
+    meta[META_DATA_NEXT_SEGMENT] = int(data_next_segment)
+    meta[META_WANDB_GLOBAL_STEP] = int(wandb_global_step)
+    if wandb_run_id is not None and str(wandb_run_id).strip():
+        meta[META_WANDB_RUN_ID] = str(wandb_run_id).strip()
+    elif META_WANDB_RUN_ID in meta:
+        del meta[META_WANDB_RUN_ID]
+    if num_epochs is not None:
+        meta[META_TRAIN_NUM_EPOCHS] = int(num_epochs)
+
+
+def parse_data_resume_from_meta(
+    meta: Dict[str, Any], *, require_all: bool = True
+) -> Optional[tuple[int, int, int]]:
+    """
+    Return ``(data_next_epoch, data_next_batch_idx, data_next_segment)`` for the next
+    collection segment, or None if not present/invalid.
+
+    If ``require_all`` is true, all three int keys must be set.
+    """
+    if not meta:
+        return None
+    ke = meta.get(META_DATA_NEXT_EPOCH)
+    kb = meta.get(META_DATA_NEXT_BATCH_IDX)
+    ks = meta.get(META_DATA_NEXT_SEGMENT)
+    if require_all and (ke is None or kb is None or ks is None):
+        return None
+    try:
+        return int(ke), int(kb), int(ks)
+    except (TypeError, ValueError):
+        return None
+
+
+def merge_sampling_state_into_meta(
+    meta: Dict[str, Any],
+    *,
+    train_seed: int,
+    train_samples_per_epoch: int,
+    train_inference_batch_size: int,
+    train_resample_each_epoch: bool,
+    train_gsm8k_num_fewshot: int,
+    train_arc_csqa_num_fewshot: int,
+) -> None:
+    """In-place: store draw settings so a resumed run can override YAML and match row batches."""
+    meta[META_TRAIN_SEED] = int(train_seed)
+    meta[META_TRAIN_SAMPLES_PER_EPOCH] = int(train_samples_per_epoch)
+    meta[META_TRAIN_INFERENCE_BATCH_SIZE] = int(train_inference_batch_size)
+    meta[META_TRAIN_RESAMPLE_EACH_EPOCH] = bool(train_resample_each_epoch)
+    meta[META_TRAIN_GSM8K_NUM_FEWSHOT] = int(train_gsm8k_num_fewshot)
+    meta[META_TRAIN_ARC_CSQA_NUM_FEWSHOT] = int(train_arc_csqa_num_fewshot)
+
+
+def parse_sampling_state_from_meta(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Return a dict of sampling fields if the checkpoint was saved with a full fingerprint;
+    else None (legacy checkpoints, or incomplete meta).
+    """
+    if not meta:
+        return None
+    keys = (
+        META_TRAIN_SEED,
+        META_TRAIN_SAMPLES_PER_EPOCH,
+        META_TRAIN_INFERENCE_BATCH_SIZE,
+        META_TRAIN_RESAMPLE_EACH_EPOCH,
+        META_TRAIN_GSM8K_NUM_FEWSHOT,
+        META_TRAIN_ARC_CSQA_NUM_FEWSHOT,
+    )
+    for k in keys:
+        if k not in meta:
+            return None
+    try:
+        return {
+            "train_seed": int(meta[META_TRAIN_SEED]),
+            "train_samples_per_epoch": int(meta[META_TRAIN_SAMPLES_PER_EPOCH]),
+            "train_inference_batch_size": int(meta[META_TRAIN_INFERENCE_BATCH_SIZE]),
+            "train_resample_each_epoch": bool(meta[META_TRAIN_RESAMPLE_EACH_EPOCH]),
+            "train_gsm8k_num_fewshot": int(meta[META_TRAIN_GSM8K_NUM_FEWSHOT]),
+            "train_arc_csqa_num_fewshot": int(meta[META_TRAIN_ARC_CSQA_NUM_FEWSHOT]),
+        }
+    except (TypeError, ValueError):
+        return None
+
 
 def _read_train_state(ckpt_dir: Path, state_basename: str) -> Dict[str, Any]:
     """Read state JSON; if the requested basename is missing, try ``cst_train_state.json``."""
@@ -72,6 +184,7 @@ def save_train_checkpoints(
     train_loss: float,
     train_batches: float,
     name_token: Optional[str] = None,
+    extra_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write latest/best CST checkpoints and training state; drop obsolete ``cst_phase_*.pt``."""
     ckpt_dir = Path(ckpt_dir)
@@ -90,6 +203,10 @@ def save_train_checkpoints(
     }
     if name_token:
         meta["name_token"] = name_token
+    if extra_meta:
+        for k, v in extra_meta.items():
+            if v is not None:
+                meta[k] = v
 
     save_cst_checkpoint(
         ckpt_dir / latest_n,
@@ -117,7 +234,9 @@ def save_train_checkpoints(
 
     updated_best = bool(math.isfinite(loss_mean) and (loss_mean < best_prev - 1e-12))
     if updated_best:
-        best_meta = {**meta, "is_best": True, "loss_mean": float(loss_mean)}
+        best_meta = dict(meta)
+        best_meta["is_best"] = True
+        best_meta["loss_mean"] = float(loss_mean)
         save_cst_checkpoint(
             ckpt_dir / best_n,
             cst_bank=cst_bank,
