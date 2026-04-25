@@ -562,6 +562,36 @@ def run_train(cfg: DictConfig) -> int:
             )
             seg += 1
 
+    if bool(tr.get("push_best_to_hf_bucket", False)):
+        from cst.train.hf_bucket import finalize_cst_hf_bucket
+
+        hf_tok = tr.get("hf_token", True)
+        if hf_tok is None:
+            hf_tok = True
+        try:
+            did_push = finalize_cst_hf_bucket(
+                ckpt_dir,
+                name_token=cst_name_token,
+                bucket_id=str(tr.get("hf_bucket_id", "devichand/strace")).strip(),
+                path_prefix=str(tr.get("hf_bucket_path_prefix", "") or ""),
+                delete_local_after_push=bool(
+                    tr.get("delete_local_checkpoints_after_hf_push", True)
+                ),
+                token=hf_tok,
+            )
+        except Exception as e:
+            logger.exception("HF bucket upload failed: %s", e)
+            if wb:
+                wandb.finish()
+            return 1
+        if did_push and use_wandb and wb is not None:
+            wb.log(
+                {
+                    "train/hf_bucket_pushed": 1.0,
+                },
+                step=int(global_step),
+            )
+
     if wb:
         wandb.finish()
     return 0
