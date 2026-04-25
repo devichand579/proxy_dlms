@@ -51,7 +51,13 @@ def push_cst_best_to_hf_bucket(
         add.append((str(state_p), _bucket_dest(path_prefix, state_n)))
 
     api = HfApi()
-    api.batch_bucket_files(bid, add=add, token=token)
+    for local_path, repo_path in add:
+        api.upload_file(
+            path_or_fileobj=local_path,
+            path_in_repo=repo_path,
+            repo_id=bid,
+            token=token,
+        )
     logger.info("HF bucket %s: uploaded %s", bid, [d for _, d in add])
     return add
 

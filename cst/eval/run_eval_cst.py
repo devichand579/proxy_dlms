@@ -98,10 +98,10 @@ def evaluate_chunk_file(
 
     hi = min(T, max_anchor) if max_anchor is not None else T
     for anchor in range(w, hi + 1):
-        s_target = anchor - 1  # same H row as training s_step
+        s_target = anchor  # same H row as training (H_full[anchor])
         tgt = H[s_target]
         H_hat = torch.zeros_like(tgt)
-        u_tgt, m_tgt = row_um(anchor - 1)
+        u_tgt, m_tgt = row_um(anchor)
 
         for enc_slot in range(w):
             enc_step = anchor - w + 1 + enc_slot
