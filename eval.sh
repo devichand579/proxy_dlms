@@ -35,7 +35,7 @@
 # CST (optional, via eval.LLaDAEvalHarness in eval.py):
 #   --cst_checkpoint PATH         forces --capture_pre_logits true, buffers .pt to cst_target_staging_gb, eval+delete
 #   [--cst_config_path PATH]      default config/cst.yaml
-#   [--cst_ntf_conf_low HIGH]   [--cst_ntf_conf_high HIGH]  [--cst_ntf_first_non_eos true|false]  [--cst_target_staging_gb GB]
+#   [--cst_ntf_conf_low LOW]    [--cst_ntf_conf_high HIGH]  [--cst_ntf_first_non_eos true|false]  [--cst_target_staging_gb GB]
 # Example: --capture_pre_logits true --cst_checkpoint ./outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt
 
 
@@ -208,7 +208,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Optional - Top-k: --top_k <n> for top_k scheduler (default 2, tokens to transfer per step)"
     echo "  Optional - Tracing: --tracing_enabled True to enable scheduler tracing (writes trace_outputs/<trace_name>.json)"
             echo "  Optional - Hidden states: --capture_pre_logits True [--hidden_capture_path <dir>] (default dir under outputs/ or checkpoint/hidden)"
-            echo "  Optional - CST: --cst_checkpoint <.pt> (implies capture; also --cst_config_path, --cst_target_staging_gb, --cst_ntf_conf_low/high, --cst_ntf_first_non_eos)"
+            echo "  Optional - CST: --cst_checkpoint <.pt> (implies capture; also --cst_config_path, --cst_target_staging_gb, --cst_ntf_conf_low, --cst_ntf_conf_high, --cst_ntf_first_non_eos)"
     echo "  Optional - SLURM: --slurm to run the eval under srun (for sbatch submissions)"
     echo "  Optional - Resumable: --resumable writes outputs/{run_id}/checkpoint.jsonl and resumes skipped samples; traces use JSONL when tracing is on. Use --run_id for custom id."
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
@@ -251,7 +251,7 @@ case "$MODE" in
         STRATEGY="confidence"
         ;;
     *)
-        echo "Warning: Unknown mode '$MODE'. Using as-is. Valid modes: pd, bd, pure_diffusion, block_diffusion"
+        echo "Warning: Unknown mode '$MODE'. Using as-is. Valid modes: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus (and their full names)"
         ;;
 esac
 
@@ -264,7 +264,8 @@ export HF_ALLOW_CODE_EVAL=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true
 export LMEVAL_LOG_LEVEL=INFO
 export TOKENIZERS_PARALLELISM=false
-export HF_TOKEN=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
+# HF_TOKEN: set via environment or `huggingface-cli login` — do not hardcode here.
+# export HF_TOKEN=...
 
 # When running locally (not --slurm), you can set CUDA_VISIBLE_DEVICES; when --slurm, leave to SLURM allocation.
 if [[ "$SLURM_MODE" != "true" ]]; then
@@ -272,8 +273,8 @@ if [[ "$SLURM_MODE" != "true" ]]; then
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 fi
 
-# Wandb configuration 
-export WANDB_API_KEY=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
+# WANDB_API_KEY: set via environment or `wandb login` — do not hardcode here.
+# export WANDB_API_KEY=...
 export WANDB_PROJECT=strace
 
 # Tracing: enable only when --tracing_enabled True (default off to avoid overhead)

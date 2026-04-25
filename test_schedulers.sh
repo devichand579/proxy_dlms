@@ -78,7 +78,7 @@ EOF
 
 # Default values
 TRACING_ENABLED="${TRACING_ENABLED:-True}"
-WANDB_API_KEY="${WANDB_API_KEY:-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}"
+WANDB_API_KEY="${WANDB_API_KEY:-}"  # set via environment or `wandb login`
 WANDB_PROJECT="${WANDB_PROJECT:-strace}"
 
 # Parse arguments
