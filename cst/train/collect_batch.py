@@ -1,4 +1,4 @@
-"""LM generation → save pre-logit tensors to ``.pt`` files (single batch or until a size cap)."""
+"""Run `schedulers.generate` and persist pre-logit hiddens to ``.pt`` (CST)."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def collect_hidden_batch_loaded(
     staging_name_token: Optional[str] = None,
     use_eos_harness: bool = True,
 ) -> Dict[str, Any]:
-    """One generate pass; writes ``save_hidden_records`` payload to ``out_path``."""
+    """Single forward; writes `save_hidden_records` to `out_path`."""
     mode, strategy = _mode_map(mode_key)
     if strategy is None:
         strategy = "confidence"
@@ -96,6 +96,7 @@ def collect_hidden_batch_loaded(
         eos_id=eos_id,
         eot_id=eot_id,
         use_eos_harness=use_eos_harness,
+        model_path=model_path,
     )
 
     if not hasattr(model, "records"):
@@ -144,7 +145,7 @@ def load_model_for_collect(
     device: str = "cuda",
     compile_model: bool = False,
 ) -> Tuple[torch.nn.Module, Any]:
-    """``load_model_and_tokenizer`` with ``capture_pre_logits=True``."""
+    """Wrapper: `load_model_and_tokenizer(..., capture_pre_logits=True)`."""
     return load_model_and_tokenizer(
         model_path,
         device=device,
@@ -154,7 +155,7 @@ def load_model_for_collect(
 
 
 def _bytes_from_gb(gb: float) -> int:
-    """``gb`` × 1e9 bytes."""
+    """Bytes for a gigabyte target (×1e9)."""
     return max(0, int(float(gb) * 1e9))
 
 
@@ -180,7 +181,7 @@ def collect_hidden_until_size_gb_from_row_batches(
     staging_name_token: Optional[str] = None,
     use_eos_harness: bool = True,
 ) -> Tuple[List[str], int, Dict[str, Any]]:
-    """Stream row batches to ``.pt`` files until ``target_gb`` (or batches exhausted). Returns paths, next index, summary."""
+    """Collect hiddens until `target_gb`; returns written paths, next batch index, summary."""
     target_b = _bytes_from_gb(target_gb)
     staging_dir = Path(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)

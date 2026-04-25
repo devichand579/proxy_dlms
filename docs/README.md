@@ -10,6 +10,7 @@ This folder contains detailed guides. The [top-level README](../README.md) only 
 | [Scheduler smoke tests](scheduler-testing.md) | `test_schedulers.py` / `test_schedulers.sh` for quick local checks |
 | [Parallel runs](parallel-runs.md) | Isolating concurrent train/eval jobs (dirs, `run_id`, no shared `staging`/`ckpt`/`output`) |
 | [TAG (attribution graph)](tag.md) | Temporal attribution graph on CST for one prompt |
+| [LLaDA 1.5 sampling (B.4)](llada1_5-sampling.md) | Full-block EOS collapse with confidence remasking; automatic B.4 mitigation for `llada1_5` |
 
 ## Quick commands
 

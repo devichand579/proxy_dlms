@@ -1,6 +1,4 @@
-'''
-This file is inspired by the code from https://github.com/ML-GSAI/SMDM
-'''
+"""lm-eval integration for LLaDA / Dream (SMDM-style patterns: github.com/ML-GSAI/SMDM)."""
 import sys
 import math
 import torch
@@ -884,6 +882,7 @@ class LLaDAEvalHarness(LM):
                         eos_id=self.eos_id,
                         eot_id=self.eot_id,
                         use_eos_harness=self.use_eos_harness,
+                        model_path=self._model_path,
                     )
 
                     prompt_len = int(input_ids.shape[1])

@@ -10,7 +10,7 @@ def mask_eos_eot_logits(
     eos_id: int,
     eot_id: Optional[int],
 ) -> None:
-    """In-place: optionally suppress EOS / EoT in logits (LLaDA-style; eot_id may be None, e.g. Dream)."""
+    """In-place optional EOS (and EoT if set) -inf in logits; see LLaDA Appendix B.4."""
     if logits_eos_inf:
         logits[:, :, eos_id] = -torch.inf
     if confidence_eos_eot_inf:
@@ -20,11 +20,7 @@ def mask_eos_eot_logits(
 
 
 def add_gumbel_noise(logits, temperature):
-    '''
-    The Gumbel max is a method for sampling categorical distributions.
-    According to arXiv:2409.02908, for MDM, low-precision Gumbel Max improves perplexity score but reduces generation quality.
-    Thus, we use float64.
-    '''
+    """Gumbel–max noise for sampling; `temperature==0` passthrough. Uses float64 (MDM note)."""
     if temperature == 0:
         return logits
     logits = logits.to(torch.float64)
@@ -34,13 +30,7 @@ def add_gumbel_noise(logits, temperature):
 
 
 def get_num_transfer_tokens(mask_index, steps):
-    '''
-    In the reverse process, the interval [0, 1] is uniformly discretized into steps intervals.
-    Furthermore, because LLaDA employs a linear noise schedule (as defined in Eq. (8)),
-    the expected number of tokens transitioned at each step should be consistent.
-
-    This function is designed to precompute the number of tokens that need to be transitioned at each step.
-    '''
+    """Per-step token transfer counts for a linear unmasking schedule (LLaDA)."""
     mask_num = mask_index.sum(dim=1, keepdim=True)
 
     base = mask_num // steps
@@ -54,36 +44,13 @@ def get_num_transfer_tokens(mask_index, steps):
     return num_transfer_tokens
 
 def get_mask_by_confidence(logits: torch.Tensor, x0: torch.Tensor) -> torch.Tensor:
-    """
-    Calculate token confidence based on predicted token probabilities.
-    
-    Confidence is defined as the probability assigned to the predicted token.
-    Higher confidence indicates the model is more certain about the prediction.
-    
-    Args:
-        logits: Model output logits of shape (batch_size, seq_len, vocab_size)
-        x0: Predicted tokens of shape (batch_size, seq_len)
-        
-    Returns:
-        Confidence scores for each position
-    """
+    """Per-position p(argmax) from softmax(logits) at `x0`."""
     log_p = F.log_softmax(logits.float(), dim=-1)
     x0_log_p = torch.gather(log_p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
     return x0_log_p.exp()
 
 def get_mask_by_entropy(logits: torch.Tensor) -> torch.Tensor:
-    """
-    Calculate entropy-based uncertainty for each token position.
-    
-    Entropy measures the uncertainty in the model's prediction.
-    Higher entropy indicates less certain predictions.
-    
-    Args:
-        logits: Model output logits of shape (batch_size, seq_len, vocab_size)
-        
-    Returns:
-        Entropy values for each position
-    """
+    """Per-position entropy of softmax(logits)."""
     p = F.softmax(logits.float(), dim=-1)
     entropy = -torch.sum(p * torch.log(p + 1e-10), dim=-1)
     return entropy
@@ -95,23 +62,7 @@ def check_eos_stop_condition(
     prompt_len: int,
     require_all_done: bool = True,
 ) -> bool:
-    """
-    Check if generation should stop based on EOS and unmasked state.
-
-    When require_all_done is True (default, for batched execution): returns True only
-    when every sample in the batch has EOS present with all tokens before it unmasked.
-    When require_all_done is False: returns True when any sample satisfies the condition.
-
-    Args:
-        x: Current token sequence of shape (batch_size, seq_len)
-        eos_id: Token ID of EOS token
-        mask_id: ID of the mask token
-        prompt_len: Length of the input prompt
-        require_all_done: If True, stop only when all batch elements are done; if False, stop when any is done.
-
-    Returns:
-        True if the stop condition is met for the batch, False otherwise
-    """
+    """True if generated region has a valid EOS stop (all non-mask before first EOS, batch logic per `require_all_done`)."""
     generated_part = x[:, prompt_len:]  # Shape: (batch_size, gen_length)
     batch_size = x.shape[0]
 
