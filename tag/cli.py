@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from .pipeline import run_tag_from_chunk, run_tag_full
+from .viz import write_tag_html
 
 
 def main() -> int:
@@ -87,7 +88,6 @@ def main() -> int:
         with (out / "tag_graph.json").open("w", encoding="utf-8") as f:
             json.dump(g["graph"], f, indent=2, ensure_ascii=False)
         if not args.no_html:
-            from .viz import write_tag_html
             write_tag_html(g["graph"], out / "tag_view.html")
         print(
             json.dumps(

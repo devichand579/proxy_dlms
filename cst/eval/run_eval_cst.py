@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from load_model import infer_diffusion_token_ids, load_model
 from cst.eval.logits_head import logits_from_prelogit_hidden
 from cst.eval.metrics import (
     compute_l0,
@@ -286,8 +287,6 @@ def run_eval_on_dir(
     base_model: Optional[torch.nn.Module] = None
     eos_id_for_ntf: Optional[int] = eos_id
     if model_path:
-        from load_model import infer_diffusion_token_ids, load_model
-
         base_model = load_model(
             str(model_path),
             device=device,

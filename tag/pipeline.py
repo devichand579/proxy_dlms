@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from load_model import infer_diffusion_token_ids, load_model
 from cst.eval.logits_head import logits_from_prelogit_hidden, unembedding_weight_matrix
 from cst.model.cst_bank import CSTBank
 from cst.train.hidden_chunk import load_chunk_H
@@ -60,8 +61,6 @@ def _run_tag_graph_only(
     unembed_w: Optional[torch.Tensor] = None
     eos_for_readout: Optional[int] = eos_id
     if model_path and Path(model_path).is_dir():
-        from load_model import infer_diffusion_token_ids, load_model
-
         m = load_model(model_path, device=device, capture_pre_logits=False, compile_model=False)
         h_last = h[-1, :1].to(device=device)
         lg = logits_from_prelogit_hidden(m, h_last)
