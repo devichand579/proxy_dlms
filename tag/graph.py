@@ -400,7 +400,7 @@ def build_tag_graph(
                     s_idx = t - 1
                     a_t = activations[s_idx]
                     delta_path = t_eff - t
-                    d_dec = 1 if delta_path == 0 else int(delta_path)
+                    d_dec = delta_path + 1
                     w_tlim = effective_window_size(t, w_cst, max_steps)
                     if d_dec < 1 or d_dec > w_tlim:
                         continue

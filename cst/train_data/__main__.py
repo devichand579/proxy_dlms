@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+
+from .compose import default_source_specs, load_pools, sample_uniform
 
 
 def main() -> None:
@@ -15,8 +18,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    from .compose import load_pools, sample_uniform
-
     pools = load_pools()
     print("=== Pool sizes ===")
     for name in sorted(pools.keys()):
@@ -26,11 +27,7 @@ def main() -> None:
     if args.samples > 0:
         mix = sample_uniform(args.samples)
         print(f"=== sample_uniform(n={args.samples}) — counts per source ===")
-        from collections import Counter
-
         c = Counter(r["source"] for r in mix)
-        from .compose import default_source_specs
-
         for spec in default_source_specs():
             name = spec.name
             n_pool = len(pools.get(name, []))

@@ -113,7 +113,12 @@ def windowed_cst_loss_full(
     with torch.no_grad():
         if n_target_terms > 0:
             rms = (total_recon / max(n_target_terms * B * L * D, 1)).sqrt()
-            ref = H_full[anchor].float().norm(dim=(1, 2)).clamp_min(1e-8).mean()
+            ref_norms = [
+                H_full[anchor - w_eff + 1 + tau].float().norm(dim=(1, 2)).clamp_min(1e-8).mean()
+                for tau in range(w_eff)
+                if anchor - w_eff + 1 + tau >= 1
+            ]
+            ref = torch.stack(ref_norms).mean() if ref_norms else H_full[anchor].float().norm(dim=(1, 2)).clamp_min(1e-8).mean()
             nmse = float((rms / ref).item())
         else:
             nmse = 0.0

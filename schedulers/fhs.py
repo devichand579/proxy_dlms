@@ -53,16 +53,6 @@ def _model_logits(model, x, attention_mask=None, t_cond=None):
 
 
 
-def _sample_next_event_time_linear(tau, n_masked):
-    """
-    Paper: sample next event time analytically.
-    Linear schedule α(t) = 1 - t  =>  τ_{l-1} = τ_l * u^{1/l}
-    """
-    n_safe = n_masked.clamp(min=1.0)
-    u = torch.rand_like(tau).clamp(min=1e-12)
-    return tau * torch.pow(u, 1.0 / n_safe)
-
-
 def _pick_token_and_tau(tau_per_token, masked, batch_idx):
     """
     FHS: pick the masked token with earliest (minimum) hitting time.
@@ -120,7 +110,7 @@ def make_equal_schedule(L, N):
 
 
 
-@ torch.no_grad()
+@torch.no_grad()
 @trace_scheduler()  # tracing decorator
 def generate_fhs_extrapolation(
     model,
@@ -186,7 +176,6 @@ def generate_fhs_extrapolation(
     )
 
     tau_upper = torch.ones((prompt.shape[0],), device=model.device, dtype=torch.float32)
-    l = torch.full((prompt.shape[0],), gen_length, device=model.device, dtype=torch.float32)
 
     mu_prev = None
     tau_prev = None
@@ -243,7 +232,6 @@ def generate_fhs_extrapolation(
                 token = sample_categorical(mu_hat[b, k], temperature)
                 x[b, k] = token
                 masked[b, k] = False
-                l[b] -= 1
                 _rescale_hitting_times_survival(
                     tau_per_token, masked, k, tau_new_b, tau_upper[b].item(), b
                 )
@@ -264,7 +252,7 @@ def generate_fhs_extrapolation(
     return x, steps_taken
 
 
-@ torch.no_grad()
+@torch.no_grad()
 @trace_scheduler()  # tracing decorator
 def generate_fhs_predictor_corrector(
     model,
@@ -329,7 +317,6 @@ def generate_fhs_predictor_corrector(
     )
 
     tau_upper = torch.ones((prompt.shape[0],), device=model.device, dtype=torch.float32)
-    l = torch.full((prompt.shape[0],), gen_length, device=model.device, dtype=torch.float32)
 
     for step, Ln in enumerate(schedule):
         # Early stopping - check if all tokens are decoded
@@ -364,7 +351,6 @@ def generate_fhs_predictor_corrector(
                 token = sample_categorical(mu_pred[b, k], temperature)
                 x[b, k] = token
                 masked[b, k] = False
-                l[b] -= 1
                 decoded_this_chunk[b].append(k)
                 _rescale_hitting_times_survival(
                     tau_per_token, masked, k, tau_new_b, tau_upper[b].item(), b
@@ -398,7 +384,7 @@ def generate_fhs_predictor_corrector(
     return x, steps_taken
 
 
-@ torch.no_grad()
+@torch.no_grad()
 @trace_scheduler()  # tracing decorator
 def generate_fhs(
     model,

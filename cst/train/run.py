@@ -10,7 +10,24 @@ from typing import Any, Dict, List, Optional
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from cst.model.cst_bank import CSTBank
 from cst.naming import cst_train_name_token, cst_train_staging_prefix, model_label_from_path, resolve_train_resume_latest
+from cst.train.collect_batch import collect_hidden_until_size_gb_from_row_batches, load_model_for_collect
+from cst.train.trainer import (
+    LambdaRamp,
+    META_TRAIN_NUM_EPOCHS,
+    META_WANDB_GLOBAL_STEP,
+    META_WANDB_RUN_ID,
+    delete_files,
+    load_cst_checkpoint,
+    merge_resume_fields_into_meta,
+    merge_sampling_state_into_meta,
+    parse_data_resume_from_meta,
+    parse_sampling_state_from_meta,
+    save_train_checkpoints,
+    train_on_chunk_files,
+)
+from cst.train_data.compose import sample_uniform_batched
 
 logger = logging.getLogger("cst.run")
 
@@ -48,14 +65,6 @@ def _train_cst_on_chunks_and_checkpoint(
     sampling_state: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Fit CST on ``batch_paths``, checkpoint, delete chunks; return updated ``global_step``."""
-    from cst.train.trainer import (
-        delete_files,
-        merge_resume_fields_into_meta,
-        merge_sampling_state_into_meta,
-        save_train_checkpoints,
-        train_on_chunk_files,
-    )
-
     logger.info("=== train on %d hidden files ===", len(batch_paths))
     cst_bank.to_device_all(device)
     stats = train_on_chunk_files(
@@ -170,19 +179,6 @@ def run_train(cfg: DictConfig) -> int:
     ckpt_dir = Path(str(tr.get("checkpoint_dir", "outputs/cst_ckpt")))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    from cst.model.cst_bank import CSTBank
-    from cst.train.collect_batch import collect_hidden_until_size_gb_from_row_batches, load_model_for_collect
-    from cst.train.trainer import (
-        LambdaRamp,
-        META_TRAIN_NUM_EPOCHS,
-        META_WANDB_GLOBAL_STEP,
-        META_WANDB_RUN_ID,
-        load_cst_checkpoint,
-        parse_data_resume_from_meta,
-        parse_sampling_state_from_meta,
-    )
-    from cst.train_data.compose import sample_uniform_batched
-
     tg = tr.get("target_staging_gb")
     if tg is None or str(tg).strip().lower() in ("", "null", "none"):
         target_gb = 1.0
@@ -239,8 +235,7 @@ def run_train(cfg: DictConfig) -> int:
     resume_trip: Optional[tuple[int, int, int]] = None
     global_step = 0
     wandb_run_id_resumed: Optional[str] = None
-    if loaded_ckpt_path and resume_data_from_checkpoint:
-        resume_trip = parse_data_resume_from_meta(ckpt_meta, require_all=True)
+    if loaded_ckpt_path:
         try:
             global_step = int(ckpt_meta.get(META_WANDB_GLOBAL_STEP, 0) or 0)
         except (TypeError, ValueError):
@@ -248,22 +243,16 @@ def run_train(cfg: DictConfig) -> int:
         wr = ckpt_meta.get(META_WANDB_RUN_ID)
         if wr is not None and str(wr).strip():
             wandb_run_id_resumed = str(wr).strip()
-        n_ep_saved = ckpt_meta.get(META_TRAIN_NUM_EPOCHS)
-        if n_ep_saved is not None and int(n_ep_saved) != int(num_epochs):
-            logger.warning(
-                "Checkpoint was saved with num_epochs=%s but current num_epochs=%s; "
-                "data resume still uses the saved (epoch, batch, seg) (extend epochs at your own risk).",
-                n_ep_saved,
-                num_epochs,
-            )
-    elif loaded_ckpt_path and not resume_data_from_checkpoint:
-        try:
-            global_step = int(ckpt_meta.get(META_WANDB_GLOBAL_STEP, 0) or 0)
-        except (TypeError, ValueError):
-            global_step = 0
-        wr = ckpt_meta.get(META_WANDB_RUN_ID)
-        if wr is not None and str(wr).strip():
-            wandb_run_id_resumed = str(wr).strip()
+        if resume_data_from_checkpoint:
+            resume_trip = parse_data_resume_from_meta(ckpt_meta, require_all=True)
+            n_ep_saved = ckpt_meta.get(META_TRAIN_NUM_EPOCHS)
+            if n_ep_saved is not None and int(n_ep_saved) != int(num_epochs):
+                logger.warning(
+                    "Checkpoint was saved with num_epochs=%s but current num_epochs=%s; "
+                    "data resume still uses the saved (epoch, batch, seg) (extend epochs at your own risk).",
+                    n_ep_saved,
+                    num_epochs,
+                )
 
     # Dataset / row-batches: from YAML first; optionally force from checkpoint on full resume
     sp_cfg = tr.get("samples_per_epoch")

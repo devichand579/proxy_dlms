@@ -22,7 +22,7 @@ def load_chunk_H(
     path: str | Path,
 ) -> Tuple[torch.Tensor, Dict[str, Any], Optional[Dict[str, torch.Tensor]]]:
     """Load ``save_hidden_records`` ``.pt`` -> ``(H, meta, seg)``; ``seg`` is None or ``unmasked`` / ``diffusion_masked`` ``[T,B,L]``."""
-    payload = torch.load(path, map_location="cpu")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
     hs = payload.get("hidden_states")
     if hs is None:
         raise KeyError(f"{path}: missing 'hidden_states'")

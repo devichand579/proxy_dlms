@@ -400,7 +400,7 @@ def load_cst_checkpoint(
     ramp: LambdaRamp,
 ) -> Dict[str, Any]:
     """Load from ``path``; return checkpoint ``meta``."""
-    payload = torch.load(path, map_location="cpu")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
     cst_sd = map_float_tensors(payload["cst"], to_storage=False)
     cst_bank.load_state_dict_from_save(cst_sd)
     if "optimizer" in payload:
@@ -412,7 +412,7 @@ def load_cst_checkpoint(
 
 def load_cst_bank_weights(path: str | Path, cst_bank: CSTBank) -> Dict[str, Any]:
     """Load only CST weights from ``path``; return ``meta``."""
-    payload = torch.load(path, map_location="cpu")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
     cst_sd = map_float_tensors(payload["cst"], to_storage=False)
     cst_bank.load_state_dict_from_save(cst_sd)
     return payload.get("meta") or {}

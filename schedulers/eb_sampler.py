@@ -25,7 +25,7 @@ else:
     def trace_scheduler(*args, **kwargs):
         return lambda x: x
 
-@ torch.no_grad()
+@torch.no_grad()
 @trace_scheduler()  # tracing decorator
 def generate_EB(
     model,
