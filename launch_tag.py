@@ -68,6 +68,11 @@ def main(cfg: DictConfig) -> int:
     prompt = c.get("prompt")
     if not prompt or str(prompt).lower() in ("null", "none", ""):
         raise ValueError("Set prompt=... for full capture+TAG, or set hidden_pt=... to an existing .pt")
+    ueh = c.get("use_eos_harness", True)
+    if isinstance(ueh, str):
+        use_eos_harness = ueh.strip().lower() in ("true", "1", "yes", "on")
+    else:
+        use_eos_harness = True if ueh is None else bool(ueh)
     r = run_tag_full(
         mpath,
         cst_path,
@@ -85,6 +90,7 @@ def main(cfg: DictConfig) -> int:
         mix_uniform=float(c.get("mix_uniform", 1e-4)),
         with_residual=bool(c.get("with_residual", False)),
         write_html=bool(c.get("write_html", True)),
+        use_eos_harness=use_eos_harness,
         output_exclude_eos=oee,
         eos_id=eid,
     )

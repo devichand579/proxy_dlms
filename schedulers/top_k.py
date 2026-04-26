@@ -26,7 +26,7 @@ else:
     def trace_scheduler(*args, **kwargs):
         return lambda x: x
 
-@ torch.no_grad()
+@torch.no_grad()
 @trace_scheduler()  # tracing decorator
 def generate_topk(
     model,
@@ -136,7 +136,7 @@ def generate_topk(
             # Select top-k per batch
             transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
             for j in range(confidence.shape[0]):
-                k = min(top_k, block_mask_index[j].sum().item())
+                k = min(top_k, mask_index[j, block_start:block_end].sum().item())
                 if k > 0:
                     _, select_index = torch.topk(confidence[j], k=k)
                     transfer_index[j, select_index] = True
