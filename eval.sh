@@ -42,8 +42,9 @@
 
 ########################################################################################
 # Parse command-line arguments
-# Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [--block_length 64] [--compile_model False] [--intervention_mode drop] [--intervention_steps 0,128,256] [--intervention_k 1] [--wandb True] [--tracing_enabled True] [--capture_pre_logits True] [--hidden_capture_path outputs/my_hidden] [--slurm]
-# Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)
+# Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [opts...]
+#   Full flags: see Error/Unknown option messages below; e.g. --resumable [--run_id] [--slurm] [--use_eos_harness / --no_eos_harness] [--cst_checkpoint ...]
+# Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm, fhs, top_k_c (top_k+confidence), top_k_m (top_k+top_margin), dus
 # Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, arc_challenge_chat
 # --model: basename of a folder under ./models/ (must match lm-eval registration). Examples: llada, llada1_5, dream.
 #          Weights/tokenizer load from ./models/<model>/; mask/EOS/EoT ids come from that folder's config when not overridden.
@@ -185,7 +186,13 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--block_length <n>] [--top_k <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--capture_pre_logits <True|False>] [--hidden_capture_path <dir>] [--slurm] [--resumable] [--run_id <id>]"
+            echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
+            echo "  Core optional: --num_fewshot --block_length --top_k --compile_model"
+            echo "  Harness (eval.LLaDAEvalHarness / --model_args): --intervention_mode --intervention_steps --intervention_k"
+            echo "  --wandb --tracing_enabled --capture_pre_logits --hidden_capture_path"
+            echo "  --cst_checkpoint [--cst_config_path --cst_target_staging_gb --cst_ntf_conf_low --cst_ntf_conf_high --cst_ntf_first_non_eos]"
+            echo "  EOS decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode)"
+            echo "  Run: --resumable [--run_id] --slurm"
             exit 1
             ;;
     esac
@@ -199,20 +206,18 @@ fi
 # Check required arguments (intervention and wandb are optional)
 if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "Error: Missing required arguments"
-    echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [--num_fewshot <n>] [--block_length <n>] [--top_k <n>] [--compile_model <bool>] [--intervention_mode <mode>] [--intervention_steps <steps>] [--intervention_k <k>] [--wandb <True|False>] [--tracing_enabled <True|False>] [--slurm]"
-    echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm (fdm), fhs (fhs), top_k_c (top_k_confidence), top_k_m (top_k_margin), dus (dus)"
-    echo "  Optional - Intervention: --intervention_mode drop|swap, --intervention_steps 0,128,256, --intervention_k 1"
-    echo "  Optional - Wandb: --wandb True to log to wandb"
-    echo "  Optional - Few-shot: --num_fewshot <n> to override per-task default (defaults: humaneval/arc_challenge_chat 0, gsm8k/math500 4, mbpp 3)"
-    echo "  Optional - Block length: --block_length <n> to override (defaults: block_diffusion 32, fdm 64, dus 16, else gen_length)"
-    echo "  Optional - Top-k: --top_k <n> for top_k scheduler (default 2, tokens to transfer per step)"
-    echo "  Optional - Tracing: --tracing_enabled True to enable scheduler tracing (writes trace_outputs/<trace_name>.json)"
-            echo "  Optional - Hidden states: --capture_pre_logits True [--hidden_capture_path <dir>] (default dir under outputs/ or checkpoint/hidden)"
-            echo "  Optional - CST: --cst_checkpoint <.pt> (implies capture; also --cst_config_path, --cst_target_staging_gb, --cst_ntf_conf_low, --cst_ntf_conf_high, --cst_ntf_first_non_eos)"
-    echo "  Optional - SLURM: --slurm to run the eval under srun (for sbatch submissions)"
-    echo "  Optional - Resumable: --resumable writes outputs/{run_id}/checkpoint.jsonl and resumes skipped samples; traces use JSONL when tracing is on. Use --run_id for custom id."
+    echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
+    echo "  Core optional: --num_fewshot <n> --block_length <n> --top_k <n> --compile_model <bool>"
+    echo "  Harness (see eval.LLaDAEvalHarness): --intervention_mode drop|swap, --intervention_steps 0,128,256, --intervention_k <k>"
+    echo "  --wandb <True|False>  --tracing_enabled <True|False>  (tracing: trace_outputs/ or JSONL when --resumable)"
+    echo "  Hidden / CST: --capture_pre_logits <True|False> [--hidden_capture_path <dir>]"
+    echo "    --cst_checkpoint <.pt> implies capture; also --cst_config_path, --cst_target_staging_gb, --cst_ntf_conf_low, --cst_ntf_conf_high, --cst_ntf_first_non_eos"
+    echo "  Decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode, see eval.py)"
+    echo "  Run: --slurm (srun for sbatch)  --resumable [--run_id]  (checkpoint under outputs/…)"
+    echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm, fhs, top_k_c (top_k+confidence), top_k_m (top_k+top_margin), dus"
+    echo "  Few-shot defaults: humaneval/arc 0, gsm8k/math500 4, mbpp 3, arc_challenge_chat 5; block_length defaults: bd 32, fdm 64, dus 16, else gen_length"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
-    echo "Example with intervention: $0 --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True"
+    echo "Example: $0 --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True"
     exit 1
 fi
 
