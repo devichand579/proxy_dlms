@@ -71,6 +71,16 @@ class DreamSchedulersCompatWrapper(nn.Module):
 
         position_ids = u.get("position_ids")
         attention_mask = u.get("attention_mask")
+        # Tokenizers pass 0/1 as long; Dream uses SDPA which requires bool or a float mask matching
+        # query dtype (not int64) — same schedulers path as lm-eval.
+        if (
+            torch.is_tensor(attention_mask)
+            and attention_mask.dim() == 2
+            and not attention_mask.dtype.is_floating_point
+            and attention_mask.dtype != torch.bool
+        ):
+            u["attention_mask"] = attention_mask != 0
+            attention_mask = u["attention_mask"]
         if position_ids is None and torch.is_tensor(attention_mask) and attention_mask.dim() == 2:
             f = attention_mask
             f = f.float() if f.dtype == torch.bool else f.to(dtype=torch.float32, device=attention_mask.device)
