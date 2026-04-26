@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=42gb
 #SBATCH --time=47:00:00
-#SBATCH --partition=gpupart_a40  # gpupart_v100, gpupart_a40, gpu_h100, dibdp (AIRAWAT)
+#SBATCH --partition=gpupart_a40 , gpupart_l40, gpu_h100, dibdp (AIRAWAT)
 #SBATCH --gres=gpu:1  # ignore if your cluster doesn't have a qos for GPUs
 
 ########################################################################################
