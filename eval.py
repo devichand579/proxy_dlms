@@ -457,7 +457,8 @@ class LLaDAEvalHarness(LM):
             _k_tok,
             _w_tok,
         )
-        self.logger.info(f"CST eval hidden name token: {self._cst_eval_hidden_name_token}")
+        if cst_enabled:
+            self.logger.info("CST eval hidden name token: %s", self._cst_eval_hidden_name_token)
 
         # Optional CST: same prompts/dataset as this lm-eval run (per ``task_name``), not a mixed sampler.
         self._cst_eval_bank = None

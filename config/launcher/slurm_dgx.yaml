@@ -13,7 +13,7 @@ hydra:
     qos: gpu2
     timeout_min: 4320   # 72h
     mem_gb: 72
-    gres: gpu:2
+    gres: gpu:1
     cpus_per_task: 8
     nodes: 1
     tasks_per_node: 1
