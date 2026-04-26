@@ -264,8 +264,7 @@ export HF_ALLOW_CODE_EVAL=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true
 export LMEVAL_LOG_LEVEL=INFO
 export TOKENIZERS_PARALLELISM=false
-# HF_TOKEN: set via environment or `huggingface-cli login` — do not hardcode here.
-# export HF_TOKEN=...
+export HF_TOKEN=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
 
 # When running locally (not --slurm), you can set CUDA_VISIBLE_DEVICES; when --slurm, leave to SLURM allocation.
 if [[ "$SLURM_MODE" != "true" ]]; then
@@ -273,8 +272,7 @@ if [[ "$SLURM_MODE" != "true" ]]; then
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 fi
 
-# WANDB_API_KEY: set via environment or `wandb login` — do not hardcode here.
-# export WANDB_API_KEY=...
+export WANDB_API_KEY=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
 export WANDB_PROJECT=strace
 
 # Tracing: enable only when --tracing_enabled True (default off to avoid overhead)
