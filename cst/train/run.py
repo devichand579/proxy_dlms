@@ -167,6 +167,16 @@ def _train_cst_on_chunks_and_checkpoint(
 
 
 def run_train(cfg: DictConfig) -> int:
+    import sys
+    from pathlib import Path
+
+    _root = Path(__file__).resolve().parents[2]
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    from repo_env_defaults import apply_repo_env_defaults
+
+    apply_repo_env_defaults()
+
     try:
         import wandb
     except ImportError:

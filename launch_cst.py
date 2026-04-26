@@ -6,6 +6,12 @@ import logging
 import sys
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from repo_env_defaults import apply_repo_env_defaults
+
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
@@ -87,6 +93,7 @@ def _run_offline_eval(cfg: DictConfig) -> int:
 
 @hydra.main(version_base="1.2", config_path=str(_CONFIG_DIR), config_name="cst")
 def main(cfg: DictConfig) -> None:
+    apply_repo_env_defaults()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     mode = str(cfg.get("mode", "train")).lower()
     if mode == "eval":

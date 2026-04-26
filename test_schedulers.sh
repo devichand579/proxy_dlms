@@ -76,9 +76,10 @@ EXAMPLES:
 EOF
 }
 
-# Default values
+# Default values (mirror .env.example / repo_env_defaults.py)
 TRACING_ENABLED="${TRACING_ENABLED:-True}"
-WANDB_API_KEY="${WANDB_API_KEY:-}"  # set via environment or `wandb login`
+HF_TOKEN="${HF_TOKEN:-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}"
+WANDB_API_KEY="${WANDB_API_KEY:-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}"
 WANDB_PROJECT="${WANDB_PROJECT:-strace}"
 
 # Parse arguments
@@ -151,6 +152,7 @@ conda activate strace
 
 # Export environment variables
 export TRACING_ENABLED
+export HF_TOKEN
 export WANDB_API_KEY
 export WANDB_PROJECT
 export CUDA_DEVICE_ORDER=PCI_BUS_ID

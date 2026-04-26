@@ -663,6 +663,16 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
     if use_wandb and WANDB_AVAILABLE and wandb.run is not None:
         wandb.finish()
 if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    _root = Path(__file__).resolve().parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    from repo_env_defaults import apply_repo_env_defaults
+
+    apply_repo_env_defaults()
+
     parser = argparse.ArgumentParser(description='Test different schedulers')
     parser.add_argument(
         '--scheduler', 
