@@ -15,9 +15,12 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from repo_env_defaults import apply_repo_env_defaults
+
 
 @hydra.main(version_base="1.3", config_path="config", config_name="tag")
 def main(cfg: DictConfig) -> int:
+    apply_repo_env_defaults()
     from tag.pipeline import run_tag_from_chunk, run_tag_full
     from tag.viz import write_tag_html, write_graph_json
 

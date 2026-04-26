@@ -7,6 +7,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from repo_env_defaults import apply_repo_env_defaults
+
 import hydra
 from omegaconf import DictConfig
 
@@ -55,6 +61,7 @@ def _to_bool(val) -> bool:
 
 def run(cfg: DictConfig) -> int:
     """Build and run the accelerate eval command from Hydra config."""
+    apply_repo_env_defaults()
     # Use script dir as project root so SLURM jobs (which may run from sweep dir) still find eval.py
     project_root = Path(__file__).resolve().parent
     batch_size = int(cfg.get("batch_size", 4))
@@ -181,7 +188,6 @@ def run(cfg: DictConfig) -> int:
     if resumable:
         env["RESUMABLE_RUN_ID"] = output_suffix
         env["CHECKPOINT_DIR"] = checkpoint_dir
-    # W&B auth: set WANDB_API_KEY in the environment (or ~/.netrc); do not hardcode keys in-repo.
     env.setdefault("WANDB_PROJECT", str(cfg.get("wandb_project", "strace")))
 
     wandb_resume_args = ""

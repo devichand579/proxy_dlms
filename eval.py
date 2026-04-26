@@ -1046,6 +1046,12 @@ class LLaDAEvalHarness(LM):
         return all_gen_texts
 
 if __name__ == "__main__":
+    _repo_root = Path(__file__).resolve().parent
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+    from repo_env_defaults import apply_repo_env_defaults
+
+    apply_repo_env_defaults()
     set_seed(1234)
     # lm-eval-harness marks some tasks (e.g., Humaneval) as unsafe because they execute model-generated code.
     if "--confirm_run_unsafe_code" not in sys.argv:
