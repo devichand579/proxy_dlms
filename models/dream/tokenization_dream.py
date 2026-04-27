@@ -278,12 +278,20 @@ class DreamTokenizer(PreTrainedTokenizer):
     # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer._convert_id_to_token
     def _convert_id_to_token(self, index):
         """Converts an index (integer) in a token (str) using the vocab."""
-        return self.decoder.get(index)
+        tok = self.decoder.get(index)
+        # Model can rarely emit ids not in ``decoder`` (e.g. edge of vocab); ``None`` breaks
+        # ``convert_tokens_to_string`` (``"".join``). Substitute an empty BPE piece.
+        if tok is None:
+            logger.warning(
+                "DreamTokenizer: no decoder entry for token id %s; using empty string piece.", index
+            )
+            return ""
+        return tok
 
     # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer.convert_tokens_to_string
     def convert_tokens_to_string(self, tokens):
         """Converts a sequence of tokens (string) in a single string."""
-        text = "".join(tokens)
+        text = "".join(t if t is not None else "" for t in tokens)
         text = bytearray([self.byte_decoder[c] for c in text]).decode("utf-8", errors=self.errors)
         return text
 
