@@ -71,22 +71,28 @@ class DreamSchedulersCompatWrapper(nn.Module):
 
         position_ids = u.get("position_ids")
         attention_mask = u.get("attention_mask")
-        # Tokenizers pass 0/1 as long; Dream uses SDPA which requires bool or a float mask matching
-        # query dtype (not int64) — same schedulers path as lm-eval.
-        if (
-            torch.is_tensor(attention_mask)
-            and attention_mask.dim() == 2
-            and not attention_mask.dtype.is_floating_point
-            and attention_mask.dtype != torch.bool
-        ):
-            u["attention_mask"] = attention_mask != 0
-            attention_mask = u["attention_mask"]
-        if position_ids is None and torch.is_tensor(attention_mask) and attention_mask.dim() == 2:
-            f = attention_mask
-            f = f.float() if f.dtype == torch.bool else f.to(dtype=torch.float32, device=attention_mask.device)
-            pos = f.long().cumsum(-1) - 1
-            pos.masked_fill_(f == 0, 1)
-            u["position_ids"] = pos
+        # Unify across PyTorch / SDPA / Flash backends: never pass 2D int/bool into Dream — behavior differs
+        # by version. Pre-build the same (B,1,1,S) float additive padding mask as DreamSdpaAttention, in
+        # model activations dtype, so SDPA always sees a single contract (see models/dream/modeling_dream.py).
+        if torch.is_tensor(attention_mask) and attention_mask.dim() == 2:
+            if attention_mask.dtype.is_floating_point:
+                keep = attention_mask > 0.5
+            elif attention_mask.dtype == torch.bool:
+                keep = attention_mask
+            else:
+                keep = attention_mask != 0
+
+            if position_ids is None:
+                pos = keep.to(dtype=torch.long, device=keep.device).cumsum(-1) - 1
+                pos.masked_fill_(~keep, 0)
+                u["position_ids"] = pos
+
+            w_dtype = next(self._inner.parameters()).dtype
+            if w_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                w_dtype = torch.float32
+            min_f = torch.finfo(w_dtype).min
+            u["attention_mask"] = (~keep).to(w_dtype)[:, None, None, :].contiguous() * min_f
+        # 4D mask or None: pass through; DreamSdpaAttention uses 4D as attn_mask directly.
 
         out = self._inner(**u)
         if hasattr(out, "logits") and out.logits is not None:
