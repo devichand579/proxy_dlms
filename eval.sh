@@ -263,6 +263,7 @@ esac
 # Initialize conda for this shell session
 eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
 conda activate strace
+export PATH="$CONDA_PREFIX/bin:$PATH" 
 
 # Set the environment variables first before running the command.
 export HF_ALLOW_CODE_EVAL=1
@@ -274,7 +275,7 @@ export HF_TOKEN=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
 # When running locally (not --slurm), you can set CUDA_VISIBLE_DEVICES; when --slurm, leave to SLURM allocation.
 if [[ "$SLURM_MODE" != "true" ]]; then
     export CUDA_DEVICE_ORDER=PCI_BUS_ID
-    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 fi
 
 export WANDB_API_KEY=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
