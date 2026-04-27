@@ -10,7 +10,12 @@ from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
-from load_model import load_model_and_tokenizer, infer_diffusion_token_ids
+from load_model import (
+    load_model_and_tokenizer,
+    infer_diffusion_token_ids,
+    is_dream_model_dir,
+    prepend_bos_for_dream,
+)
 from cst import save_hidden_records
 from cst.naming import cst_resumable_eval_agg_path, cst_eval_task_name_token, model_label_from_path, scheduler_short_from_eval_mode
 from cst.eval.agg_persist import (
@@ -351,6 +356,7 @@ class LLaDAEvalHarness(LM):
 
         self.model = self.model.to(self.device)
         self.model.eval()
+        self._dream_prepend_bos = is_dream_model_dir(self._model_path)
         self.mode = str(mode)
         self.strategy = str(strategy)
         self.top_k = int(top_k)
@@ -415,6 +421,8 @@ class LLaDAEvalHarness(LM):
             self.logger.info("Wandb not available, skipping wandb logging")
 
         self.logger.info(f"Model path: {self._model_path}")
+        if self._dream_prepend_bos:
+            self.logger.info("Dream: prepending BOS to encoded prompts (upstream eval style)")
         self.logger.info(f"Mode: {self.mode}")
         self.logger.info(f"Strategy: {self.strategy}")
         self.logger.info(f"Top-k: {self.top_k}")
@@ -706,11 +714,21 @@ class LLaDAEvalHarness(LM):
         correct = torch.all(correct)
         return correct
 
+    def _maybe_bos_prompts(self, texts):
+        """Dream checkpoints: prefix BOS before tokenize (see Dream eval ``add_bos_token``)."""
+        if not self._dream_prepend_bos:
+            return texts
+        if isinstance(texts, str):
+            return prepend_bos_for_dream(self.tokenizer, texts)
+        return [prepend_bos_for_dream(self.tokenizer, t) for t in texts]
+
     def _encode_pair(self, context, continuation):
         n_spaces = len(context) - len(context.rstrip())
         if n_spaces > 0:
             continuation = context[-n_spaces:] + continuation
             context = context[:-n_spaces]
+        if self._dream_prepend_bos:
+            context = prepend_bos_for_dream(self.tokenizer, context)
 
         whole_enc = self.tokenizer(context + continuation)["input_ids"]
         context_enc = self.tokenizer(context)["input_ids"]
@@ -768,6 +786,7 @@ class LLaDAEvalHarness(LM):
 
         # Get prompt lengths and group request indices by length bucket for better batching
         question_texts = [req.args[0] for req in requests]
+        question_texts = self._maybe_bos_prompts(question_texts)
         enc_no_pad = self.tokenizer(question_texts, add_special_tokens=False, padding=False)
         lengths = [len(ids) for ids in enc_no_pad["input_ids"]]
         bucket_to_indices = defaultdict(list)
@@ -812,7 +831,9 @@ class LLaDAEvalHarness(LM):
                 # Run model only for to_compute
                 if to_compute:
                     to_compute_indices, to_compute_requests = zip(*to_compute)
-                    chunk_question_texts = [req.args[0] for req in to_compute_requests]
+                    chunk_question_texts = self._maybe_bos_prompts(
+                        [req.args[0] for req in to_compute_requests]
+                    )
 
                     encoded_outputs = self.tokenizer(
                         chunk_question_texts,

@@ -13,7 +13,9 @@ from load_model import (
     LLADA_DEFAULT_MASK_ID,
     infer_b44_eos_unmask_safety,
     infer_diffusion_token_ids,
+    is_dream_model_dir,
     load_model_and_tokenizer,
+    prepend_bos_for_dream,
 )
 from schedulers.llada_schedulers import generate_llada
 from schedulers.top_k import generate_topk
@@ -402,6 +404,8 @@ def run_batch_tests(
         "If 3x + 5 = 20, what is x?",
     ]
     prompts = (prompts * ((batch_size // len(prompts)) + 1))[:batch_size]
+    if model_path is not None and is_dream_model_dir(model_path):
+        prompts = [prepend_bos_for_dream(tokenizer, p) for p in prompts]
     encoded = tokenizer(
         prompts,
         add_special_tokens=False,
@@ -613,6 +617,8 @@ def main(scheduler_name=None, use_wandb=False, wandb_project=None, wandb_name=No
         assert tokenizer.pad_token_id != mask_id, "pad token must differ from [MASK] for correct inference"
 
         prompt = "Joy can read 8 pages of a book in 20 minutes. How many hours will it take her to read 120 pages?"
+        if is_dream_model_dir(model_dir):
+            prompt = prepend_bos_for_dream(tokenizer, prompt)
 
         encoded_outputs = tokenizer(
             prompt,
