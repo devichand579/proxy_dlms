@@ -85,18 +85,34 @@ def _rescale_hitting_times_survival(tau_per_token, masked, k, tau_new, tau_upper
 def sample_categorical(logits, temperature=1.0, use_fp64=True):
     """
     Sample from a categorical distribution.
+
+    ``torch.multinomial`` asserts on CUDA if probabilities are NaN/Inf/negative; that can happen when
+    logits are pathological (e.g. after B.4 EOS/EoT ``-inf`` masking) or extrapolation produces non-finite values.
     """
     if temperature == 0.0:
         return torch.argmax(logits, dim=-1)
 
     if use_fp64:
         logits = logits.double()
+    else:
+        logits = logits.float()
 
-    probs = F.softmax(logits / temperature, dim=-1)
-    probs = probs.clamp(min=1e-12)
+    # Stabilize before softmax (avoids NaN when a row is all -inf or extreme).
+    logits = logits - logits.max(dim=-1, keepdim=True).values
+    logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
 
-    # multinomial will use dtype of probs
-    return torch.multinomial(probs, num_samples=1).squeeze(-1)
+    scaled = logits / temperature if temperature != 1.0 else logits
+    probs = F.softmax(scaled, dim=-1)
+    probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+    denom = probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    probs = (probs / denom).clamp(min=0.0)
+    denom2 = probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    probs = probs / denom2
+
+    if not torch.isfinite(probs).all():
+        return torch.argmax(logits, dim=-1)
+
+    return torch.multinomial(probs, num_samples=1, replacement=True).squeeze(-1)
 
 
 
@@ -225,9 +241,12 @@ def generate_fhs_extrapolation(
                 )
 
             # Decode ONE token per batch; τ_new = actual hitting time; rescale on survival
+            seq_len = x.shape[1]
             for b in range(prompt.shape[0]):
                 k, tau_new_b = picks[b][0], picks[b][1]
                 if k is None:
+                    continue
+                if not (0 <= k < seq_len):
                     continue
                 token = sample_categorical(mu_hat[b, k], temperature)
                 x[b, k] = token
@@ -342,11 +361,14 @@ def generate_fhs_predictor_corrector(
             mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
             mu_pred = logits
+            seq_len = x.shape[1]
 
             # Decode ONE token per batch; τ_new = actual hitting time; rescale on survival
             for b in range(prompt.shape[0]):
                 k, tau_new_b = picks[b][0], picks[b][1]
                 if k is None:
+                    continue
+                if not (0 <= k < seq_len):
                     continue
                 token = sample_categorical(mu_pred[b, k], temperature)
                 x[b, k] = token
