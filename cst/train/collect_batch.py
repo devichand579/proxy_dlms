@@ -8,7 +8,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 
 from cst import save_hidden_records
-from load_model import infer_diffusion_token_ids, load_model_and_tokenizer
+from load_model import (
+    infer_diffusion_token_ids,
+    is_dream_model_dir,
+    load_model_and_tokenizer,
+    prepend_bos_for_dream,
+)
 from schedulers.generate import generate
 
 
@@ -68,6 +73,9 @@ def collect_hidden_batch_loaded(
         strategy = "confidence"
     bl = resolve_block_length(mode, gen_length, block_length)
     mask_id, eos_id, eot_id = infer_diffusion_token_ids(model_path)
+
+    if is_dream_model_dir(model_path):
+        texts = [prepend_bos_for_dream(tokenizer, t) for t in texts]
 
     enc = tokenizer(
         texts,

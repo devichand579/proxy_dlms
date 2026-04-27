@@ -53,6 +53,27 @@ def infer_b44_eos_unmask_safety(model_dir: Union[str, Path]) -> bool:
     return model_dir.name == "llada1_5"  # e.g. ./models/llada1_5
 
 
+def is_dream_model_dir(model_dir: Union[str, Path]) -> bool:
+    """True if ``config.json`` has ``model_type`` dream (aligns with DreamLM upstream eval)."""
+    try:
+        mdir = Path(model_dir).resolve()
+        if not mdir.is_dir():
+            return False
+        return str(_read_config(mdir).get("model_type", "")).lower() == "dream"
+    except (OSError, FileNotFoundError, KeyError, TypeError, json.JSONDecodeError, ValueError):
+        return False
+
+
+def prepend_bos_for_dream(tokenizer, text: str) -> str:
+    """Prefix ``tokenizer.bos_token`` like Dream's ``add_bos_token`` eval path; idempotent if already present."""
+    bt = getattr(tokenizer, "bos_token", None)
+    if not bt:
+        return text
+    if text.startswith(bt):
+        return text
+    return bt + text
+
+
 class DreamSchedulersCompatWrapper(nn.Module):
     """Dream forward for schedulers: pad-derived position_ids + logits align like Dream's _sample."""
 
