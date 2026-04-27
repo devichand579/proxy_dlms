@@ -381,7 +381,6 @@ class LLaDAEvalHarness(LM):
 
         self.mc_num = int(mc_num)
         self.batch_size = int(batch_size)
-        assert self.mc_num % self.batch_size == 0
         self.sampling_eps = 0.
         self.is_check_greedy = is_check_greedy
 
