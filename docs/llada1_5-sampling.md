@@ -29,6 +29,27 @@ When **true**, **`schedulers.generate.generate`** (and code paths that pass `mod
 
 There is **no** separate switch in `config/config.yaml`, `eval.sh`, or `cst.yaml` — you only need the **model path** to resolve to `llada1_5` (or use the config key above).
 
+## Why numerics can blow up (and why `torch.multinomial` complains)
+
+B.4 **intentionally** sets EOS / EoT logits to \(-\infty\) in the paths used for sampling and confidence. Side effects:
+
+1. **After** zeroing some vocabulary dimensions, remaining logits can still be **extreme** (all very negative, or the row looks “mostly killed” by masking).
+2. **Softmax** over rows that are dominated by \(-\infty\) or otherwise ill-conditioned can yield **NaNs**, **all zeros**, or **tiny garbage** — not a clean probability vector on the simplex.
+3. **`torch.multinomial`** requires **finite, non‑negative** probabilities that **sum to a positive value**. Invalid rows can **assert on CUDA** instead of returning a sample.
+
+So the failure mode is: **B.4 makes logits pathological in the EOS/EoT dimensions** → **sometimes** the whole row’s softmax / categorical draw is **ill-conditioned** → **`multinomial` is unsafe** without extra stabilization. This shows up in schedulers that **sample** from those logits (e.g. **FHS** with `temperature > 0`), not because B.4 is wrong, but because **sampling code** must tolerate those rows.
+
+## What `sample_categorical` in FHS is doing (conceptually)
+
+`schedulers/fhs.py` stabilizes the categorical draw:
+
+1. **Stabilize** logits (e.g. max-subtract, `nan_to_num`, fp64) so softmax is well-defined more often.
+2. **Softmax + renormalize** to obtain a proper distribution when possible.
+3. **`multinomial`** — the intended “arrange, then sample” path.
+4. **`argmax` fallback** only when, after repair, probabilities are **still** not finite — a degenerate row where a stochastic sample is not well-defined; this is a last resort, not the normal B.4 path.
+
+In other words: **B.4 addresses EOS collapse; FHS `sample_categorical` addresses the sampling numerics that B.4 can trigger** on `llada1_5` (and the same FHS code runs for other models, so everyone benefits from stable sampling).
+
 ## Opting out or overriding
 
 - **`"strace_b44_eos_unmask": false`** in that checkpoint’s `config.json` forces B.4 **off** even under a directory named `llada1_5` (if you need to reproduce the old behavior for debugging).
@@ -44,3 +65,4 @@ There is **no** separate switch in `config/config.yaml`, `eval.sh`, or `cst.yaml
 - `load_model.py`: `infer_b44_eos_unmask_safety`
 - `schedulers/generate.py`: applies B.4 when `model_path` is set and inference returns true
 - `eval.py`: passes `model_path` into `generate` so eval matches smoke tests
+- `schedulers/fhs.py`: `sample_categorical` (stabilize → softmax/renorm → `multinomial`, rare `argmax` fallback); FHS extrapolation guards (`EXTRAPOL_EPS`, safe `k` indexing)

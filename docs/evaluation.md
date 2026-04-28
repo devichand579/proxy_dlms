@@ -36,7 +36,7 @@ Config defaults: `config/config.yaml`. Override on the CLI: `task_name=gsm8k mod
 | `--num_fewshot` | Optional: override per-task few-shot (defaults vary by task). |
 | `--slurm` | Use when submitting via `sbatch` so the command runs under `srun`. |
 | `--resumable` | Checkpointed evaluation: fixed output directory, sample-level resume (see below). |
-| `--run_id` | With `--resumable`, directory name under `outputs/` (default: `{model}_{task}_{mode}`, or includes intervention tags when set). |
+| `--run_id` | With `--resumable`, directory name under `outputs/` (default: `{model}_{task}_{mode}`, or `{model}_{task}_{top_k}_{strategy}` for `top_k_*` modes, or includes intervention tags when set). |
 | `--capture_pre_logits` | `True` to save pre-logit hidden states during eval; used with [CST / hidden capture](cst.md). |
 | `--hidden_capture_path` | Directory for saved `.pt` files. **Must not contain commas** (model args). If omitted, defaults to `outputs/<run_suffix>/hidden`, or `<checkpoint_dir>/hidden` with `--resumable`. |
 | Other CST flags | e.g. `--cst_checkpoint`, `--cst_config_path`, `--cst_target_staging_gb` — see [CST](cst.md). |
@@ -86,7 +86,7 @@ Long jobs can save partial progress and continue with the same command.
 
 **Enable:** `--resumable` in `eval.sh`, or `resumable=true` in `config/config.yaml` / CLI. Optional `run_id=my_run` for a custom folder.
 
-**Paths:** without resumable, filenames get a timestamp. With resumable, outputs live under `outputs/{run_id}/` (`run_id` or `{model}_{task}_{mode}` plus intervention tags when set).
+**Paths:** without resumable, filenames get a timestamp. With resumable, outputs live under `outputs/{run_id}/` (`run_id` or `{model}_{task}_{mode}` plus `_{strategy}` for `top_k` when not using explicit `run_id`, plus intervention tags when set).
 
 **Checkpoint file:** `outputs/{run_id}/checkpoint.jsonl` — one line per completed sample (`doc_id`, `task_name`, `prompt`, `resps`). On restart, those pairs are skipped; new lines append so crashes do not lose work.
 

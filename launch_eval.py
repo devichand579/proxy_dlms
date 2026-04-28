@@ -29,6 +29,18 @@ MODE_MAP = {
 }
 
 
+def _resumable_output_basename(model: str, task_name: str, mode: str, strategy) -> str:
+    """Segment for outputs/<name>/ … ; disambiguates top_k+confidence vs top_k+top_margin."""
+    if mode == "top_k":
+        s = ""
+        if strategy is not None:
+            s = str(strategy).strip()
+        if not s:
+            s = "confidence"
+        return f"{model}_{task_name}_{mode}_{s}"
+    return f"{model}_{task_name}_{mode}"
+
+
 def get_num_fewshot(task_name: str) -> int:
     if "humaneval" in task_name:
         return 0
@@ -91,6 +103,7 @@ def run(cfg: DictConfig) -> int:
         mode, strategy = MODE_MAP[mode_input]
     else:
         mode = mode_input
+        strategy = cfg.get("strategy")
 
     gen_length, steps = get_gen_length_steps(task_name)
     block_length_cfg = cfg.get("block_length")
@@ -112,23 +125,25 @@ def run(cfg: DictConfig) -> int:
     if resumable and run_id:
         output_suffix = str(run_id)
     elif resumable:
-        output_suffix = f"{model}_{task_name}_{mode}"
+        base = _resumable_output_basename(model, task_name, mode, strategy)
+        output_suffix = base
         if intervention_mode:
             steps_raw = intervention_steps if intervention_steps is not None else "0"
             if isinstance(steps_raw, (list, tuple)):
                 steps_safe = "_".join(str(s) for s in steps_raw)
             else:
                 steps_safe = re.sub(r"[,_]", "_", str(steps_raw))
-            output_suffix = f"{model}_{task_name}_{mode}_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}"
+            output_suffix = f"{base}_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}"
     else:
-        output_suffix = f"{model}_{task_name}_{mode}_{timestamp}"
+        base_ts = _resumable_output_basename(model, task_name, mode, strategy)
+        output_suffix = f"{base_ts}_{timestamp}"
         if intervention_mode:
             steps_raw = intervention_steps if intervention_steps is not None else "0"
             if isinstance(steps_raw, (list, tuple)):
                 steps_safe = "_".join(str(s) for s in steps_raw)
             else:
                 steps_safe = re.sub(r"[,_]", "_", str(steps_raw))
-            output_suffix = f"{model}_{task_name}_{mode}_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}_{timestamp}"
+            output_suffix = f"{base_ts}_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}_{timestamp}"
     wandb_name = output_suffix
 
     checkpoint_dir = f"outputs/{output_suffix}" if resumable else None
