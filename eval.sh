@@ -260,6 +260,12 @@ case "$MODE" in
         ;;
 esac
 
+# ``top_k_c`` / ``top_k_m`` both use mode=top_k; include strategy so resumable dirs / W&B names differ.
+TOPK_TAG=""
+if [[ "$MODE" == "top_k" ]]; then
+    TOPK_TAG="_${STRATEGY:-confidence}"
+fi
+
 # Initialize conda for this shell session
 eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
 conda activate strace
@@ -275,7 +281,7 @@ export HF_TOKEN=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
 # When running locally (not --slurm), you can set CUDA_VISIBLE_DEVICES; when --slurm, leave to SLURM allocation.
 if [[ "$SLURM_MODE" != "true" ]]; then
     export CUDA_DEVICE_ORDER=PCI_BUS_ID
-    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 fi
 
 export WANDB_API_KEY=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
@@ -332,21 +338,21 @@ if [[ "$RESUMABLE" == "true" ]]; then
     if [[ -n "$RUN_ID" ]]; then
         OUTPUT_SUFFIX="$RUN_ID"
     else
-        OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}"
+        OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}"
         if [[ -n "$INTERVENTION_MODE" ]]; then
             INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
             INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
-            OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}_intv_${INTERVENTION_MODE}_steps${INTERVENTION_STEPS_SAFE}_k${INTERVENTION_K:-1}"
+            OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}_intv_${INTERVENTION_MODE}_steps${INTERVENTION_STEPS_SAFE}_k${INTERVENTION_K:-1}"
         fi
     fi
     CHECKPOINT_DIR="outputs/${OUTPUT_SUFFIX}"
     mkdir -p "$CHECKPOINT_DIR"
 else
-    OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}_${TIMESTAMP}"
+    OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}_${TIMESTAMP}"
     if [[ -n "$INTERVENTION_MODE" ]]; then
         INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
         INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
-        OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}_intv_${INTERVENTION_MODE}_steps${INTERVENTION_STEPS_SAFE}_k${INTERVENTION_K:-1}_${TIMESTAMP}"
+        OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}_intv_${INTERVENTION_MODE}_steps${INTERVENTION_STEPS_SAFE}_k${INTERVENTION_K:-1}_${TIMESTAMP}"
     fi
     CHECKPOINT_DIR=""
 fi
