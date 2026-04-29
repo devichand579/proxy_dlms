@@ -48,7 +48,7 @@ cst_ntf_first_non_eos: false
 cst_target_staging_gb: 1.0
 
 # Checkpointing: when true, use stable run_id (no timestamp)
-resumable: false
+resumable: true
 run_id: null  # optional custom dir name; if null: {model}_{task}_{mode}, or for top_k: ..._{mode}_{confidence|top_margin}
 
 # Env / paths

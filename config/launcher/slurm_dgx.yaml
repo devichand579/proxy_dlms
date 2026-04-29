@@ -14,7 +14,7 @@ hydra:
     timeout_min: 4320   # 72h
     mem_gb: 78
     gres: gpu:2
-    cpus_per_task: 24
+    cpus_per_task: 8
     nodes: 1
     tasks_per_node: 1
     signal_delay_s: 120
