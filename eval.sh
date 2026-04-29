@@ -49,8 +49,7 @@
 # --model: basename of a folder under ./models/ (must match lm-eval registration). Examples: llada, llada1_5, dream.
 #          Weights/tokenizer load from ./models/<model>/; mask/EOS/EoT ids come from that folder's config when not overridden.
 # --slurm: run the eval command under srun (use when script is submitted via sbatch so the job uses the allocated GPU).
-# --parallel_gpus N: run N evaluations in parallel (subshells); --task_name must list N comma-separated tasks only
-#                     (same global mode/model). For different mode/model/task per GPU, use launch_eval.yaml parallel_runs or eval.sh --parallel_config FILE.
+# Multi-GPU: use --parallel_config <YAML> → launch_eval.py parallel_runs_file= (see config/parallel_eval_runs.yaml).
 # Local GPU: run without --slurm; optionally export CUDA_VISIBLE_DEVICES=0 or 1  before running.
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,7 +68,6 @@ NUM_FEWSHOT_OVERRIDE=""
 BLOCK_LENGTH_OVERRIDE=""
 TOP_K_OVERRIDE=""
 SLURM_MODE=false
-PARALLEL_GPUS=1
 RESUMABLE=false
 RUN_ID=""
 CAPTURE_PRE_LOGITS=""
@@ -137,10 +135,6 @@ while [[ $# -gt 0 ]]; do
             TOP_K_OVERRIDE="$2"
             shift 2
             ;;
-        --parallel_gpus)
-            PARALLEL_GPUS="$2"
-            shift 2
-            ;;
         --parallel_config|--parallel_runs_file)
             PARALLEL_CONFIG="$2"
             shift 2
@@ -200,13 +194,13 @@ while [[ $# -gt 0 ]]; do
         *)
             echo "Unknown option: $1"
             echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
-            echo "  Core optional: --num_fewshot --block_length --top_k --compile_model [--parallel_gpus N with N tasks in --task_name]"
+            echo "  Core optional: --num_fewshot --block_length --top_k --compile_model"
             echo "  Harness (eval.LLaDAEvalHarness / --model_args): --intervention_mode --intervention_steps --intervention_k"
             echo "  --wandb --tracing_enabled --capture_pre_logits --hidden_capture_path"
             echo "  --cst_checkpoint [--cst_config_path --cst_target_staging_gb --cst_ntf_conf_low --cst_ntf_conf_high --cst_ntf_first_non_eos]"
             echo "  EOS decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode)"
             echo "  Alternative multi-GPU: --parallel_config <parallel_runs.yaml> (per-GPU overrides: mode/model/task/batch — delegates to launch_eval.py parallel_runs_file=)"
-            echo "Run: --resumable [--run_id] --slurm  |  Multi-GPU one job: --parallel_gpus N with N tasks in --task_name  |  --parallel_config <yaml>"
+            echo "Run: --resumable [--run_id] --slurm  |  Multi-GPU: --parallel_config <parallel_runs.yaml>"
             exit 1
             ;;
     esac
@@ -240,37 +234,13 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "    --cst_checkpoint <.pt> implies capture; also --cst_config_path, --cst_target_staging_gb, --cst_ntf_conf_low, --cst_ntf_conf_high, --cst_ntf_first_non_eos"
     echo "  Decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode, see eval.py)"
     echo "  Run: --slurm (srun for sbatch)  --resumable [--run_id]  (checkpoint under outputs/…)"
-    echo "  Multi-GPU one job (e.g. DGX gpu:2): --parallel_gpus N  and  --task_name t1,t2,...,tN  (comma list; CUDA_VISIBLE_DEVICES=0..N-1 per child; no inner srun)"
-    echo "  Or: --parallel_config <yaml>  (per-GPU settings: mode, model, task, batch_size, …; see docs/evaluation.md)"
+    echo "  Multi-GPU: --parallel_config <yaml> per-GPU settings (launch_eval parallel_runs_file=); see docs/evaluation.md"
     echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm, fhs, top_k_c (top_k+confidence), top_k_m (top_k+top_margin), dus"
     echo "  Few-shot defaults: humaneval/arc 0, gsm8k/math500 4, mbpp 3, arc_challenge_chat 5; block_length defaults: bd 32, fdm 64, dus 16, else gen_length"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True"
     exit 1
 fi
-fi
-
-if [[ -z "$PARALLEL_CONFIG" ]]; then
-
-PARALLEL_GPUS="${PARALLEL_GPUS:-1}"
-if ! [[ "$PARALLEL_GPUS" =~ ^[0-9]+$ ]] || [[ "$PARALLEL_GPUS" -lt 1 ]]; then
-    echo "Error: --parallel_gpus must be a positive integer"
-    exit 1
-fi
-TASK_LIST_CLEAN=()
-if [[ "$PARALLEL_GPUS" -ge 2 ]]; then
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line//$'\r'/}"
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        [[ -n "$line" ]] && TASK_LIST_CLEAN+=("$line")
-    done < <(echo "$TASK_NAME" | tr ',' '\n')
-    if [[ ${#TASK_LIST_CLEAN[@]} -ne "$PARALLEL_GPUS" ]]; then
-        echo "Error: --parallel_gpus ${PARALLEL_GPUS} requires exactly ${PARALLEL_GPUS} comma-separated task names in --task_name; got ${#TASK_LIST_CLEAN[@]} (${TASK_NAME})"
-        exit 1
-    fi
-fi
-
 fi
 
 # Convert mode shortcuts to full mode names
@@ -333,13 +303,10 @@ export LMEVAL_LOG_LEVEL=INFO
 export TOKENIZERS_PARALLELISM=false
 export HF_TOKEN=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
 
-# When running locally (not --slurm): pin one GPU by default. For parallel_gpus>=2, each slot sets CUDA_VISIBLE_DEVICES in run_eval_for_task (subshell).
-# With --slurm, leave CUDA to the allocation unless a parallel slot overrides it inside run_eval_for_task.
+# When running locally (not --slurm), pin GPU 0 by default. Multi-GPU: use launch_eval via --parallel_config.
 if [[ "$SLURM_MODE" != "true" ]]; then
     export CUDA_DEVICE_ORDER=PCI_BUS_ID
-    if [[ "${PARALLEL_GPUS:-1}" -lt 2 ]]; then
-        export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-    fi
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 fi
 
 export WANDB_API_KEY=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
@@ -372,13 +339,7 @@ if [[ -n "$PARALLEL_CONFIG" ]]; then
 fi
 
 run_eval_for_task() {
-    local TASK_N="$1"
-    local SLOT_IDX="${2:-}"
-
-    export TASK_NAME="$TASK_N"
-    if [[ -n "$SLOT_IDX" ]]; then
-        export CUDA_VISIBLE_DEVICES="$SLOT_IDX"
-    fi
+    export TASK_NAME="$1"
 
     # Set gen_length and steps (arc_challenge_chat: 128; others: 512)
     if [[ "$TASK_NAME" == *"arc_challenge_chat"* ]]; then
@@ -498,9 +459,6 @@ run_eval_for_task() {
     echo "  Batch Size: $BATCH_SIZE"
     echo "  Mode: $MODE"
     echo "  Task Name: $TASK_NAME"
-    if [[ -n "$SLOT_IDX" ]]; then
-        echo "  Parallel slot: CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
-    fi
     echo "  Model: $MODEL"
     echo "  Model Path: $MODEL_PATH"
     echo "  Gen Length: $GEN_LENGTH"
@@ -559,31 +517,12 @@ run_eval_for_task() {
         ACCEL_CMD="env ${RESUME_ENV} ${ACCEL_CMD}"
     fi
 
-    USE_SRUN_INNER=false
     if [[ "$SLURM_MODE" == "true" ]]; then
-        if [[ -z "$SLOT_IDX" ]] || [[ "${PARALLEL_GPUS:-1}" -lt 2 ]]; then
-            USE_SRUN_INNER=true
-        fi
-    fi
-    if [[ "$USE_SRUN_INNER" == "true" ]]; then
         srun bash -c "$ACCEL_CMD"
     else
         eval $ACCEL_CMD
     fi
 }
-
-if [[ "${PARALLEL_GPUS:-1}" -ge 2 ]]; then
-    declare -a _PIDS=()
-    _ec=0
-    for _idx in "${!TASK_LIST_CLEAN[@]}"; do
-        ( run_eval_for_task "${TASK_LIST_CLEAN[$_idx]}" "$_idx" ) &
-        _PIDS+=($!)
-    done
-    for _pid in "${_PIDS[@]}"; do
-        wait "$_pid" || _ec=1
-    done
-    exit $_ec
-fi
 
 run_eval_for_task "$TASK_NAME"
 exit $?
