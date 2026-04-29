@@ -1,0 +1,15 @@
+# Used with: python launch_eval.py parallel_runs_file=config/parallel_eval_runs.yaml
+# or: ./eval.sh --parallel_config config/parallel_eval_runs.yaml
+#
+# Each list entry is merged on top of config/config.yaml (+ CLI). Subprocess i uses CUDA_VISIBLE_DEVICES=i.
+# Omit keys in a slot to inherit from the base config.
+
+- mode: pd
+  task_name: gsm8k
+  model: llada
+  batch_size: 2
+
+- mode: bd
+  task_name: humaneval
+  model: llada1_5
+  batch_size: 1
