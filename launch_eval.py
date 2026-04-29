@@ -1,11 +1,15 @@
 """Run `eval.py` via Hydra (local or SLURM). Config `config/config.yaml`; details in `docs/evaluation.md`."""
 
+import concurrent.futures
 import os
 import re
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Optional
+
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
@@ -14,7 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
 from repo_env_defaults import apply_repo_env_defaults
 
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 # Mode shortcut -> (full_mode, strategy)
 MODE_MAP = {
@@ -71,8 +75,8 @@ def _to_bool(val) -> bool:
     return bool(val)
 
 
-def run(cfg: DictConfig) -> int:
-    """Build and run the accelerate eval command from Hydra config."""
+def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None) -> int:
+    """Build and run one accelerate eval; optional env overrides (e.g. CUDA_VISIBLE_DEVICES per slot)."""
     apply_repo_env_defaults()
     # Use script dir as project root so SLURM jobs (which may run from sweep dir) still find eval.py
     project_root = Path(__file__).resolve().parent
@@ -195,6 +199,8 @@ def run(cfg: DictConfig) -> int:
         model_args += f",cst_ntf_conf_low={cst_nlo},cst_ntf_conf_high={cst_nhi},cst_ntf_first_non_eos={cst_ntf_1st},cst_target_staging_gb={cst_tgb}"
 
     env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
     env.setdefault("HF_ALLOW_CODE_EVAL", "1")
     env.setdefault("HF_DATASETS_TRUST_REMOTE_CODE", "true")
     env.setdefault("LMEVAL_LOG_LEVEL", "INFO")
@@ -255,6 +261,127 @@ def run(cfg: DictConfig) -> int:
         cmd += ["--wandb_args", f"project={env.get('WANDB_PROJECT', 'strace')},name={wandb_name}{wandb_resume_args}"]
 
     return subprocess.run(cmd, env=env, cwd=project_root).returncode
+
+
+def _normalize_parallel_slots_payload(data: Any) -> list[Any]:
+    """YAML / JSON loader may return ``list`` or ``{"runs": [ ... ]}``."""
+    if data is None:
+        return []
+    if isinstance(data, dict):
+        inner = data.get("runs")
+        if isinstance(inner, list):
+            return inner
+        raise ValueError("parallel runs file: expected a YAML list or a mapping with key 'runs' listing slot overrides.")
+    if isinstance(data, list):
+        return data
+    raise ValueError("parallel runs: expected a list of per-slot override dicts (or {\"runs\": [...]}).")
+
+
+def _parse_parallel_slot_specs(cfg: DictConfig) -> Optional[list[dict[str, Any]]]:
+    """
+    Per-GPU configs merged onto the base YAML/CLI (`config.yaml`).
+
+    - ``parallel_runs_file``: path to YAML (or JSON) list, or ``{"runs": [ {...}, ... ]}``.
+    - ``parallel_runs``: inline list on the Hydra config (same shape as each file element).
+
+    If ``parallel_runs_file`` is set, it wins over ``parallel_runs``. Empty / missing means use legacy
+    ``parallel_gpus`` + comma-separated ``task_name`` instead.
+    """
+    raw_file = cfg.get("parallel_runs_file")
+    if raw_file is not None:
+        fs = str(raw_file).strip()
+        if fs.lower() not in ("", "none", "null"):
+            path = Path(fs).expanduser()
+            if not path.is_file():
+                raise FileNotFoundError(f"parallel_runs_file not found: {path.resolve()}")
+            with path.open(encoding="utf-8") as f:
+                payload = yaml.safe_load(f)
+            slots_raw = _normalize_parallel_slots_payload(payload)
+            out: list[dict[str, Any]] = [_slot_dict(item) for item in slots_raw]
+            return out or None
+
+    pr = cfg.get("parallel_runs")
+    if pr is None:
+        return None
+    lst = OmegaConf.to_container(pr, resolve=True)
+    if lst in (None, [], ()):
+        return None
+    if isinstance(lst, list):
+        sd = [_slot_dict(item) for item in lst]
+        return sd or None
+    raise ValueError("parallel_runs must be a non-empty list of per-slot overrides (dicts).")
+
+
+def _slot_dict(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return item
+    if OmegaConf.is_config(item):
+        container = OmegaConf.to_container(item, resolve=True)
+        if isinstance(container, dict):
+            return container
+    raise ValueError(f"parallel slot entries must be dicts mapping config keys for that GPU; got {type(item)!r}")
+
+
+def run(cfg: DictConfig) -> int:
+    """Dispatch single eval, per-slot YAML parallel, or legacy comma-separated ``task_name`` parallel."""
+    slot_specs = _parse_parallel_slot_specs(cfg)
+    if slot_specs:
+        n = len(slot_specs)
+        pg = int(cfg.get("parallel_gpus", 1) or 1)
+        if pg not in (1, n):
+            print(
+                f"Note: parallel_gpus={pg} does not match parallel_runs length ({n}); using {n} slots.",
+                file=sys.stderr,
+            )
+        base_plain = OmegaConf.to_container(cfg, resolve=True)
+        assert isinstance(base_plain, dict)
+        for key in ("parallel_runs", "parallel_runs_file", "parallel_gpus"):
+            base_plain.pop(key, None)
+        base_oc = OmegaConf.create(base_plain)
+
+        def _run_slot(slot_idx: int, overrides: dict[str, Any]) -> int:
+            merged = OmegaConf.merge(base_oc, OmegaConf.create(overrides))
+            merged.parallel_gpus = 1
+            return _run_single_eval(merged, extra_env={"CUDA_VISIBLE_DEVICES": str(slot_idx)})
+
+        if n == 1:
+            return _run_slot(0, slot_specs[0])
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+            futures = [pool.submit(_run_slot, i, spec) for i, spec in enumerate(slot_specs)]
+            codes = [f.result() for f in futures]
+        for c in codes:
+            if c != 0:
+                return c
+        return 0
+
+    parallel_gpus = int(cfg.get("parallel_gpus", 1) or 1)
+    if parallel_gpus < 2:
+        return _run_single_eval(cfg)
+
+    task_raw = str(cfg.get("task_name", "gsm8k")).strip()
+    tasks = [t.strip() for t in task_raw.split(",") if t.strip()]
+    if len(tasks) != parallel_gpus:
+        raise ValueError(
+            f"parallel_gpus={parallel_gpus} requires exactly {parallel_gpus} comma-separated tasks in "
+            f"task_name; got {len(tasks)} from {task_raw!r}"
+        )
+
+    def _slot(slot: int, task: str) -> int:
+        child_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+        child_cfg.parallel_gpus = 1
+        child_cfg.task_name = task
+        return _run_single_eval(child_cfg, extra_env={"CUDA_VISIBLE_DEVICES": str(slot)})
+
+    workers = min(parallel_gpus, len(tasks))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_slot, i, t) for i, t in enumerate(tasks)]
+        codes = [f.result() for f in futures]
+
+    for c in codes:
+        if c != 0:
+            return c
+    return 0
 
 
 def _normalize_hydra_cli(argv: list[str]) -> list[str]:

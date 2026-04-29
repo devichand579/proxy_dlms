@@ -26,6 +26,8 @@ Config defaults: `config/config.yaml`. Override on the CLI: `task_name=gsm8k mod
 | `--batch_size` | Max requests per chunk (e.g. 2, 4, 8). Chunks may be smaller when a length bucket has fewer samples. |
 | `--mode` | Scheduler: `pd`, `bd`, `eb`, `fdm`, `fhs`, `top_k_c`, `top_k_m`, `dus` (see shortcuts below). |
 | `--task_name` | Eval task: `gsm8k`, `humaneval`, `mbpp`, `minerva_math500`, `arc_challenge_chat`, etc. |
+| `--parallel_gpus` | Same **mode**, **model**, and other globals: run `N` evals **in parallel** (`eval.sh`) or threads (`launch_eval.py`). Requires **exactly `N`** comma-separated tasks in `task_name`. GPU `i` runs `CUDA_VISIBLE_DEVICES=i`. For **different modes/models/tasks per GPU**, use `parallel_runs` / `parallel_runs_file` in `launch_eval.py` or `./eval.sh --parallel_config FILE`. |
+| `--parallel_config` | Path to a YAML file: list of per-GPU override dicts (merged on `config/config.yaml`). Same as `python launch_eval.py parallel_runs_file=...`. Does not require `--mode` / `--task_name` / `--model` on the shell line. |
 | `--model` | Model dir under `./models/` (e.g. `llada`). |
 | `--compile_model` | `True` / `False` for `torch.compile`. |
 | `--wandb` | `True` to log to Weights & Biases. |
@@ -67,6 +69,7 @@ Requests are grouped by **prompt length buckets** (e.g. 0–32, 32–64, …, 51
 
 ```bash
 ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --compile_model False
+./eval.sh --batch_size 2 --mode pd --parallel_gpus 2 --task_name gsm8k,humaneval --model llada --compile_model False --slurm
 ./eval.sh --batch_size 1 --mode bd --task_name humaneval --model llada --compile_model False
 ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True
 ```
@@ -107,6 +110,28 @@ Long jobs can save partial progress and continue with the same command.
 
 ```bash
 python launch_eval.py task_name=gsm8k mode=pd
+```
+
+**Same scheduler + same model, different tasks only:** set `parallel_gpus=N` and exactly `N` comma-separated tasks in `task_name`. Each subprocess uses `CUDA_VISIBLE_DEVICES=0..N-1`.
+
+```bash
+python launch_eval.py parallel_gpus=2 task_name=gsm8k,humaneval mode=pd
+```
+
+**Different mode / model / batch / task per GPU** (merged onto `config/config.yaml`): use a YAML list of per-slot dicts.
+
+- **Inline (Hydra):** `parallel_runs='[{...},{...}]'` is awkward; prefer a file.
+- **File:** set `parallel_runs_file=config/parallel_eval_runs.yaml` (or `parallel_runs:` as a list in a custom YAML).
+
+```bash
+python launch_eval.py parallel_runs_file=config/parallel_eval_runs.yaml
+```
+
+From `eval.sh` (after conda; no inner `srun` for the children — same as other multi-GPU paths):
+
+```bash
+./eval.sh --parallel_config config/parallel_eval_runs.yaml
+# Optional global defaults still apply on top of config.yaml: --batch_size 4 --wandb True
 ```
 
 **Multirun (local, sequential):**
