@@ -13,11 +13,7 @@ defaults:
 batch_size: 4
 mode: pd
 task_name: gsm8k
-# Multi-GPU one job (e.g. DGX gpu:2): see parallel_* below or comma-separated task_name with parallel_gpus=N
-parallel_gpus: 1
-# Per-slot overrides merged onto this config (each dict = one GPU): mode, model, task_name, batch_size, …
-parallel_runs: null
-# If set, YAML file with a list of dicts (same keys as above), or { "runs": [ ... ] }; overrides inline parallel_runs
+# Multi-GPU (`launch_eval.py` / `eval.sh --parallel_config`): path to YAML — list of dicts merged per GPU (see config/parallel_eval_runs.yaml).
 parallel_runs_file: null
 model: llada  # dirname under ./models/: llada | llada1_5 | dream
 compile_model: false

@@ -4,12 +4,12 @@
 # Each list entry is merged on top of config/config.yaml (+ CLI). Subprocess i uses CUDA_VISIBLE_DEVICES=i.
 # Omit keys in a slot to inherit from the base config.
 
-- mode: pd
-  task_name: gsm8k
-  model: llada
-  batch_size: 2
+- mode: eb
+  task_name: minerva_math500
+  model: dream
+  batch_size: 32
 
-- mode: bd
-  task_name: humaneval
-  model: llada1_5
-  batch_size: 1
+- mode: top_k_c
+  task_name: minerva_math500
+  model: dream  
+  batch_size: 32
