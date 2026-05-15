@@ -1,4 +1,4 @@
-"""Run `eval.py` via Hydra (local or SLURM). Config `config/config.yaml`; details in `docs/evaluation.md`."""
+"""Run `eval.py` via Hydra (local or SLURM). Config `config/lmeval.yaml`; details in `docs/evaluation.md`."""
 
 import concurrent.futures
 import os
@@ -16,6 +16,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from repo_env_defaults import apply_repo_env_defaults
+from sampling_defaults import resolve_gen_length_steps
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -61,10 +62,6 @@ def get_num_fewshot(task_name: str) -> int:
     return 0
 
 
-def get_gen_length_steps(task_name: str) -> tuple[int, int]:
-    if "arc_challenge_chat" in task_name:
-        return 128, 128
-    return 512, 512
 
 
 def _to_bool(val) -> bool:
@@ -109,7 +106,7 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         mode = mode_input
         strategy = cfg.get("strategy")
 
-    gen_length, steps = get_gen_length_steps(task_name)
+    gen_length, steps = resolve_gen_length_steps(cfg, task_name)
     block_length_cfg = cfg.get("block_length")
     if block_length_cfg is not None:
         block_length = int(block_length_cfg)
@@ -166,38 +163,6 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
             steps_arg = re.sub(r",", "_", str(intervention_steps or "0"))
         model_args += f",intervention_mode={intervention_mode},intervention_steps={steps_arg},intervention_k={intervention_k}"
 
-    cst_ck = cfg.get("cst_checkpoint")
-    cst_ck_s = str(cst_ck).strip() if cst_ck is not None else ""
-    if cst_ck_s and cst_ck_s.lower() not in ("null", "none", ""):
-        # CST metrics are computed on written hidden .pt files; need capture on.
-        capture_pre_logits = True
-    else:
-        capture_pre_logits = _to_bool(cfg.get("capture_pre_logits", False))
-    hidden_capture_path = cfg.get("hidden_capture_path")
-    if capture_pre_logits:
-        if hidden_capture_path is None or str(hidden_capture_path).strip().lower() in ("null", "none", ""):
-            if resumable and checkpoint_dir:
-                hidden_dir = f"{checkpoint_dir}/hidden"
-            else:
-                hidden_dir = f"outputs/{output_suffix}/hidden"
-        else:
-            hidden_dir = str(hidden_capture_path).strip()
-        os.makedirs(hidden_dir, exist_ok=True)
-        model_args += f",capture_pre_logits=true,hidden_capture_path={hidden_dir}"
-
-    cst_config_path = cfg.get("cst_config_path")
-    cst_conf_s = str(cst_config_path).strip() if cst_config_path is not None else ""
-    cst_config_arg = cst_conf_s if cst_conf_s and cst_conf_s.lower() not in ("null", "none", "") else ""
-    if cst_ck_s and cst_ck_s.lower() not in ("null", "none", ""):
-        cst_nlo = float(cfg.get("cst_ntf_conf_low", 0.2))
-        cst_nhi = float(cfg.get("cst_ntf_conf_high", 0.8))
-        cst_tgb = float(cfg.get("cst_target_staging_gb", 1.0))
-        cst_ntf_1st = str(_to_bool(cfg.get("cst_ntf_first_non_eos", False))).lower()
-        model_args += f",cst_checkpoint={cst_ck_s}"
-        if cst_config_arg:
-            model_args += f",cst_config_path={cst_config_arg}"
-        model_args += f",cst_ntf_conf_low={cst_nlo},cst_ntf_conf_high={cst_nhi},cst_ntf_first_non_eos={cst_ntf_1st},cst_target_staging_gb={cst_tgb}"
-
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
@@ -228,15 +193,6 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         f"gen_length={gen_length} steps={steps} block_length={block_length} top_k={top_k}"
     )
     print(f"  num_fewshot={num_fewshot} wandb={wandb} tracing_enabled={tracing_enabled} resumable={resumable}")
-    if capture_pre_logits:
-        print(f"  capture_pre_logits=true hidden_capture_path={hidden_dir}")
-    if cst_ck_s and cst_ck_s.lower() not in ("null", "none", ""):
-        cst_tgb_p = float(cfg.get("cst_target_staging_gb", 1.0))
-        cst_fne_p = _to_bool(cfg.get("cst_ntf_first_non_eos", False))
-        print(
-            f"  cst_checkpoint={cst_ck_s} cst_target_staging_gb={cst_tgb_p} "
-            f"cst_ntf_first_non_eos={cst_fne_p} (buffer .pt, eval+delete, lm-eval flow unchanged)"
-        )
     if intervention_mode:
         print(f"  intervention: mode={intervention_mode} steps={intervention_steps} k={intervention_k}")
     print(f"  output: outputs/{output_suffix}/" if resumable else f"  output: outputs/{output_suffix}.json")
@@ -390,7 +346,7 @@ def _normalize_hydra_cli(argv: list[str]) -> list[str]:
 _CONFIG_DIR = Path(__file__).resolve().parent / "config"
 
 
-@hydra.main(version_base="1.2", config_path=str(_CONFIG_DIR), config_name="config")
+@hydra.main(version_base="1.2", config_path=str(_CONFIG_DIR), config_name="lmeval")
 def main(cfg: DictConfig) -> None:
     sys.exit(run(cfg))
 

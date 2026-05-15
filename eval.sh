@@ -4,9 +4,9 @@
 #SBATCH --error=job_outputs/strace_job_err_%j.err
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=42gb
+#SBATCH --mem=64gb
 #SBATCH --time=47:00:00
-#SBATCH --partition=gpupart_a40 , gpupart_l40, gpu_h100, dibdp (AIRAWAT)
+#SBATCH --partition=gpu_h100 #gpu_l40, gpu_h100, dibdp (AIRAWAT)
 #SBATCH --gres=gpu:1  # ignore if your cluster doesn't have a qos for GPUs
 
 ########################################################################################
@@ -31,19 +31,12 @@
 # Resumable (checkpointing): add --resumable; re-run same command to resume after crash
 # Alternative (Hydra): sbatch --wrap "conda run -n strace python launch_eval.py task_name=gsm8k mode=pd"
 # Multirun on SLURM (one job per config): python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
-#
-# CST (optional, via eval.LLaDAEvalHarness in eval.py):
-#   --cst_checkpoint PATH         forces --capture_pre_logits true, buffers .pt to cst_target_staging_gb, eval+delete
-#   [--cst_config_path PATH]      default config/cst.yaml
-#   [--cst_ntf_conf_low LOW]    [--cst_ntf_conf_high HIGH]  [--cst_ntf_first_non_eos true|false]  [--cst_target_staging_gb GB]
-# Example: --capture_pre_logits true --cst_checkpoint ./outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt
-
 
 
 ########################################################################################
 # Parse command-line arguments
 # Usage: ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [opts...]
-#   Full flags: see Error/Unknown option messages below; e.g. --resumable [--run_id] [--slurm] [--use_eos_harness / --no_eos_harness] [--cst_checkpoint ...]
+#   Full flags: see Error/Unknown option messages below; e.g. --resumable [--run_id] [--slurm] [--use_eos_harness / --no_eos_harness]
 # Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm, fhs, top_k_c (top_k+confidence), top_k_m (top_k+top_margin), dus
 # Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, arc_challenge_chat
 # --model: basename of a folder under ./models/ (must match lm-eval registration). Examples: llada, llada1_5, dream.
@@ -67,17 +60,11 @@ TRACING_ENABLED_ARG=""
 NUM_FEWSHOT_OVERRIDE=""
 BLOCK_LENGTH_OVERRIDE=""
 TOP_K_OVERRIDE=""
+STEPS_OVERRIDE=""
+GEN_LENGTH_OVERRIDE=""
 SLURM_MODE=false
 RESUMABLE=false
 RUN_ID=""
-CAPTURE_PRE_LOGITS=""
-HIDDEN_CAPTURE_PATH=""
-CST_CHECKPOINT=""
-CST_CONFIG_PATH=""
-CST_NTF_LO=""
-CST_NTF_HI=""
-CST_NTF_FIRST_NON_EOS=""
-CST_TGB=""
 USE_EOS_HARNESS="true"
 PARALLEL_CONFIG=""
 while [[ $# -gt 0 ]]; do
@@ -135,6 +122,14 @@ while [[ $# -gt 0 ]]; do
             TOP_K_OVERRIDE="$2"
             shift 2
             ;;
+        --steps)
+            STEPS_OVERRIDE="$2"
+            shift 2
+            ;;
+        --gen_length)
+            GEN_LENGTH_OVERRIDE="$2"
+            shift 2
+            ;;
         --parallel_config|--parallel_runs_file)
             PARALLEL_CONFIG="$2"
             shift 2
@@ -151,38 +146,6 @@ while [[ $# -gt 0 ]]; do
             RUN_ID="$2"
             shift 2
             ;;
-        --capture_pre_logits)
-            CAPTURE_PRE_LOGITS="$2"
-            shift 2
-            ;;
-        --hidden_capture_path)
-            HIDDEN_CAPTURE_PATH="$2"
-            shift 2
-            ;;
-        --cst_checkpoint)
-            CST_CHECKPOINT="$2"
-            shift 2
-            ;;
-        --cst_config_path)
-            CST_CONFIG_PATH="$2"
-            shift 2
-            ;;
-        --cst_ntf_conf_low)
-            CST_NTF_LO="$2"
-            shift 2
-            ;;
-        --cst_ntf_conf_high)
-            CST_NTF_HI="$2"
-            shift 2
-            ;;
-        --cst_ntf_first_non_eos)
-            CST_NTF_FIRST_NON_EOS="$2"
-            shift 2
-            ;;
-        --cst_target_staging_gb)
-            CST_TGB="$2"
-            shift 2
-            ;;
         --use_eos_harness)
             USE_EOS_HARNESS="$2"
             shift 2
@@ -194,10 +157,8 @@ while [[ $# -gt 0 ]]; do
         *)
             echo "Unknown option: $1"
             echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
-            echo "  Core optional: --num_fewshot --block_length --top_k --compile_model"
+            echo "  Core optional: --num_fewshot --block_length --top_k --steps --gen_length --compile_model"
             echo "  Harness (eval.LLaDAEvalHarness / --model_args): --intervention_mode --intervention_steps --intervention_k"
-            echo "  --wandb --tracing_enabled --capture_pre_logits --hidden_capture_path"
-            echo "  --cst_checkpoint [--cst_config_path --cst_target_staging_gb --cst_ntf_conf_low --cst_ntf_conf_high --cst_ntf_first_non_eos]"
             echo "  EOS decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode)"
             echo "  Alternative multi-GPU: --parallel_config <parallel_runs.yaml> (per-GPU overrides: mode/model/task/batch — delegates to launch_eval.py parallel_runs_file=)"
             echo "Run: --resumable [--run_id] --slurm  |  Multi-GPU: --parallel_config <parallel_runs.yaml>"
@@ -205,11 +166,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-# CST needs hidden .pt (same as launch_eval.py: cst_checkpoint => capture on)
-if [[ -n "$CST_CHECKPOINT" ]]; then
-    CAPTURE_PRE_LOGITS="true"
-fi
 
 if [[ -n "$PARALLEL_CONFIG" ]]; then
     if [[ -f "$PARALLEL_CONFIG" ]]; then
@@ -227,11 +183,9 @@ if [[ -z "$PARALLEL_CONFIG" ]]; then
 if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "Error: Missing required arguments"
     echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
-    echo "  Core optional: --num_fewshot <n> --block_length <n> --top_k <n> --compile_model <bool>"
+    echo "  Core optional: --num_fewshot <n> --block_length <n> --top_k <n> --steps <n> --gen_length <n> --compile_model <bool>"
     echo "  Harness (see eval.LLaDAEvalHarness): --intervention_mode drop|swap, --intervention_steps 0,128,256, --intervention_k <k>"
     echo "  --wandb <True|False>  --tracing_enabled <True|False>  (tracing: trace_outputs/ or JSONL when --resumable)"
-    echo "  Hidden / CST: --capture_pre_logits <True|False> [--hidden_capture_path <dir>]"
-    echo "    --cst_checkpoint <.pt> implies capture; also --cst_config_path, --cst_target_staging_gb, --cst_ntf_conf_low, --cst_ntf_conf_high, --cst_ntf_first_non_eos"
     echo "  Decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode, see eval.py)"
     echo "  Run: --slurm (srun for sbatch)  --resumable [--run_id]  (checkpoint under outputs/…)"
     echo "  Multi-GPU: --parallel_config <yaml> per-GPU settings (launch_eval parallel_runs_file=); see docs/evaluation.md"
@@ -335,6 +289,10 @@ if [[ -n "$PARALLEL_CONFIG" ]]; then
     [[ "$RESUMABLE" == "true" ]] && OVERRIDES+=(resumable=true)
     [[ -n "$RUN_ID" ]] && OVERRIDES+=(run_id="$RUN_ID")
     [[ -n "$COMPILE_MODEL" ]] && OVERRIDES+=(compile_model="$COMPILE_MODEL")
+    [[ -n "$BLOCK_LENGTH_OVERRIDE" ]] && OVERRIDES+=(block_length="$BLOCK_LENGTH_OVERRIDE")
+    [[ -n "$TOP_K_OVERRIDE" ]] && OVERRIDES+=(top_k="$TOP_K_OVERRIDE")
+    [[ -n "$STEPS_OVERRIDE" ]] && OVERRIDES+=(steps="$STEPS_OVERRIDE")
+    [[ -n "$GEN_LENGTH_OVERRIDE" ]] && OVERRIDES+=(gen_length="$GEN_LENGTH_OVERRIDE")
     exec python launch_eval.py "${OVERRIDES[@]}"
 fi
 
@@ -348,6 +306,16 @@ run_eval_for_task() {
     else
         export GEN_LENGTH=512
         export STEPS=512
+    fi
+    if [[ -n "$GEN_LENGTH_OVERRIDE" ]]; then
+        export GEN_LENGTH="$GEN_LENGTH_OVERRIDE"
+    fi
+    if [[ -n "$STEPS_OVERRIDE" ]]; then
+        export STEPS="$STEPS_OVERRIDE"
+    fi
+    if (( 10#$STEPS > 10#$GEN_LENGTH )); then
+        echo "Error: steps ($STEPS) must be <= gen_length ($GEN_LENGTH). Adjust --steps / --gen_length or task defaults."
+        exit 1
     fi
 
     # Set block_length: override if --block_length passed, else defaults by mode
@@ -432,29 +400,6 @@ run_eval_for_task() {
         MODEL_ARGS="${MODEL_ARGS},intervention_mode=${INTERVENTION_MODE},intervention_steps=${INTERVENTION_STEPS_ARG},intervention_k=${INTERVENTION_K:-1}"
     fi
 
-    if [[ "${CAPTURE_PRE_LOGITS,,}" == "true" ]]; then
-        if [[ -n "$HIDDEN_CAPTURE_PATH" ]]; then
-            HIDDEN_DIR="$HIDDEN_CAPTURE_PATH"
-        elif [[ "$RESUMABLE" == "true" && -n "$CHECKPOINT_DIR" ]]; then
-            HIDDEN_DIR="${CHECKPOINT_DIR}/hidden"
-        else
-            HIDDEN_DIR="outputs/${OUTPUT_SUFFIX}/hidden"
-        fi
-        mkdir -p "$HIDDEN_DIR"
-        MODEL_ARGS="${MODEL_ARGS},capture_pre_logits=true,hidden_capture_path=${HIDDEN_DIR}"
-    fi
-
-    if [[ -n "$CST_CHECKPOINT" ]]; then
-        NLO="${CST_NTF_LO:-0.2}"
-        NHI="${CST_NTF_HI:-0.8}"
-        FNE="${CST_NTF_FIRST_NON_EOS:-false}"
-        TGB="${CST_TGB:-1.0}"
-        MODEL_ARGS="${MODEL_ARGS},cst_checkpoint=${CST_CHECKPOINT},cst_ntf_conf_low=${NLO},cst_ntf_conf_high=${NHI},cst_ntf_first_non_eos=${FNE},cst_target_staging_gb=${TGB}"
-        if [[ -n "$CST_CONFIG_PATH" ]]; then
-            MODEL_ARGS="${MODEL_ARGS},cst_config_path=${CST_CONFIG_PATH}"
-        fi
-    fi
-
     echo "Configuration:"
     echo "  Batch Size: $BATCH_SIZE"
     echo "  Mode: $MODE"
@@ -475,13 +420,6 @@ run_eval_for_task() {
     fi
     echo "  Wandb: ${WANDB:-False}"
     echo "  Tracing enabled: ${TRACING_ENABLED_ARG:-False}"
-    if [[ "${CAPTURE_PRE_LOGITS,,}" == "true" ]]; then
-        echo "  Capture pre-logit hiddens: yes (dir=${HIDDEN_DIR})"
-    fi
-    if [[ -n "$CST_CHECKPOINT" ]]; then
-        echo "  CST: checkpoint=${CST_CHECKPOINT} target_gb=${CST_TGB:-1.0} ntf=[$NLO,$NHI] ntf_first_non_eos=${FNE}"
-        [[ -n "$CST_CONFIG_PATH" ]] && echo "  CST config: ${CST_CONFIG_PATH}"
-    fi
     echo "  SLURM mode (srun outer): ${SLURM_MODE}"
     if [[ -n "$WANDB_NAME" ]]; then
         echo "  Wandb Name: $WANDB_NAME"

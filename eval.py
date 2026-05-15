@@ -1,6 +1,5 @@
 """lm-eval integration for LLaDA / Dream (SMDM-style patterns: github.com/ML-GSAI/SMDM)."""
 import sys
-import math
 import torch
 import re
 from pathlib import Path
@@ -16,20 +15,6 @@ from load_model import (
     is_dream_model_dir,
     prepend_bos_for_dream,
 )
-from cst import save_hidden_records
-from cst.naming import cst_resumable_eval_agg_path, cst_eval_task_name_token, model_label_from_path, scheduler_short_from_eval_mode
-from cst.eval.agg_persist import (
-    load_cst_eval_agg,
-    save_cst_eval_agg,
-)
-from cst.eval.run_eval_cst import (
-    eval_summary_from_agg,
-    evaluate_chunk_file,
-    merge_eval_file_into_agg,
-    new_eval_aggregator,
-)
-from cst.model.cst_bank import CSTBank
-from cst.train.trainer import delete_files, load_cst_bank_weights
 from schedulers.generate import generate
 from traces.trace_wrapper import _task_trace_list_ctx
 
@@ -184,7 +169,7 @@ class StreamingTraceWriter:
 
 
 def _load_checkpoint_completed(checkpoint_path: str) -> dict:
-    """Read `checkpoint.jsonl`: map (task, doc) → resps; last line wins per key."""
+    """Read `checkpoint.jsonl`: map (task, doc) -> resps; last line wins per key."""
     completed = {}
     if not checkpoint_path or not os.path.exists(checkpoint_path):
         return completed
@@ -205,37 +190,52 @@ def _load_checkpoint_completed(checkpoint_path: str) -> dict:
     return completed
 
 
-def _load_cst_config_dict(cst_config_path) -> dict:
-    """Return the ``cst:`` dict from repo ``config/cst.yaml`` or ``cst_config_path``."""
-    from omegaconf import OmegaConf
-
-    root = Path(__file__).resolve().parent
-    if cst_config_path is None or str(cst_config_path).strip() == "" or str(cst_config_path).strip().lower() in (
-        "null",
-        "none",
-    ):
-        ypath = root / "config" / "cst.yaml"
-    else:
-        ypath = Path(str(cst_config_path).strip())
-        if not ypath.is_file():
-            ypath = root / ypath
-    if not ypath.is_file():
-        raise FileNotFoundError(f"CST config yaml not found: {ypath}")
-    o = OmegaConf.load(str(ypath))
-    c = o.get("cst")
-    if c is None:
-        raise KeyError(f"{ypath} must contain a 'cst:' block")
-    return OmegaConf.to_container(c, resolve=True)
+def _diffusion_metrics_path(output_dir: str) -> str:
+    return os.path.join(output_dir, ".eval_diffusion_metrics.json")
 
 
-# When ``cst_checkpoint`` is not set, we still need ``k``/``w`` for :func:`cst.naming.cst_eval_task_name_token`
-# (hidden ``.pt`` basenames if ``capture_pre_logits``). Match ``config/cst.yaml`` ``cst:`` defaults.
-_CST_NAMING_KW_DEFAULT: tuple[int, int] = (4096, 4)
+def _load_diffusion_metrics_aggregate(output_dir: str) -> dict:
+    """Restore cumulative diffusion counters across process restarts (pairs with checkpoint.jsonl)."""
+    path = _diffusion_metrics_path(output_dir)
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if not isinstance(d, dict):
+            return {}
+        out = {}
+        for k in (
+            "total_computed_samples_global",
+            "total_nfe_mass_global",
+            "total_steps_global",
+            "total_blocks_global",
+        ):
+            if k in d and isinstance(d[k], int):
+                out[k] = d[k]
+        if "total_gen_time_global" in d and isinstance(d["total_gen_time_global"], (int, float)):
+            out["total_gen_time_global"] = float(d["total_gen_time_global"])
+        return out
+    except (OSError, json.JSONDecodeError, TypeError) as e:
+        logging.getLogger("llada_eval").warning(f"Could not load diffusion metrics {path}: {e}")
+        return {}
+
+
+def _atomic_write_json(path: str, payload: dict) -> None:
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=0)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 @register_model("llada", "llada1_5", "dream")
 class LLaDAEvalHarness(LM):
-    """LLaDA/Dream harness for lm-eval: sampling, traces, optional pre-logit capture and CST."""
+    """LLaDA/Dream harness for lm-eval: sampling, traces, and resumable checkpoints."""
 
     def __init__(
         self,
@@ -261,14 +261,6 @@ class LLaDAEvalHarness(LM):
         task_name=None,
         resumable=False,
         output_dir=None,
-        capture_pre_logits=False,
-        hidden_capture_path=None,
-        cst_checkpoint=None,
-        cst_config_path=None,
-        cst_ntf_conf_low=0.2,
-        cst_ntf_conf_high=0.8,
-        cst_ntf_first_non_eos=False,
-        cst_target_staging_gb=1.0,
         use_eos_harness: bool = True,
     ):
         '''
@@ -298,24 +290,6 @@ class LLaDAEvalHarness(LM):
             intervention_steps: Optional list/set of step indices (0-indexed) at which to apply intervention.
             trace_name: Optional trace name. If provided, trace will be saved to disk and uploaded to wandb as artifact.
             intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
-            capture_pre_logits: If True, wrap the model to record pre-logit hiddens (fp32 in memory) on every forward.
-                **Ignored in the sense of default—when ``cst_checkpoint`` is set, capture is turned on automatically**
-                so the model is always ``PreLogitsCaptureWrapper`` before load (CST needs written hiddens).
-            hidden_capture_path: Directory for per-chunk ``.pt`` files when capture is on. If ``cst_checkpoint`` is set
-                and this is omitted, a default is chosen (``<output_dir>/hidden`` when resumable, else
-                ``outputs/<trace_name>/hidden``).
-            cst_checkpoint: If set, load this CST weight file and, for each written hidden ``.pt``, run CST eval
-                metrics. **Tied to the current lm-eval ``task_name``** (one dataset per run) — for per-dataset
-                numbers, use ``launch_eval.py task_name=...`` and multirun over tasks, not the mixed
-                :mod:`cst.train_data` sampler. Implies pre-logit capture and wrapping; you do not need to pass
-                ``capture_pre_logits=true`` separately (``launch_eval.py`` does the same).
-            cst_config_path: YAML with a ``cst:`` block (defaults to ``config/cst.yaml`` under project root).
-            cst_ntf_conf_low, cst_ntf_conf_high: High-confidence filter for the NTF logit comparison (if enabled).
-            cst_ntf_first_non_eos: If True, NTF compares argmax after masking ``eos_id`` to -inf (teacher and substitute),
-                so agreement is not driven only by EOS as top-1. Default False (raw top-1 match).
-            cst_target_staging_gb: Like training: buffer hidden ``.pt`` until this total size (decimal GB) on disk, then
-                run CST metrics on the batch and **delete** files; remainder is flushed at end of the task. lm-eval
-                generate loop is unchanged.
             use_eos_harness: If True (default), schedulers may return early on EOS and chunk decode truncates at first EOS.
                 If False, full step budget and ``batch_decode`` of the full generated slice (reference LLaDA-style).
         '''
@@ -324,29 +298,11 @@ class LLaDAEvalHarness(LM):
         self._model_path = str(model_path)
         self.device = torch.device(device)
 
-        # CST metrics need hidden .pt files → must use PreLogitsCaptureWrapper from first load.
-        cst_s_pre = str(cst_checkpoint).strip() if cst_checkpoint is not None else ""
-        cst_active = bool(cst_s_pre and cst_s_pre.lower() not in ("null", "none", ""))
-        self._cst_forced_capture = cst_active
-        if cst_active:
-            capture_pre_logits = True
-            hcp_s = str(hidden_capture_path).strip() if hidden_capture_path is not None else ""
-            if not hcp_s or hcp_s.lower() in ("null", "none", ""):
-                res_b = _to_bool(resumable) if resumable is not None else False
-                out_d = str(output_dir) if output_dir else (os.environ.get("CHECKPOINT_DIR", "") or "")
-                if res_b and out_d:
-                    hidden_capture_path = str(Path(out_d) / "hidden")
-                else:
-                    tr = str(trace_name) if trace_name else "cst_hiddens"
-                    hidden_capture_path = str(Path("outputs") / tr / "hidden")
-
-        self._capture_pre_logits = _to_bool(capture_pre_logits)
-        self._hidden_capture_path = str(hidden_capture_path) if hidden_capture_path else None
         self.model, self.tokenizer = load_model_and_tokenizer(
             self._model_path,
             device=device,
             compile_model=compile_model,
-            capture_pre_logits=self._capture_pre_logits,
+            capture_pre_logits=False,
         )
 
         inf_mask, inf_eos, inf_eot = infer_diffusion_token_ids(self._model_path)
@@ -399,6 +355,10 @@ class LLaDAEvalHarness(LM):
 
         # Global statistics tracking across all generate_until calls
         self.total_samples_global = 0
+        # Samples that actually ran ``generate`` (excludes checkpoint-only rows in resumable mode)
+        self.total_computed_samples_global = 0
+        # sum_i steps_taken_i * n_i for correct sample-weighted avg NFE when steps vary per chunk
+        self.total_nfe_mass_global = 0
         self.total_steps_global = 0
         self.total_gen_time_global = 0.0
         self.total_blocks_global = 0
@@ -408,6 +368,21 @@ class LLaDAEvalHarness(LM):
 
         # Set up logger
         self.logger = setup_logger(trace_name)
+
+        if self.resumable and self.output_dir:
+            _agg = _load_diffusion_metrics_aggregate(self.output_dir)
+            if _agg:
+                self.total_computed_samples_global = int(_agg.get("total_computed_samples_global", 0))
+                self.total_nfe_mass_global = int(_agg.get("total_nfe_mass_global", 0))
+                self.total_steps_global = int(_agg.get("total_steps_global", 0))
+                self.total_blocks_global = int(_agg.get("total_blocks_global", 0))
+                self.total_gen_time_global = float(_agg.get("total_gen_time_global", 0.0))
+                self.logger.info(
+                    "Loaded cumulative diffusion metrics from checkpoint dir "
+                    f"(computed_samples={self.total_computed_samples_global}, "
+                    f"nfe_mass={self.total_nfe_mass_global}, "
+                    f"steps={self.total_steps_global})"
+                )
 
         self.use_wandb = WANDB_AVAILABLE
         if self.use_wandb:
@@ -440,82 +415,6 @@ class LLaDAEvalHarness(LM):
         self.logger.info(f"Intervention mode: {self.intervention_mode}")
         self.logger.info(f"Intervention steps: {self.intervention_steps}")
         self.logger.info(f"Intervention k: {self.intervention_k}")
-        if self._cst_forced_capture:
-            self.logger.info(
-                "cst_checkpoint is set: using PreLogitsCaptureWrapper (capture_pre_logits=True); "
-                "hidden_capture_path=%s",
-                self._hidden_capture_path,
-            )
-
-        _sched_tag = scheduler_short_from_eval_mode(self.mode, self.strategy)
-        cst_s = cst_checkpoint
-        cst_s = str(cst_s).strip() if cst_s is not None else ""
-        cst_enabled = bool(cst_s and cst_s.lower() not in ("null", "none", ""))
-        if cst_enabled:
-            ccfg = _load_cst_config_dict(cst_config_path)
-            _k_tok, _w_tok = int(ccfg["k"]), int(ccfg["w"])
-        else:
-            ccfg = None
-            _k_tok, _w_tok = _CST_NAMING_KW_DEFAULT
-        self._cst_eval_hidden_name_token = cst_eval_task_name_token(
-            model_label_from_path(self._model_path),
-            _sched_tag,
-            str(self.task_name),
-            _k_tok,
-            _w_tok,
-        )
-        if cst_enabled:
-            self.logger.info("CST eval hidden name token: %s", self._cst_eval_hidden_name_token)
-
-        # Optional CST: same prompts/dataset as this lm-eval run (per ``task_name``), not a mixed sampler.
-        self._cst_eval_bank = None
-        self._cst_w = 1
-        self._cst_agg = None
-        self._cst_n_chunks = 0
-        self._cst_ntf_lo = float(cst_ntf_conf_low)
-        self._cst_ntf_hi = float(cst_ntf_conf_high)
-        self._cst_ntf_first_non_eos = _to_bool(cst_ntf_first_non_eos)
-        self._cst_checkpoint_path: str = ""
-        if cst_enabled:
-            if not self._capture_pre_logits or not self._hidden_capture_path:
-                raise RuntimeError(
-                    "cst_checkpoint requires pre-logit capture; this should be unreachable (see __init__ coercion)."
-                )
-            assert ccfg is not None
-            self._cst_eval_bank = CSTBank(
-                max_steps=int(ccfg["max_steps"]),
-                d=int(ccfg["d_model"]),
-                k=int(ccfg["k"]),
-                w=int(ccfg["w"]),
-                max_on_gpu=int(ccfg.get("max_on_gpu", ccfg["max_steps"])),
-                initial_threshold=float(ccfg.get("jumprelu_initial_threshold", 0.03)),
-                bandwidth=float(ccfg.get("jumprelu_bandwidth", 1.0)),
-            )
-            load_cst_bank_weights(cst_s, self._cst_eval_bank)
-            self._cst_eval_bank.to_device_all(self.device)
-            self._cst_w = int(self._cst_eval_bank.w)
-            self._cst_checkpoint_path = cst_s
-            self._cst_agg = new_eval_aggregator()
-            self.logger.info(
-                "CST eval enabled: weights=%s task_name=%s ntf_first_non_eos=%s (per-dataset: align with launch_eval task_name)",
-                cst_s,
-                self.task_name,
-                self._cst_ntf_first_non_eos,
-            )
-            gbf = float(cst_target_staging_gb)
-            if gbf <= 0:
-                raise ValueError("cst_target_staging_gb must be positive")
-            self._cst_target_b = int(gbf * 1e9)
-            self._cst_target_b = max(1, self._cst_target_b)
-            self._cst_pending_paths: list[str] = []
-            self._cst_pending_bytes = 0
-            self._cst_segment_idx = 0
-            self.logger.info("CST target staging: %.3f GB before eval+delete a segment", gbf)
-        else:
-            self._cst_target_b = 0
-            self._cst_pending_paths = []
-            self._cst_pending_bytes = 0
-            self._cst_segment_idx = 0
 
     def _maybe_persist_wandb_run_id(self) -> None:
         """Write ``output_dir/.wandb_id`` on first success so a later process can pass ``resume=allow,id=...``."""
@@ -533,123 +432,22 @@ class LLaDAEvalHarness(LM):
             log = logging.getLogger(__name__)
             log.warning("Could not write .wandb_id for W&B resume: %s", e)
 
-    def _cst_load_resume_agg(self) -> None:
-        """Load resumable CST scalar aggregate from disk if present."""
-        if (
-            not self.resumable
-            or not self.output_dir
-            or self._cst_eval_bank is None
-            or self._cst_agg is None
-            or not self._cst_checkpoint_path
-        ):
+    def _persist_diffusion_metrics_aggregate(self) -> None:
+        """Write cumulative diffusion stats next to checkpoint so restarts include prior NFE/gen time."""
+        if not self.resumable or not self.output_dir:
             return
-        out = load_cst_eval_agg(
-            self.output_dir,
-            self._cst_eval_hidden_name_token,
-            expect_checkpoint=self._cst_checkpoint_path,
-            expect_name_token=self._cst_eval_hidden_name_token,
-        )
-        if out is None:
-            return
-        agg, seg_idx, n_files, tname = out
-        self._cst_agg = agg
-        self._cst_segment_idx = seg_idx
-        self._cst_n_chunks = n_files
-        self.logger.info(
-            "CST: resumed per-chunk metrics from %s (%d file-means, next segment index %d, task=%s)",
-            cst_resumable_eval_agg_path(self.output_dir, self._cst_eval_hidden_name_token),
-            n_files,
-            seg_idx,
-            tname,
-        )
-
-    def _cst_persist_agg(self) -> None:
-        """Persist merged CST scalars for resumable runs."""
-        if (
-            not self.resumable
-            or not self.output_dir
-            or self._cst_agg is None
-            or not self._cst_checkpoint_path
-        ):
-            return
+        with self._stats_lock:
+            payload = {
+                "total_computed_samples_global": int(self.total_computed_samples_global),
+                "total_nfe_mass_global": int(self.total_nfe_mass_global),
+                "total_steps_global": int(self.total_steps_global),
+                "total_blocks_global": int(self.total_blocks_global),
+                "total_gen_time_global": float(self.total_gen_time_global),
+            }
         try:
-            save_cst_eval_agg(
-                self.output_dir,
-                self._cst_eval_hidden_name_token,
-                self._cst_agg,
-                cst_checkpoint=self._cst_checkpoint_path,
-                cst_name_token=self._cst_eval_hidden_name_token,
-                task_name=str(self.task_name),
-                segment_idx=self._cst_segment_idx,
-                n_files_merged=self._cst_n_chunks,
-            )
+            _atomic_write_json(_diffusion_metrics_path(self.output_dir), payload)
         except OSError as e:
-            self.logger.warning("Could not persist CST eval aggregate: %s", e)
-
-    def _cst_run_segment_and_delete(self, paths: list[str]) -> None:
-        """CST eval on a batch of ``.pt`` paths, then delete them."""
-        if not paths or self._cst_eval_bank is None or self._cst_agg is None:
-            return
-        seg_n = self._cst_segment_idx
-        self._cst_segment_idx += 1
-        try:
-            seg_agg = new_eval_aggregator()
-            for p in paths:
-                cst_m = evaluate_chunk_file(
-                    self._cst_eval_bank,
-                    p,
-                    w=self._cst_w,
-                    device=self.device,
-                    base_model=self.model,
-                    ntf_conf_low=self._cst_ntf_lo,
-                    ntf_conf_high=self._cst_ntf_hi,
-                    ntf_first_non_eos=self._cst_ntf_first_non_eos,
-                    eos_id=self.eos_id,
-                )
-                merge_eval_file_into_agg(self._cst_agg, cst_m)
-                merge_eval_file_into_agg(seg_agg, cst_m)
-            self._cst_n_chunks += len(paths)
-            self._cst_persist_agg()
-            seg_sum = eval_summary_from_agg(seg_agg)
-            self.logger.info(
-                "CST segment %d: %d files, task %s, summary=%s",
-                seg_n,
-                len(paths),
-                self.task_name,
-                seg_sum,
-            )
-            if self.use_wandb and WANDB_AVAILABLE and wandb.run is not None:
-                try:
-                    wseg = {f"cst/{self.task_name}/seg{seg_n}/{k}": float(v) for k, v in seg_sum.items() if isinstance(v, (int, float)) and math.isfinite(float(v))}
-                    if wseg:
-                        wandb.log(wseg, commit=True)
-                except Exception as w_e:
-                    self.logger.warning("CST segment wandb: %s", w_e)
-        except Exception as e:
-            self.logger.warning("CST segment %d failed: %s", seg_n, e)
-        finally:
-            delete_files(paths)
-
-    def _cst_on_hidden_saved(self, hidden_out: str) -> None:
-        """Accumulate hiddens until size budget, then one CST segment and delete."""
-        if self._cst_eval_bank is None or self._cst_agg is None:
-            return
-        self._cst_pending_paths.append(hidden_out)
-        self._cst_pending_bytes += os.path.getsize(hidden_out)
-        if self._cst_pending_bytes >= self._cst_target_b:
-            to_run = self._cst_pending_paths
-            self._cst_pending_paths = []
-            self._cst_pending_bytes = 0
-            self._cst_run_segment_and_delete(to_run)
-
-    def _cst_flush_pending_tail(self) -> None:
-        """Flush remaining buffered hiddens through CST and delete."""
-        if not self._cst_pending_paths or self._cst_eval_bank is None or self._cst_agg is None:
-            return
-        to_run = self._cst_pending_paths
-        self._cst_pending_paths = []
-        self._cst_pending_bytes = 0
-        self._cst_run_segment_and_delete(to_run)
+            self.logger.warning("Could not persist diffusion metrics: %s", e)
 
     @property
     def rank(self):
@@ -745,7 +543,7 @@ class LLaDAEvalHarness(LM):
         raise NotImplementedError
 
     def generate_until(self, requests: list[Instance]):
-        """Batched `generate_until`: length buckets, optional trace/checkpoint/CST hiddens."""
+        """Batched `generate_until`: length buckets, optional trace and resumable checkpoint."""
         # Increment call counter (thread-safe)
         with self._stats_lock:
             self.generate_until_call_count += 1
@@ -780,7 +578,6 @@ class LLaDAEvalHarness(LM):
             if completed_from_checkpoint:
                 self.logger.info(f"Resuming: loaded {len(completed_from_checkpoint)} completed samples from checkpoint")
             checkpoint_writer = open(checkpoint_path, "a")
-            self._cst_load_resume_agg()
         # W&B inits after model construction; persist run id for next resume once the run is active
         self._maybe_persist_wandb_run_id()
 
@@ -806,6 +603,8 @@ class LLaDAEvalHarness(LM):
         total_steps_taken = 0
         total_blocks_processed = 0
         total_gen_time = 0.0
+        computed_samples_this_call = 0
+        nfe_mass_this_call = 0  # sum of (steps_taken * batch_n) across chunks → sample-weighted NFE
 
         try:
             for chunk_index, chunk_indices in enumerate(chunks):
@@ -904,52 +703,14 @@ class LLaDAEvalHarness(LM):
                             except Exception as e:
                                 self.logger.warning(f"Failed to write checkpoint sample: {e}")
 
+                    n_batch = len(to_compute)
+                    computed_samples_this_call += n_batch
                     total_steps_taken += steps_taken
                     total_blocks_processed += blocks
                     total_gen_time += gen_time
-
-                    if (
-                        self._capture_pre_logits
-                        and self._hidden_capture_path
-                        and hasattr(self.model, "records")
-                        and hasattr(self.model, "clear_records")
-                    ):
-                        os.makedirs(self._hidden_capture_path, exist_ok=True)
-                        hidden_name = (
-                            f"{self._cst_eval_hidden_name_token}_g{self.generate_until_call_count:05d}_chunk_{chunk_index:05d}.pt"
-                        )
-                        hidden_out = os.path.join(self._hidden_capture_path, hidden_name)
-                        um = getattr(self.model, "unmasked_records", None)
-                        dm = getattr(self.model, "diffusion_masked_records", None)
-                        rec = self.model.records
-                        ex = {
-                            "generate_until_call": self.generate_until_call_count,
-                            "chunk_index": chunk_index,
-                            "batch_size": int(generated.shape[0]),
-                            "steps_taken": int(steps_taken),
-                            "cst_name_token": self._cst_eval_hidden_name_token,
-                            "context": "task",
-                            "model_path": self._model_path,
-                            "mode": self.mode,
-                            "strategy": self.strategy,
-                            "task_name": str(self.task_name),
-                        }
-                        if (
-                            um is not None
-                            and dm is not None
-                            and len(um) == len(rec) == len(dm)
-                        ):
-                            save_hidden_records(
-                                rec,
-                                hidden_out,
-                                extra=ex,
-                                token_unmasked=um,
-                                token_diffusion_masked=dm,
-                            )
-                        else:
-                            save_hidden_records(rec, hidden_out, extra=ex)
-                        self.model.clear_records()
-                        self._cst_on_hidden_saved(hidden_out)
+                    # steps_taken = number of batched forwards; each row in the batch runs every step ⇒
+                    # per-sample NFE for this chunk == steps_taken
+                    nfe_mass_this_call += steps_taken * n_batch
 
                     self.logger.info(
                         f"Processed chunk {chunk_index + 1}/{len(chunks)} (indices {chunk_indices}, "
@@ -959,8 +720,10 @@ class LLaDAEvalHarness(LM):
                         try:
                             wandb.log({
                                 "chunk/size": chunk_size,
+                                "chunk/computed_batch_size": n_batch,
                                 "chunk/gen_time": gen_time,
                                 "chunk/steps_taken": steps_taken,
+                                "chunk/nfe_per_sample": float(steps_taken),
                                 "chunk/blocks_processed": blocks,
                                 "chunk/throughput_samples_per_sec": chunk_size / gen_time if gen_time > 0 else 0,
                                 "chunk/chunk_index": chunk_index,
@@ -1003,25 +766,57 @@ class LLaDAEvalHarness(LM):
         # Update global statistics (thread-safe)
         with self._stats_lock:
             self.total_samples_global += total_requests
+            self.total_computed_samples_global += computed_samples_this_call
+            self.total_nfe_mass_global += nfe_mass_this_call
             self.total_steps_global += total_steps_taken
             self.total_gen_time_global += total_gen_time
             self.total_blocks_global += total_blocks_processed
+        self._persist_diffusion_metrics_aggregate()
 
         if total_requests > 0:
+            nfe_avg_call = (
+                nfe_mass_this_call / computed_samples_this_call if computed_samples_this_call > 0 else 0.0
+            )
+            skipped_ckpt_this_call = total_requests - computed_samples_this_call
             self.logger.info(f"Total requests in this call: {total_requests} (processed in chunks of {self.batch_size})")
+            self.logger.info(
+                f"Samples with diffusion this call: {computed_samples_this_call}"
+                + (
+                    ""
+                    if skipped_ckpt_this_call == 0
+                    else (
+                        f" ({skipped_ckpt_this_call} served from checkpoint JSONL only — "
+                        "NFE/step totals for those rows were accrued when they were first generated; "
+                        "see cumulative globals / .eval_diffusion_metrics.json)"
+                    )
+                )
+            )
             self.logger.info(f"Total steps taken in this call: {total_steps_taken}")
+            self.logger.info(
+                f"Avg NFE per sample this call: {nfe_avg_call:.4f}"
+                " (= sum_chunk steps_taken_chunk × batch_size_chunk / sum batch sizes)"
+            )
             self.logger.info(f"Total generation time in this call: {total_gen_time:.4f} seconds")
             self.logger.info(f"Total blocks in this call: {total_blocks_processed}")
             # Read global statistics within lock for consistency
             with self._stats_lock:
                 call_count = self.generate_until_call_count
                 total_samples = self.total_samples_global
+                total_computed = self.total_computed_samples_global
+                nfe_mass = self.total_nfe_mass_global
                 total_steps = self.total_steps_global
                 total_gen_time_global = self.total_gen_time_global
                 total_blocks = self.total_blocks_global
+            nfe_avg_global = nfe_mass / total_computed if total_computed > 0 else 0.0
             self.logger.info(f"--- Global Statistics (across {call_count} generate_until calls) ---")
             self.logger.info(f"Total samples (global): {total_samples}")
+            self.logger.info(
+                "Total computed samples (global, diffusion runs — includes prior runs "
+                "if resuming from .eval_diffusion_metrics.json): "
+                f"{total_computed}"
+            )
             self.logger.info(f"Total steps taken (global): {total_steps}")
+            self.logger.info(f"Avg NFE per sample (global): {nfe_avg_global:.4f}")
             self.logger.info(f"Total generation time (global): {total_gen_time_global:.4f} seconds")
             self.logger.info(f"Total blocks (global): {total_blocks}")
             self.logger.info(f"Number of generate_until calls: {call_count}")
@@ -1030,38 +825,31 @@ class LLaDAEvalHarness(LM):
             if self.use_wandb and wandb.run is not None:
                 try:
                     wandb.log({
+                        "call/requests": total_requests,
+                        "call/diffusion_samples": computed_samples_this_call,
+                        "call/skipped_checkpoint_samples": skipped_ckpt_this_call,
                         "global/total_samples": total_samples,
+                        "global/total_computed_samples": total_computed,
                         "global/total_steps": total_steps,
+                        "global/total_nfe_mass": nfe_mass,
                         "global/total_gen_time": total_gen_time_global,
                         "global/total_blocks": total_blocks,
                         "global/generate_until_calls": call_count,
-                        "global/avg_steps_per_sample": total_steps / total_samples if total_samples > 0 else 0,
+                        "global/avg_nfe_per_sample": nfe_avg_global,
+                        # total_steps counts only diffusion forwards; per-request mean is diluted when
+                        # some rows are checkpoint-only in the same generate_until.
+                        "global/avg_steps_per_request_diluted": (
+                            total_steps / total_samples if total_samples > 0 else 0
+                        ),
+                        # sum(steps_taken per chunk) / #diffusion samples; unlike nfe_mass avg if steps vary per chunk
+                        "global/avg_steps_per_diffusion_chunk_sum": (
+                            total_steps / total_computed if total_computed > 0 else 0
+                        ),
                         "global/avg_gen_time_per_sample": total_gen_time_global / total_samples if total_samples > 0 else 0,
                         "global/throughput_samples_per_sec": total_samples / total_gen_time_global if total_gen_time_global > 0 else 0,
                     })
                 except Exception as e:
                     self.logger.warning(f"Failed to log global metrics to wandb: {e}")
-
-        self._cst_flush_pending_tail()
-        self._cst_persist_agg()
-        if self._cst_eval_bank is not None and self._cst_agg is not None and self._cst_n_chunks > 0:
-            try:
-                cst_sum = eval_summary_from_agg(self._cst_agg)
-                self.logger.info(
-                    "CST eval summary (task %s, %d hidden files): %s",
-                    self.task_name,
-                    self._cst_n_chunks,
-                    cst_sum,
-                )
-                if self.use_wandb and WANDB_AVAILABLE and wandb.run is not None:
-                    cst_wlog = {}
-                    for k, v in cst_sum.items():
-                        if isinstance(v, (int, float)) and not (isinstance(v, float) and not math.isfinite(v)):
-                            cst_wlog[f"cst/{self.task_name}/{k}"] = float(v)
-                    if cst_wlog:
-                        wandb.log(cst_wlog, commit=True)
-            except Exception as cst_e:
-                self.logger.warning("CST eval summary: %s", cst_e)
 
         torch.cuda.empty_cache()
         return all_gen_texts

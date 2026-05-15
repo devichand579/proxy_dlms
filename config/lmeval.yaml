@@ -1,0 +1,48 @@
+# Hydra main config for launch_eval.py (lm-eval harness)
+# Override from CLI: task_name=gsm8k mode=pd batch_size=4
+# Multirun (one job per combination): task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=slurm
+#
+# Launchers: launcher=local | launcher=slurm_dgx | launcher=slurm_h100 | launcher=slurm_l40 | launcher=slurm_a40 | launcher=slurm_a100
+# Override at runtime: hydra.launcher.partition=X hydra.launcher.mem_gb=N hydra.launcher.timeout_max=M ...
+
+defaults:
+  - launcher: local
+  - _self_
+
+# Eval parameters 
+batch_size: 4
+mode: pd
+task_name: gsm8k
+# Multi-GPU (`launch_eval.py` / `eval.sh --parallel_config`): path to YAML — list of dicts merged per GPU (see config/parallel_eval_runs.yaml).
+parallel_runs_file: null
+model: llada  # dirname under ./models/: llada | llada1_5 | dream
+compile_model: false
+# false = reference LLaDA-style: full diffusion steps, no truncate-at-first-EOS in chunk decode (see eval.LLaDAEvalHarness)
+use_eos_harness: true
+top_k: 2  # null = 1. Number of tokens to transfer per step (top_k scheduler only). Set to int to override.
+wandb: true
+tracing_enabled: true
+num_fewshot: null  # null = use per-task default (humaneval 0, gsm8k 4, mbpp 3, arc_challenge_chat 5). Set to int to override.
+
+# Sampling (harness model_args). null gen_length/steps = task defaults (see sampling_defaults.py).
+gen_length: null
+steps: null
+# Scheduler block size; null = mode default (block_diffusion 32, fdm 64, dus 16, else gen_length). Not used for fhs.
+block_length: null
+
+# lm-eval harness only (benchmark metrics). Pre-logit capture: launch_capture_hiddens.py / capture_hiddens.sh.
+# Offline CST on .pt dirs: launch_hidden_cst_eval.py / hidden_cst_eval.sh.
+# When true, use stable run_id (no timestamp)
+resumable: true
+run_id: null  # optional custom dir name; if null: {model}_{task}_{mode}, or for top_k: ..._{mode}_{confidence|top_margin}
+
+# Env / paths
+wandb_project: strace
+
+# Hydra: run in project root so outputs/ and trace_outputs/ are in same directory
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.override_dirname}
