@@ -27,7 +27,7 @@ The helper **`load_model.infer_b44_eos_unmask_safety(model_dir)`** returns **tru
 
 When **true**, **`schedulers.generate.generate`** (and code paths that pass `model_path` into it, including **lm-eval** and **CST collect**) set **both** B.4 flags on for that run. **`./models/llada`**, **Dream**, and other directory names are **unchanged** (still `false`).
 
-There is **no** separate switch in `config/config.yaml`, `eval.sh`, or `cst.yaml` — you only need the **model path** to resolve to `llada1_5` (or use the config key above).
+There is **no** separate switch in `config/lmeval.yaml`, `eval.sh`, or `cst.yaml` — you only need the **model path** to resolve to `llada1_5` (or use the config key above).
 
 ## Why numerics can blow up (and why `torch.multinomial` complains)
 

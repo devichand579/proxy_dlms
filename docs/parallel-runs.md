@@ -12,10 +12,10 @@ File **names** disambiguate **model, scheduler, CST `k`/`w`**, and (for eval) **
 - **Shell / Slurm:** export different dirs per `srun` task or `CUDA_VISIBLE_DEVICES` slot.
 - **Optional:** one job per `model` / `cst` sweep so tokens differ; still prefer **separate dirs** for safety.
 
-## lm-eval (with or without CST)
+## lm-eval
 
 - **Non-resumable** runs: default `output_suffix` includes a **timestamp** → new folder per start; parallel launches usually **do not** collide.
-- **Resumable** runs: output is `outputs/{run_id}/` with fixed `run_id` default `"{model}_{task_name}_{mode}"`. **Two parallel resumable jobs** with the same model/task/mode (and no custom `run_id`) will **corrupt the same** `checkpoint.jsonl`, `hidden/`, and `cst_*_eval_agg.json`.
+- **Resumable** runs: output is `outputs/{run_id}/` with fixed `run_id` default `"{model}_{task_name}_{mode}"`. **Two parallel resumable jobs** with the same model/task/mode (and no custom `run_id`) will **corrupt the same** `checkpoint.jsonl`.
 
 **Practical setup**
 
