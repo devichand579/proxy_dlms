@@ -12,7 +12,7 @@ hydra:
     partition: dgx2
     qos: gpu2
     timeout_min: 4320   # 72h
-    mem_gb: 78
+    mem_gb: 128
     gres: gpu:2
     cpus_per_task: 8
     nodes: 1
