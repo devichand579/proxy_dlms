@@ -1,16 +1,8 @@
 '''
     FHS (First-Hitting Sampling) schedulers
     1. Extrapolation Method (N <= 128)
-    generate_fhs_extrapolation(model, prompt, attention_mask=None, gen_length=128, steps=128, temperature=1.0,
-                               mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
-    
     2. Predictor-Corrector Method (N > 128)
-    generate_fhs_predictor_corrector(model, prompt, attention_mask=None, gen_length=256, steps=256, temperature=1.0,
-                                     mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
-    
     3. Auto-selector (chooses method based on steps)
-    generate_fhs(model, prompt, attention_mask=None, gen_length=128, steps=128, temperature=1.0,
-                 mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False, pass_time_to_model=True, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
 '''
 
 
@@ -71,8 +63,8 @@ def _pick_token_and_tau(tau_per_token, masked, batch_idx):
 
 def _rescale_hitting_times_survival(tau_per_token, masked, k, tau_new, tau_upper, batch_idx):
     """
-    After token k hits at τ_new, condition remaining on survival.
-    Rescale τ_j ∈ (τ_new, τ_upper] → (0, 1] for next round.
+    After token k hits at tau_new, condition remaining on survival.
+    Rescale tau_j in (tau_new, tau_upper] -> (0, 1] for next round.
     (masked already has k=False when called)
     """
     tau_b = tau_per_token[batch_idx]
@@ -183,8 +175,8 @@ def generate_fhs_extrapolation(
     masked = torch.zeros_like(x, dtype=torch.bool)
     masked[:, prompt_len:] = True
 
-    # Per-token hitting times: each masked token has τ_i ~ Uniform(0,1).
-    # Decoding order = token with minimum τ becomes visible first.
+    # Per-token hitting times: each masked token has tau_i ~ Uniform(0,1).
+    # Decoding order = token with minimum tau becomes visible first.
     tau_per_token = torch.empty_like(x, dtype=torch.float32, device=model.device)
     tau_per_token[:, :prompt_len] = 0.0  # unused for prompt
     tau_per_token[:, prompt_len:] = torch.rand(
@@ -203,7 +195,7 @@ def generate_fhs_extrapolation(
             break
 
         for i in range(Ln):
-            # Paper: τ = actual next unmasking time = min(τ_i) among masked
+            # Paper: tau = actual next unmasking time = min(tau_i) among masked
             picks = [_pick_token_and_tau(tau_per_token, masked, b) for b in range(prompt.shape[0])]
             tau_new = torch.tensor(
                 [picks[b][1] if picks[b][1] is not None else 1.0 for b in range(prompt.shape[0])],
@@ -240,7 +232,7 @@ def generate_fhs_extrapolation(
                     mu,
                 )
 
-            # Decode ONE token per batch; τ_new = actual hitting time; rescale on survival
+            # Decode ONE token per batch; tau_new = actual hitting time; rescale on survival
             seq_len = x.shape[1]
             for b in range(prompt.shape[0]):
                 k, tau_new_b = picks[b][0], picks[b][1]
@@ -328,7 +320,7 @@ def generate_fhs_predictor_corrector(
     masked = torch.zeros_like(x, dtype=torch.bool)
     masked[:, prompt_len:] = True
 
-    # Per-token hitting times: each masked token has τ_i ~ Uniform(0,1)
+    # Per-token hitting times: each masked token has tau_i ~ Uniform(0,1)
     tau_per_token = torch.empty_like(x, dtype=torch.float32, device=model.device)
     tau_per_token[:, :prompt_len] = 0.0
     tau_per_token[:, prompt_len:] = torch.rand(
@@ -346,7 +338,7 @@ def generate_fhs_predictor_corrector(
         decoded_this_chunk = [[] for _ in range(prompt.shape[0])]
 
         for i in range(Ln):
-            # τ = actual next unmasking time = min(τ_i) among masked
+            # tau = actual next unmasking time = min(tau_i) among masked
             picks = [_pick_token_and_tau(tau_per_token, masked, b) for b in range(prompt.shape[0])]
             tau_new = torch.tensor(
                 [picks[b][1] if picks[b][1] is not None else 1.0 for b in range(prompt.shape[0])],
@@ -363,7 +355,7 @@ def generate_fhs_predictor_corrector(
             mu_pred = logits
             seq_len = x.shape[1]
 
-            # Decode ONE token per batch; τ_new = actual hitting time; rescale on survival
+            # Decode ONE token per batch; tau_new = actual hitting time; rescale on survival
             for b in range(prompt.shape[0]):
                 k, tau_new_b = picks[b][0], picks[b][1]
                 if k is None:

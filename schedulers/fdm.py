@@ -1,9 +1,5 @@
 '''
     FDM (Foreseeing Decoding Method) scheduler
-    generate_fdm(model, prompt, attention_mask=None, steps=128, gen_length=256,
-                 block_length=256, K1=2, N=4, eta1=0.8, eta2=0.7, gamma=0.5, temperature=0.,
-                 mask_id=126336, logits_eos_inf=False, confidence_eos_eot_inf=False,
-                 global_scale=1.0, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
 '''
 
 
@@ -118,7 +114,7 @@ def _fdm_single_step(
 ):
     device = x.device
 
-    # Candidate pruning (FDM2 uses γ=1.0 → no pruning; FDM1 uses γ_1 or η_2)
+    # Candidate pruning (FDM2 uses γ=1.0 -> no pruning; FDM1 uses γ_1 or η_2)
     if log_gamma > -1e-9:  # γ_1 ≈ 1.0: skip pruning, use all masked positions
         cand_pos = masked_pos
     else:
@@ -132,7 +128,7 @@ def _fdm_single_step(
         topk = torch.topk(scores, k=k).indices
         chosen = masked_pos[topk]
         x[b, chosen] = x0[b, chosen]
-        return
+        return 0
 
     cand_scores = x0_logp[b, cand_pos]
     K_eff = min(K, cand_pos.numel())
@@ -165,9 +161,10 @@ def _fdm_single_step(
     n_eff = min(n, Lambda_pos.numel())
     chosen_idx = _select_topn_unique_positions(combined, Lambda_pos, n_eff, device=device)
     if chosen_idx.numel() == 0:
-        return
+        return 1
     chosen_pos = Lambda_pos[chosen_idx]
     x[b, chosen_pos] = x0[b, chosen_pos]
+    return 1
 
 
 @torch.no_grad()
@@ -238,7 +235,7 @@ def generate_fdm(
     prompt_len = prompt.shape[1]
     steps_taken = 0  
 
-    # γ_1: main pruning threshold (exploration branch). η_2: borderline-stage threshold (final else).
+    # gamma_1: main pruning threshold (exploration branch). eta_2: borderline-stage threshold (final else).
     log_gamma1 = math.log(gamma) if gamma > 0 else -1e9
 
     for num_block in range(num_blocks):
@@ -257,8 +254,8 @@ def generate_fdm(
             if not block_mask.any():
                 break
 
-            steps_taken += 1  
             logits = model(x, attention_mask=attention_mask).logits
+            steps_taken += 1
 
             mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
@@ -294,8 +291,8 @@ def generate_fdm(
 
               
                 if num_high == 0:
-                    # Exploration: NUM(p > η1) == 0 → FDM1(..., n=1, γ=γ1)
-                    _fdm_single_step(
+                    # Exploration: NUM(p > eta1) == 0 -> FDM1(..., n=1, gamma=gamma1)
+                    steps_taken += _fdm_single_step(
                         model, x, j, attention_mask,
                         masked_pos,
                         x0, x0_logp,
@@ -313,8 +310,8 @@ def generate_fdm(
                     continue
 
                 if num_high >= N:
-                    # Many qualified → FDM2(..., n=N, γ=1.0).
-                    _fdm_single_step(
+                    # Many qualified -> FDM2(..., n=N, gamma=1.0).
+                    steps_taken += _fdm_single_step(
                         model, x, j, attention_mask,
                         masked_pos,
                         x0, x0_logp,
@@ -332,9 +329,9 @@ def generate_fdm(
                     continue
 
                 if num_border == 0:
-                    # No borderline → FDM2(..., n=NUM(p>η1), γ=1.0).
+                    # No borderline -> FDM2(..., n=NUM(p>eta1), gamma=1.0).
                     n_dec = min(num_high, N)
-                    _fdm_single_step(
+                    steps_taken += _fdm_single_step(
                         model, x, j, attention_mask,
                         masked_pos,
                         x0, x0_logp,
@@ -351,10 +348,10 @@ def generate_fdm(
                     )
                     continue
 
-                # Else: borderline exists → FDM1(..., n=NUM(p>η1), γ=η_2). η_2 ≠ γ_1
+                # Else: borderline exists -> FDM1(..., n=NUM(p>eta1), gamma=eta_2). eta_2 != gamma_1
                 n_dec = min(num_high, masked_pos.numel())
                 log_eta2 = math.log(eta2) if eta2 > 0 else -1e9
-                _fdm_single_step(
+                steps_taken += _fdm_single_step(
                     model, x, j, attention_mask,
                     masked_pos,
                     x0, x0_logp,

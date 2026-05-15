@@ -1,14 +1,7 @@
 '''
     DUS (Dilated Unmasking Scheduler) schedulers
     1. Binary Search Schedule
-    generate_dus(model, prompt, attention_mask=None, gen_length=256, block_length=16,
-                      temperature=0., remasking='confidence', mask_id=126336, scheduler='binary',
-                      logits_eos_inf=False, confidence_eos_eot_inf=False, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
-    
     2. Dilated Schedule
-    generate_dus(model, prompt, attention_mask=None, gen_length=256, block_length=16,
-                      temperature=0., remasking='confidence', mask_id=126336, scheduler='dilated',
-                      base=2, base_skip=1, logits_eos_inf=False, confidence_eos_eot_inf=False, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
     
     Note: Number of steps is determined automatically by the schedule (binary/dilated),
     not by a steps parameter. The schedule creates hierarchical levels of unmasking.

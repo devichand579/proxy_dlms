@@ -1,8 +1,5 @@
 '''
-    EB (Entropy-Based) sampler
-    generate_EB(model, prompt, attention_mask=None, steps=256, gen_length=256, block_length=256, 
-                gamma=0.1, E='confidence', temperature=0., mask_id=126336, 
-                logits_eos_inf=False, confidence_eos_eot_inf=False, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
+    EB (Entropy-Bounded) sampler
 '''
 
 import os
