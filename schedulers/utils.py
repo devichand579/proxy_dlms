@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from typing import List, Optional
+from typing import Optional
 
 
 def mask_eos_eot_logits(

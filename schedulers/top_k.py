@@ -1,8 +1,5 @@
 '''
     Top-K diffusion scheduler
-    generate_topk(model, prompt, attention_mask=None, gen_length=256, block_length=256, steps=256, 
-                 top_k=4, metric='confidence', temperature=0., mask_id=126336, 
-                 logits_eos_inf=False, confidence_eos_eot_inf=False, trace_name=None, intervention_mode=None, intervention_steps=None, intervention_k=1)
 '''
 
 import os
