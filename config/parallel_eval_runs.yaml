@@ -1,7 +1,7 @@
 # Used with: python launch_eval.py parallel_runs_file=config/parallel_eval_runs.yaml
 # or: ./eval.sh --parallel_config config/parallel_eval_runs.yaml
 #
-# Each list entry is merged on top of config/config.yaml (+ CLI). Subprocess i uses CUDA_VISIBLE_DEVICES=i.
+# Each list entry is merged on top of config/lmeval.yaml (+ CLI). Subprocess i uses CUDA_VISIBLE_DEVICES=i.
 # Omit keys in a slot to inherit from the base config.
 
 - mode: eb

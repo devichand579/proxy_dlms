@@ -12,7 +12,7 @@ hydra:
     partition: dibdp    
     qos: null              # set if required
     timeout_min: 10080       # 7 days
-    mem_gb: 38
+    mem_gb: 64
     gres: gpu:1
     cpus_per_task: 8
     nodes: 1
