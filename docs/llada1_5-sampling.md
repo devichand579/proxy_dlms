@@ -12,7 +12,7 @@ This is **not** caused by:
 - `skip_special_tokens=True` “stripping away” content — the **integer sequence** really is mostly EOS.
 - EOS **harness** early exit alone — with `--no-eos-harness` you still see the same id pattern if the model keeps committing EOS at masked positions.
 
-## Why it happens (intuition)
+## Why it happens 
 
 Mask diffusion steps **predict a token at every position** and then **choose which masked positions to commit** each step (e.g. by **highest confidence** in the confidence remasking path). If the model assigns **very high probability to EOS** at many still-masked positions in parallel, the scheduler can **unmask EOS first** across the block. That fills the sequence with EOS even when other schedulers (e.g. **block diffusion** with smaller blocks, or **top-k margin**) look fine, because **block size**, **remasking metric**, and **parallel context** change which positions get committed when.
 
@@ -39,7 +39,7 @@ B.4 **intentionally** sets EOS / EoT logits to \(-\infty\) in the paths used for
 
 So the failure mode is: **B.4 makes logits pathological in the EOS/EoT dimensions** → **sometimes** the whole row’s softmax / categorical draw is **ill-conditioned** → **`multinomial` is unsafe** without extra stabilization. This shows up in schedulers that **sample** from those logits (e.g. **FHS** with `temperature > 0`), not because B.4 is wrong, but because **sampling code** must tolerate those rows.
 
-## What `sample_categorical` in FHS is doing (conceptually)
+## What `sample_categorical` in FHS is doing
 
 `schedulers/fhs.py` stabilizes the categorical draw:
 

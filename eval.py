@@ -206,6 +206,7 @@ def _load_diffusion_metrics_aggregate(output_dir: str) -> dict:
             return {}
         out = {}
         for k in (
+            "total_samples_global",
             "total_computed_samples_global",
             "total_nfe_mass_global",
             "total_steps_global",
@@ -372,6 +373,7 @@ class LLaDAEvalHarness(LM):
         if self.resumable and self.output_dir:
             _agg = _load_diffusion_metrics_aggregate(self.output_dir)
             if _agg:
+                self.total_samples_global = int(_agg.get("total_samples_global", 0))
                 self.total_computed_samples_global = int(_agg.get("total_computed_samples_global", 0))
                 self.total_nfe_mass_global = int(_agg.get("total_nfe_mass_global", 0))
                 self.total_steps_global = int(_agg.get("total_steps_global", 0))
@@ -379,7 +381,8 @@ class LLaDAEvalHarness(LM):
                 self.total_gen_time_global = float(_agg.get("total_gen_time_global", 0.0))
                 self.logger.info(
                     "Loaded cumulative diffusion metrics from checkpoint dir "
-                    f"(computed_samples={self.total_computed_samples_global}, "
+                    f"(samples={self.total_samples_global}, "
+                    f"computed_samples={self.total_computed_samples_global}, "
                     f"nfe_mass={self.total_nfe_mass_global}, "
                     f"steps={self.total_steps_global})"
                 )
@@ -433,11 +436,13 @@ class LLaDAEvalHarness(LM):
             log.warning("Could not write .wandb_id for W&B resume: %s", e)
 
     def _persist_diffusion_metrics_aggregate(self) -> None:
-        """Write cumulative diffusion stats next to checkpoint so restarts include prior NFE/gen time."""
+        """Write cumulative diffusion stats next to checkpoint (resumable mode).
+        """
         if not self.resumable or not self.output_dir:
             return
         with self._stats_lock:
             payload = {
+                "total_samples_global": int(self.total_samples_global),
                 "total_computed_samples_global": int(self.total_computed_samples_global),
                 "total_nfe_mass_global": int(self.total_nfe_mass_global),
                 "total_steps_global": int(self.total_steps_global),
@@ -608,6 +613,12 @@ class LLaDAEvalHarness(LM):
 
         try:
             for chunk_index, chunk_indices in enumerate(chunks):
+                computed_in_chunk = 0
+                nfe_mass_chunk = 0
+                steps_chunk = 0
+                blocks_chunk = 0
+                gen_time_chunk = 0.0
+
                 chunk_requests = [requests[i] for i in chunk_indices]
                 chunk_size = len(chunk_requests)
 
@@ -704,13 +715,19 @@ class LLaDAEvalHarness(LM):
                                 self.logger.warning(f"Failed to write checkpoint sample: {e}")
 
                     n_batch = len(to_compute)
+                    computed_in_chunk = n_batch
+                    steps_chunk = steps_taken
+                    blocks_chunk = blocks
+                    gen_time_chunk = gen_time
+                    nfe_mass_chunk = steps_taken * n_batch
+
                     computed_samples_this_call += n_batch
                     total_steps_taken += steps_taken
                     total_blocks_processed += blocks
                     total_gen_time += gen_time
                     # steps_taken = number of batched forwards; each row in the batch runs every step ⇒
                     # per-sample NFE for this chunk == steps_taken
-                    nfe_mass_this_call += steps_taken * n_batch
+                    nfe_mass_this_call += nfe_mass_chunk
 
                     self.logger.info(
                         f"Processed chunk {chunk_index + 1}/{len(chunks)} (indices {chunk_indices}, "
@@ -735,6 +752,17 @@ class LLaDAEvalHarness(LM):
                         f"Processed chunk {chunk_index + 1}/{len(chunks)} (indices {chunk_indices}, "
                         f"all {chunk_size} from checkpoint, skipped)"
                     )
+
+                # Keep diffusion aggregate on disk in step with flushed checkpoint JSONL (resumable).
+                with self._stats_lock:
+                    self.total_samples_global += chunk_size
+                    self.total_computed_samples_global += computed_in_chunk
+                    self.total_nfe_mass_global += nfe_mass_chunk
+                    self.total_steps_global += steps_chunk
+                    self.total_gen_time_global += gen_time_chunk
+                    self.total_blocks_global += blocks_chunk
+                if self.resumable and self.output_dir:
+                    self._persist_diffusion_metrics_aggregate()
 
             # Close the trace file (footer already written by writer) and optionally upload artifact
             if trace_writer is not None:
@@ -762,16 +790,6 @@ class LLaDAEvalHarness(LM):
                     checkpoint_writer.close()
                 except Exception as e:
                     self.logger.warning(f"Failed to close checkpoint: {e}")
-
-        # Update global statistics (thread-safe)
-        with self._stats_lock:
-            self.total_samples_global += total_requests
-            self.total_computed_samples_global += computed_samples_this_call
-            self.total_nfe_mass_global += nfe_mass_this_call
-            self.total_steps_global += total_steps_taken
-            self.total_gen_time_global += total_gen_time
-            self.total_blocks_global += total_blocks_processed
-        self._persist_diffusion_metrics_aggregate()
 
         if total_requests > 0:
             nfe_avg_call = (
