@@ -1,4 +1,4 @@
-"""Stack saved hidden lists into ``H``, then slide CST windows."""
+"""Load hidden chunks and build CST training windows."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import torch
 def records_to_H(
     hidden_states: List[torch.Tensor],
 ) -> torch.Tensor:
-    """``len(list)`` tensors (bf16 on disk, any float dtype here) -> ``[n,B,L,D]`` float32."""
+    """Stack per-step tensors into [T, B, L, D] float32."""
     if not hidden_states:
         raise ValueError("empty hidden_states list")
     stacked = torch.stack([h.float() for h in hidden_states], dim=0)
@@ -21,7 +21,7 @@ def records_to_H(
 def load_chunk_H(
     path: str | Path,
 ) -> Tuple[torch.Tensor, Dict[str, Any], Optional[Dict[str, torch.Tensor]]]:
-    """Load ``save_hidden_records`` ``.pt`` -> ``(H, meta, seg)``; ``seg`` is None or ``unmasked`` / ``diffusion_masked`` ``[T,B,L]``."""
+    """Load a .pt chunk as H, meta, and optional legacy token masks."""
     payload = torch.load(path, map_location="cpu", weights_only=False)
     hs = payload.get("hidden_states")
     if hs is None:
@@ -54,10 +54,7 @@ def iter_anchor_samples(
     *,
     device: torch.device | None = None,
 ) -> Iterator[Tuple[int, torch.Tensor]]:
-    """
-    ``(anchor, h_win)`` with ``h_win`` ``[B, w_eff, L, D]``. ``w_eff = min(w, n-1)`` so short
-    trajectories still produce windows (no need for ``n >= w+1``). ``H[0]`` initial; ``H[k]`` after ``k`` forwards.
-    """
+    """Yield each training anchor and its [B, w, L, D] window."""
     n, B, L, D = H.shape
     if w < 1:
         raise ValueError("w must be >= 1")
