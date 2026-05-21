@@ -1,4 +1,4 @@
-"""Run `schedulers.generate` and persist pre-logit hiddens to ``.pt`` (CST)."""
+"""Run generation and write pre-logit hidden .pt chunks."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 
 from cst import save_hidden_records
+from cst.naming import cst_hidden_chunk_basename, cst_hidden_segment_prefix
 from load_model import (
     infer_diffusion_token_ids,
     is_dream_model_dir,
@@ -66,8 +67,9 @@ def collect_hidden_batch_loaded(
     trace_name: Optional[str] = None,
     staging_name_token: Optional[str] = None,
     use_eos_harness: bool = True,
+    capture_context: str = "train",
 ) -> Dict[str, Any]:
-    """Single forward; writes `save_hidden_records` to `out_path`."""
+    """Run one batch and write a hidden chunk file."""
     mode, strategy = _mode_map(mode_key)
     if strategy is None:
         strategy = "confidence"
@@ -110,14 +112,14 @@ def collect_hidden_batch_loaded(
     if not hasattr(model, "records"):
         raise RuntimeError("Model must use PreLogitsCaptureWrapper (capture_pre_logits=True).")
     rec = model.records
-    um = getattr(model, "unmasked_records", None)
-    dm = getattr(model, "diffusion_masked_records", None)
+    prompt_len = int(input_ids.shape[1])
+    save_hidden_records(rec, out_path, prompt_len=prompt_len)
     meta: Dict[str, Any] = {
         "steps_taken": int(steps_taken),
         "blocks": int(blocks),
         "gen_time": float(gen_time),
         "batch_size": int(input_ids.shape[0]),
-        "prompt_len": int(input_ids.shape[1]),
+        "prompt_len": prompt_len,
         "gen_length": int(gen_length),
         "mask_id": int(mask_id),
         "mode": mode,
@@ -125,22 +127,7 @@ def collect_hidden_batch_loaded(
     }
     if staging_name_token:
         meta["cst_name_token"] = str(staging_name_token)
-        meta["context"] = "train"
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    if (
-        um is not None
-        and dm is not None
-        and len(um) == len(rec) == len(dm)
-    ):
-        save_hidden_records(
-            rec,
-            out_path,
-            extra=meta,
-            token_unmasked=um,
-            token_diffusion_masked=dm,
-        )
-    else:
-        save_hidden_records(rec, out_path, extra=meta)
+        meta["context"] = str(capture_context)
     if hasattr(model, "clear_records"):
         model.clear_records()
     return meta
@@ -153,7 +140,7 @@ def load_model_for_collect(
     device: str = "cuda",
     compile_model: bool = False,
 ) -> Tuple[torch.nn.Module, Any]:
-    """Wrapper: `load_model_and_tokenizer(..., capture_pre_logits=True)`."""
+    """Load model with pre-logit capture enabled."""
     return load_model_and_tokenizer(
         model_path,
         device=device,
@@ -163,7 +150,7 @@ def load_model_for_collect(
 
 
 def _bytes_from_gb(gb: float) -> int:
-    """Bytes for a gigabyte target (×1e9)."""
+    """Convert GB target to bytes."""
     return max(0, int(float(gb) * 1e9))
 
 
@@ -184,12 +171,12 @@ def collect_hidden_until_size_gb_from_row_batches(
     block_length: Optional[int] = None,
     top_k: int = 1,
     max_prompt_length: int = 512,
-    trace_name_prefix: str = "cst_collect",
-    max_batches: int = 50_000,
     staging_name_token: Optional[str] = None,
+    segment: int = 0,
+    capture_context: str = "train",
     use_eos_harness: bool = True,
 ) -> Tuple[List[str], int, Dict[str, Any]]:
-    """Collect hiddens until `target_gb`; returns written paths, next batch index, summary."""
+    """Collect chunks until target_gb; return paths, next index, summary."""
     target_b = _bytes_from_gb(target_gb)
     staging_dir = Path(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -200,12 +187,16 @@ def collect_hidden_until_size_gb_from_row_batches(
     b = int(start_idx)
     n = len(row_batches)
     n_seg = 0
-    while total_bytes < target_b and b < n and n_seg < max_batches:
+    while total_bytes < target_b and b < n:
         rows = row_batches[b]
         texts = [str(r.get("text", "")) for r in rows]
         if not any(texts):
             raise ValueError(f"row_batches[{b}] has no non-empty text")
-        out_path = staging_dir / f"{trace_name_prefix}_{b:06d}.pt"
+        if not staging_name_token:
+            raise ValueError("collect_hidden_until_size_gb_from_row_batches requires staging_name_token")
+        out_name = cst_hidden_chunk_basename(staging_name_token, segment, b)
+        trace_name = f"{cst_hidden_segment_prefix(staging_name_token, segment)}_{b:06d}"
+        out_path = staging_dir / out_name
         meta = collect_hidden_batch_loaded(
             model,
             tokenizer,
@@ -219,9 +210,10 @@ def collect_hidden_until_size_gb_from_row_batches(
             block_length=block_length,
             top_k=top_k,
             max_prompt_length=max_prompt_length,
-            trace_name=f"{trace_name_prefix}_{b}",
+            trace_name=trace_name,
             staging_name_token=staging_name_token,
             use_eos_harness=use_eos_harness,
+            capture_context=capture_context,
         )
         paths.append(str(out_path))
         total_bytes += out_path.stat().st_size
