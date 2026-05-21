@@ -1,4 +1,4 @@
-"""Path tokens for CST train/eval: model, scheduler, k/w, task (staged hiddens and aggregates)."""
+"""Path tokens for CST train/eval: model, scheduler, k/w/lambda_sparsity, task (staged hiddens and aggregates)."""
 
 from __future__ import annotations
 
@@ -27,38 +27,63 @@ def model_label_from_path(model_path: str) -> str:
     return fs_token(name, max_len=64)
 
 
-def cst_k_w_suffix(k: int, w: int) -> str:
-    """Compact ``k``/``w`` segment for path components (e.g. ``k4096_w4``)."""
-    return f"k{int(k)}_w{int(w)}"
+def lambda_sparsity_token(lambda_sparsity: float) -> str:
+    """Filesystem-safe ``ls…`` tag (e.g. ``ls0.001``, ``ls3e-06``)."""
+    v = float(lambda_sparsity)
+    if v == 0.0:
+        return "ls0"
+    return "ls" + fs_token(f"{v:.6g}", max_len=16)
+
+
+def cst_hyper_suffix(k: int, w: int, lambda_sparsity: float) -> str:
+    """Compact hyperparam segment (e.g. ``k4096_w4_ls0.001``)."""
+    return f"k{int(k)}_w{int(w)}_{lambda_sparsity_token(lambda_sparsity)}"
 
 
 def cst_train_name_token(
-    model_label: str, scheduler_mode_short: str, k: int, w: int
-) -> str:
-    """Token for training staging files and ``cst_*_train_*.pt`` (includes ``k``, ``w``, and ``_train``)."""
-    kw = cst_k_w_suffix(k, w)
-    return f"{fs_token(model_label)}_scheduler_{fs_token(scheduler_mode_short)}_{kw}_train"
-
-
-def cst_train_staging_prefix(
     model_label: str,
     scheduler_mode_short: str,
     k: int,
     w: int,
-    epoch: int,
-    segment: int,
+    lambda_sparsity: float,
 ) -> str:
-    """Prefix for collect staging: one chunk file is ``{prefix}_{batch:06d}.pt``."""
-    return f"{cst_train_name_token(model_label, scheduler_mode_short, k, w)}_e{int(epoch):03d}_seg{int(segment):03d}"
+    """Token for training staging files and ``cst_*_train_*.pt``."""
+    hyp = cst_hyper_suffix(k, w, lambda_sparsity)
+    return f"{fs_token(model_label)}_scheduler_{fs_token(scheduler_mode_short)}_{hyp}_train"
+
+
+def cst_hidden_segment_prefix(name_token: str, segment: int) -> str:
+    """Segment prefix shared by train and eval hidden chunks."""
+    return f"{fs_token(name_token, max_len=200)}_seg{int(segment):03d}"
+
+
+def cst_hidden_chunk_basename(name_token: str, segment: int, batch_idx: int) -> str:
+    """Unified hidden chunk filename: ``{name_token}_seg{seg}_{batch:06d}.pt``."""
+    return f"{cst_hidden_segment_prefix(name_token, segment)}_{int(batch_idx):06d}.pt"
+
+
+_HIDDEN_CHUNK_BATCH_SUFFIX = re.compile(r"_(\d{6})\.pt$")
+
+
+def parse_hidden_chunk_batch_idx(filename: str) -> Optional[int]:
+    """Parse global ``batch_idx`` from a hidden chunk basename."""
+    m = _HIDDEN_CHUNK_BATCH_SUFFIX.search(str(filename))
+    return int(m.group(1)) if m else None
 
 
 def cst_eval_task_name_token(
-    model_label: str, scheduler_tag: str, task_name: str, k: int, w: int
+    model_label: str,
+    scheduler_tag: str,
+    task_name: str,
+    k: int,
+    w: int,
+    lambda_sparsity: float,
 ) -> str:
-    """Token for eval hidden files (includes ``k``, ``w``, ``_task_``, and lm-eval task name)."""
-    kw = cst_k_w_suffix(k, w)
+    """Token for eval hidden files (includes ``k``, ``w``, ``lambda_sparsity``, task name)."""
+    hyp = cst_hyper_suffix(k, w, lambda_sparsity)
     return (
-        f"{fs_token(model_label)}_scheduler_{fs_token(scheduler_tag)}_{kw}_task_{fs_token(str(task_name))}"
+        f"{fs_token(model_label)}_scheduler_{fs_token(scheduler_tag)}_{hyp}"
+        f"_task_{fs_token(str(task_name))}"
     )
 
 
