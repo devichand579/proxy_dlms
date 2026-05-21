@@ -16,8 +16,8 @@ pip install -r requirements.txt
 |--|--|
 | [Setup (env & models)](docs/setup.md) | Conda, requirements, Hugging Face downloads |
 | [Evaluation](docs/evaluation.md) | `eval.sh`, `launch_eval.py`, resumable runs, Hydra/SLURM, outputs |
-| [CST: training & eval](docs/cst.md) | Pre-logit capture, checkpoint naming, training, lm-eval+CST, offline eval, `train_data` |
-| [TAG (attribution graph)](docs/tag.md) | `tag.sh`, `launch_tag.py`, one prompt or `.pt` chunk |
+| [CST: training & eval](docs/cst.md) | **`mode=store`** (Hub hiddens) · **`mode=train`** / **`mode=eval`** (CST only) |
+| [TAG (attribution graph)](docs/tag.md) | `tag.sh`, `run_tag.py`, one prompt or `.pt` chunk |
 | [Parallel runs](docs/parallel-runs.md) | Concurrent train/eval without clobbering paths |
 | [Scheduler smoke tests](docs/scheduler-testing.md) | `test_schedulers.py` / `.sh` |
 
