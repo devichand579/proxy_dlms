@@ -1,4 +1,4 @@
-"""TAG pipeline: load H, build graph, optional prune, export JSON/HTML."""
+"""Run TAG end to end: hiddens, graph, prune, export."""
 
 from __future__ import annotations
 
@@ -20,16 +20,7 @@ from .capture import capture_prompt_to_pt
 from .cst_load import load_cst
 from .graph import TAGEdge, TAGNode, build_tag_graph, graph_to_dict
 from .influence_prune import prune_tag_influence
-from .prune import prune_tag_edges_bfs
 from .viz import write_graph_json, write_tag_html
-
-
-def _resolve_nodes_for_pruned_edges(
-    nodes: List[TAGNode],
-    pruned_edges: List[TAGEdge],
-) -> List[TAGNode]:
-    need = {e.src for e in pruned_edges} | {e.dst for e in pruned_edges}
-    return [n for n in nodes if n.id in need or n.kind in ("in", "out", "err")]
 
 
 @torch.no_grad()
@@ -43,8 +34,6 @@ def _run_tag_graph_only(
     device: str,
     top_output_mass: float,
     max_output_tokens: int,
-    prune_p: float,
-    prune_mode: str,
     influence_node_mass: float,
     influence_edge_mass: float,
     mix_uniform: float,
@@ -96,10 +85,10 @@ def _run_tag_graph_only(
         residual_d=res,
         active_threshold=active_threshold,
     )
-    pr_meta: Dict[str, Any] = {}
-    if not edges or prune_mode == "none":
+    if not edges:
         graph = graph_to_dict(nodes, edges)
-    elif prune_mode == "influence":
+        pr_meta: Dict[str, Any] = {}
+    else:
         n2, e2, pr_meta = prune_tag_influence(
             nodes,
             edges,
@@ -108,13 +97,6 @@ def _run_tag_graph_only(
             mix_uniform=mix_uniform,
         )
         graph = graph_to_dict(n2, e2)
-    elif prune_mode == "bfs" and 0.0 < prune_p < 1.0:
-        e2 = prune_tag_edges_bfs(nodes, edges, top_p=prune_p)
-        n2 = _resolve_nodes_for_pruned_edges(nodes, e2)
-        graph = graph_to_dict(n2, e2)
-        pr_meta = {"method": "bfs", "top_p": prune_p}
-    else:
-        graph = graph_to_dict(nodes, edges)
     return {
         "graph": graph,
         "meta": dict(meta),
@@ -134,8 +116,6 @@ def run_tag_from_chunk(
     device: str = "cuda",
     top_output_mass: float = 0.95,
     max_output_tokens: int = 10,
-    prune_p: float = 0.1,
-    prune_mode: str = "influence",
     influence_node_mass: float = 0.8,
     influence_edge_mass: float = 0.98,
     mix_uniform: float = 1e-4,
@@ -144,6 +124,7 @@ def run_tag_from_chunk(
     output_exclude_eos: bool = False,
     eos_id: Optional[int] = None,
 ) -> Dict[str, Any]:
+    """Build TAG from an existing hidden .pt file."""
     h_cpu, meta, _ = load_chunk_H(hidden_pt)
     cst, ccfg = load_cst(cst_checkpoint, cst_config_path, device=device)
     return _run_tag_graph_only(
@@ -155,8 +136,6 @@ def run_tag_from_chunk(
         device=device,
         top_output_mass=top_output_mass,
         max_output_tokens=max_output_tokens,
-        prune_p=prune_p,
-        prune_mode=prune_mode,
         influence_node_mass=influence_node_mass,
         influence_edge_mass=influence_edge_mass,
         mix_uniform=mix_uniform,
@@ -179,8 +158,6 @@ def run_tag_full(
     gen_length: int = 256,
     steps: int = 256,
     device: str = "cuda",
-    prune_p: float = 0.1,
-    prune_mode: str = "influence",
     influence_node_mass: float = 0.8,
     influence_edge_mass: float = 0.98,
     mix_uniform: float = 1e-4,
@@ -192,7 +169,7 @@ def run_tag_full(
     output_exclude_eos: bool = False,
     eos_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Capture hidden trace, build TAG, write tag_graph.json and tag_view.html under out_dir."""
+    """Capture a prompt, build TAG, write JSON and HTML under out_dir."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     pt = str(out / "tag_trace.pt")
@@ -212,8 +189,6 @@ def run_tag_full(
         cst_config_path=cst_config_path,
         model_path=model_path,
         device=device,
-        prune_p=prune_p,
-        prune_mode=prune_mode,
         influence_node_mass=influence_node_mass,
         influence_edge_mass=influence_edge_mass,
         mix_uniform=mix_uniform,

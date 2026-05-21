@@ -1,4 +1,4 @@
-"""Run one prompt through the LM + scheduler and write a single hidden ``.pt`` (``save_hidden_records``)."""
+"""Capture hidden states for one prompt."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def capture_prompt_to_pt(
     compile_model: bool = False,
     use_eos_harness: bool = True,
 ) -> Dict[str, Any]:
-    """Generate from prompt, save hidden ``.pt``; returns capture meta."""
+    """Run the model on a prompt and save a hidden-state .pt file."""
     model, tok = load_model_and_tokenizer(
         model_path,
         device=device,
@@ -57,6 +57,7 @@ def default_tag_pt_path(
     *,
     name: str = "tag_prompt",
 ) -> str:
+    """Default path for a captured hidden .pt under out_dir."""
     p = Path(out_dir) / f"{name}.pt"
     p.parent.mkdir(parents=True, exist_ok=True)
     return str(p)

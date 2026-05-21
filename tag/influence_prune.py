@@ -1,4 +1,4 @@
-"""Prune TAG by fixed-point influence: |A| column-stochastic, (I-A^T)u=r, then node/edge mass."""
+"""Prune TAG by influence propagation from readout or input nodes."""
 
 from __future__ import annotations
 
@@ -27,6 +27,30 @@ def _logit_source_vector(
     if s > 0:
         r /= s
     return r
+
+
+def _in_source_vector(
+    nodes: List[TAGNode], n: int, id_to_i: Dict[str, int]
+) -> np.ndarray:
+    """Uniform source on in nodes when there are no out sinks."""
+    r = np.zeros(n, dtype=np.float64)
+    ins = [id_to_i[nx.id] for nx in nodes if nx.kind == "in" and nx.id in id_to_i]
+    if not ins:
+        return r
+    w = 1.0 / len(ins)
+    for i in ins:
+        r[i] = w
+    return r
+
+
+def _source_vector(
+    nodes: List[TAGNode], n: int, id_to_i: Dict[str, int]
+) -> Tuple[np.ndarray, str]:
+    r = _logit_source_vector(nodes, n, id_to_i)
+    if r.sum() > 0:
+        return r, "out"
+    r = _in_source_vector(nodes, n, id_to_i)
+    return r, "in"
 
 
 def _aggregate_abs_weights(
@@ -66,7 +90,7 @@ def _damped_stochastic(a: np.ndarray, mix: float) -> np.ndarray:
 
 
 def _solve_u_minus_r(a: np.ndarray, r: np.ndarray) -> np.ndarray:
-    """Return u - r for (I - A^T) u = r; r is normalized."""
+    """Solve the influence linear system."""
     n = a.shape[0]
     if n == 0:
         return np.zeros(0, dtype=np.float64)
@@ -99,23 +123,18 @@ def prune_tag_influence(
     edge_mass: float = 0.98,
     mix_uniform: float = 1e-4,
 ) -> Tuple[List[TAGNode], List[TAGEdge], Dict[str, Any]]:
-    """
-    Influence scores, then keep feat by cumulative node_mass, in/out/err always, then
-    edges by mass on the induced subgraph up to edge_mass.
-    """
+    """Drop low-influence feature nodes and edges; keep in, out, and err nodes."""
     n = len(nodes)
     if n == 0 or not edges:
         return nodes, edges, {"method": "influence", "skipped": "empty"}
-    if not any(x.kind == "out" for x in nodes):
-        return nodes, edges, {"method": "influence", "skipped": "no_logit_sinks"}
 
     id_to_i, a_raw = _aggregate_abs_weights(nodes, edges)
-    r = _logit_source_vector(nodes, n, id_to_i)
+    r, source_kind = _source_vector(nodes, n, id_to_i)
     if r.sum() <= 0:
-        return nodes, edges, {"method": "influence", "skipped": "no_logit_r"}
+        return nodes, edges, {"method": "influence", "skipped": "no_source"}
 
     a = _damped_stochastic(_column_stochastic(a_raw), mix_uniform)
-    scores = _solve_u_minus_r(a, r)
+    scores = np.maximum(_solve_u_minus_r(a, r), 0.0)
 
     # --- Phase 2: feat by cumulative mass on scores among feat only ---
     feat_i = [i for i, nx in enumerate(nodes) if nx.kind == "feat"]
@@ -150,6 +169,7 @@ def prune_tag_influence(
     if not e2:
         return nodes2, e2, {
             "method": "influence",
+            "source": source_kind,
             "node_mass": node_mass,
             "edge_mass": edge_mass,
             "n_nodes_before": n,
@@ -166,8 +186,10 @@ def prune_tag_influence(
         i = id2[e.dst]
         a2[i, j] += float(abs(e.weight))
     a2 = _damped_stochastic(_column_stochastic(a2), mix_uniform)
-    r2 = _logit_source_vector(nodes2, m2, id2)
-    scores2 = _solve_u_minus_r(a2, r2) if r2.sum() > 0 else np.zeros(m2, dtype=np.float64)
+    r2, _ = _source_vector(nodes2, m2, id2)
+    scores2 = (
+        np.maximum(_solve_u_minus_r(a2, r2), 0.0) if r2.sum() > 0 else np.zeros(m2, dtype=np.float64)
+    )
 
     es: List[Tuple[str, str, float]] = []
     for e in e2:
@@ -199,6 +221,7 @@ def prune_tag_influence(
 
     meta: Dict[str, Any] = {
         "method": "influence",
+        "source": source_kind,
         "node_mass": node_mass,
         "edge_mass": edge_mass,
         "n_nodes_before": n,

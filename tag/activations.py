@@ -1,12 +1,24 @@
-"""Trajectory activations a^t_{i,f} and optional CST reconstruction for residuals."""
+"""CST activations and reconstruction residuals for TAG."""
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List
 
 import torch
 
-from cst.model.cst_bank import CSTBank, effective_window_size
+from cst.model.cst_bank import CSTBank
+
+
+def last_h_index(H: torch.Tensor) -> int:
+    """Last valid row index in H."""
+    return int(H.shape[0]) - 1
+
+
+def cst_step_count(H: torch.Tensor, bank: CSTBank, *, max_step: int | None = None) -> int:
+    """How many CST steps to run on H (step t encodes H[t-1])."""
+    t_steps = int(H.shape[0])
+    cap = int(max_step) if max_step is not None else min(bank.max_steps, t_steps)
+    return min(t_steps, cap, bank.max_steps)
 
 
 @torch.no_grad()
@@ -16,13 +28,8 @@ def compute_activation_list(
     *,
     max_step: int | None = None,
 ) -> List[torch.Tensor]:
-    """
-    Per-step activations a^t = encode(H[t-1]) after JumpReLU; H is [T,B,L,d], each entry [B,L,k].
-    List index s is step t = s+1 (same as eval).
-    """
-    t_max = H.shape[0] - 1
-    m = int(max_step) if max_step is not None else min(bank.max_steps, t_max)
-    m = min(m, t_max, bank.max_steps)
+    """Per-step CST activations; list index s is step t = s + 1."""
+    m = cst_step_count(H, bank, max_step=max_step)
     out: List[torch.Tensor] = []
     for t in range(1, m + 1):
         cst = bank.get(t)
@@ -40,21 +47,19 @@ def cst_reconstruct_hidden(
     anchor: int,
     w: int,
 ) -> torch.Tensor:
-    """
-    Windowed CST sum for H[anchor-1] (offset rule matches training and run_eval_cst). CPU float [B,L,d].
-    """
+    """CST reconstruction of H[anchor] (same window rule as eval)."""
+    last_h = last_h_index(H)
+    if anchor < 1 or anchor > last_h:
+        raise ValueError(f"anchor {anchor} out of range [1, {last_h}]")
     T, B, L, d = H.shape
-    if anchor < 1 or anchor > T:
-        raise ValueError("anchor out of range")
     device = H.device
     dtyp = H.dtype
     H_hat = torch.zeros((B, L, d), device=device, dtype=dtyp)
-    s_target = anchor - 1
     for enc_slot in range(w):
         enc_step = anchor - w + 1 + enc_slot
         if enc_step < 1:
             continue
-        offset = s_target - enc_step + 1
+        offset = anchor - enc_step + 1
         if offset < 1:
             continue
         cst = bank.get(enc_step)
@@ -74,16 +79,12 @@ def per_step_residual_vectors(
     *,
     max_anchor: int | None = None,
 ) -> torch.Tensor:
-    """
-    H[anchor-1] - H_hat(anchor) per position (batch 0), for anchor in w..T.
-    Returns float tensor [A, L, d] on CPU, A = number of anchors; row index
-    row corresponds to anchor = w + row.
-    """
-    T = H.shape[0]
-    hi = min(T, max_anchor) if max_anchor is not None else T
+    """Residual vectors H[anchor] - H_hat(anchor); row r is anchor w + r."""
+    last_h = last_h_index(H)
+    hi = min(last_h, max_anchor) if max_anchor is not None else last_h
     rows: list[torch.Tensor] = []
     for anchor in range(w, hi + 1):
-        tgt = H[anchor - 1].float().cpu()
+        tgt = H[anchor].float().cpu()
         pred = cst_reconstruct_hidden(H, bank, anchor, w)
         rows.append(tgt[0] - pred[0])  # [L, d]
     if not rows:
@@ -99,14 +100,14 @@ def per_step_residual_norm(
     *,
     max_anchor: int | None = None,
 ) -> torch.Tensor:
-    """Per-token L2 residual norm; shape [A, B, L] on CPU for anchors w..T."""
-    T = H.shape[0]
-    hi = min(T, max_anchor) if max_anchor is not None else T
+    """Per-token L2 norm of reconstruction residual."""
+    last_h = last_h_index(H)
+    hi = min(last_h, max_anchor) if max_anchor is not None else last_h
     rows: list[torch.Tensor] = []
     for anchor in range(w, hi + 1):
-        tgt = H[anchor - 1].float().cpu()
+        tgt = H[anchor].float().cpu()
         pred = cst_reconstruct_hidden(H, bank, anchor, w)
-        rows.append((tgt[0] - pred[0]).norm(dim=-1))  # [L] batch 0
+        rows.append((tgt[0] - pred[0]).norm(dim=-1))  # [L]
     if not rows:
         return torch.empty(0)
     return torch.stack(rows, dim=0)

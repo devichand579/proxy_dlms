@@ -23,10 +23,12 @@
 ##SBATCH --output=job_outputs/%j/%j_0_log.out
 ##SBATCH --error=job_outputs/%j/%j_0_log.err
 
-# CLI: ./tag.sh --help. Hydra: config/tag.yaml. Docs: docs/tag.md, docs/parallel-runs.md
+########################################################################################
+# TAG launcher — runs `python run_tag.py` with Hydra (config: config/tag.yaml)
 #
 # Slurm: sbatch tag.sh --slurm --cst_checkpoint ... --model_path ... --prompt "..."
-# Local GPU: ./tag.sh ...   (or CUDA_VISIBLE_DEVICES=0 ./tag.sh ...)
+# Local: ./tag.sh --cst_checkpoint ... --prompt "..."
+########################################################################################
 
 set -euo pipefail
 
@@ -35,25 +37,27 @@ cd "$SCRIPT_DIR"
 
 usage() {
   cat <<'EOF'
-TAG launcher: runs `python launch_tag.py` with Hydra (config: config/tag.yaml).
+TAG launcher — runs `python run_tag.py` with Hydra (config: config/tag.yaml).
 
   ./tag.sh [OPTIONS] [HYDRA_OVERRIDES ...]
 
 Options (shell only):
   --cst_checkpoint PATH   required unless set in config/tag.yaml
-  --model_path PATH      LM directory (for capture + logits; use with prompt or for chunk logits)
-  --out_dir DIR          default outputs/tag
-  --prompt STR           full run: generate hiddens then TAG (mutually exclusive with --hidden_pt)
-  --hidden_pt PATH       chunk-only: existing save_hidden_records .pt (skips generation)
-  --device STR           e.g. cuda, cuda:0
-  --no_html              do not write tag_view.html
-  --with_residual        add residual err nodes/edges
-  --output_exclude_eos   TAG out nodes: mask EOS in logits before softmax (lexical readout)
-  --slurm                set SLURM_WRAPPED=1 (use with srun when already under Slurm)
-  -h, --help             show this message
+  --model_path PATH       LM directory (full run or chunk logits)
+  --out_dir DIR           default outputs/tag
+  --prompt STR            full run: generate hiddens then TAG
+  --hidden_pt PATH        chunk-only: existing .pt (skips generation)
+  --device STR            e.g. cuda, cuda:0
+  --no_html               do not write tag_view.html
+  --no_logits             chunk-only: skip model load for output sinks
+  --with_residual         add residual err nodes/edges
+  --output_exclude_eos    mask EOS in logits before softmax (lexical readout)
+  --no_eos_harness        full run: disable EOS early stop (reference-style)
+  --slurm                 use srun when already inside a Slurm allocation
+  -h, --help              show this message
 
 Any other args are passed to Hydra, e.g.:
-  gen_length=128 steps=128 prune_mode=none
+  gen_length=128 steps=128 influence_node_mass=0.9
   cst_config=/path/to/cst.yaml
 
 Examples:
@@ -63,6 +67,9 @@ Examples:
 
   ./tag.sh --cst_checkpoint outputs/cst_ckpt/..._train_best.pt --model_path ./models/llada \\
            --hidden_pt outputs/.../hidden/file.pt --out_dir outputs/tag_from_pt
+
+Slurm:
+  sbatch tag.sh --slurm --cst_checkpoint ... --model_path ./models/llada --prompt "..."
 EOF
 }
 
@@ -101,12 +108,20 @@ while [[ $# -gt 0 ]]; do
       EXTRA+=(write_html=false)
       shift
       ;;
+    --no_logits)
+      EXTRA+=(no_logits=true)
+      shift
+      ;;
     --with_residual)
       EXTRA+=(with_residual=true)
       shift
       ;;
     --output_exclude_eos)
       EXTRA+=(output_exclude_eos=true)
+      shift
+      ;;
+    --no_eos_harness)
+      EXTRA+=(use_eos_harness=false)
       shift
       ;;
     --slurm)
@@ -127,4 +142,4 @@ else
 fi
 
 mkdir -p job_outputs
-"${RUN[@]}" python launch_tag.py "${EXTRA[@]}"
+"${RUN[@]}" python run_tag.py "${EXTRA[@]}"

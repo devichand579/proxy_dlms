@@ -1,4 +1,4 @@
-"""Optional full k×k feature-space V between CST steps (decoder at t × encoder at t+δ)."""
+"""Full virtual weight matrices between CST steps."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def virtual_weight_matrix(
     device: torch.device,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """Dense k×k V for (t, δ); row f, col g from decoder column f and encoder row g."""
+    """Dense k-by-k virtual weights for step t and lag delta."""
     if delta < 1:
         raise ValueError("delta must be >= 1 for cross-step virtual weights")
     cst_t = bank.get(t)
@@ -42,7 +42,7 @@ def precompute_virtual_weights(
     dtype: torch.dtype = torch.float32,
     max_t: int | None = None,
 ) -> Dict[Tuple[int, int], torch.Tensor]:
-    """Map (t, δ) to V on ``device`` for all valid pairs up to max_t (default bank.max_steps)."""
+    """Precompute virtual weights for all valid step pairs."""
     dev = device if isinstance(device, torch.device) else torch.device(device)
     t_max = int(max_t) if max_t is not None else bank.max_steps
     out: Dict[Tuple[int, int], torch.Tensor] = {}
