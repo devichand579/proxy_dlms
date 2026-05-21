@@ -1,4 +1,4 @@
-"""Write a self-contained HTML viewer (vis-network) for a TAG ``graph.json``."""
+"""Export TAG graph as JSON or HTML."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 
 def graph_dict_to_vis_format(g: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert ``graph_to_dict`` payload to vis.js ``nodes`` / ``edges`` lists."""
+    """Convert graph dict to vis-network format."""
     nodes_out = []
     for n in g.get("nodes", []):
         title = n.get("label", n["id"])

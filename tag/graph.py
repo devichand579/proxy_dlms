@@ -1,4 +1,4 @@
-"""Build TAG node/edge lists from activations and precomputed virtual weights."""
+"""Build TAG nodes and edges from CST activations."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _logit_row_for_output_readout(
     output_exclude_eos: bool,
     eos_id: Optional[int],
 ) -> torch.Tensor:
-    """1d logit row for TAG output sinks. Optionally mask EOS to -inf before softmax (renormalize over other vocab)."""
+    """Logit row for an output node; optionally mask EOS before softmax."""
     row = logits_1d.float().clone()
     if output_exclude_eos and eos_id is not None:
         e = int(eos_id)
@@ -64,7 +64,7 @@ def _logit_row_for_output_readout(
 
 
 def _active_mask(a: torch.Tensor, thr: float = 0.0) -> torch.Tensor:
-    """a [B,L,k] → bool [B,L,k] for a > thr (strictly positive after JumpReLU)."""
+    """True where activation is above threshold."""
     return a > thr
 
 
@@ -75,7 +75,7 @@ def _virtual_submatrix(
     fi: torch.Tensor,
     gj: torch.Tensor,
 ) -> torch.Tensor:
-    """Block of V[fi, gj] without building the full k×k matrix."""
+    """Virtual weight block for active feature pairs only."""
     cst_t = bank.get(t)
     t2 = t + delta
     cst_t2 = bank.get(t2)
@@ -107,14 +107,7 @@ def build_tag_graph(
     residual_d: Optional[torch.Tensor] = None,
     active_threshold: float = 0.0,
 ) -> Tuple[List[TAGNode], List[TAGEdge]]:
-    """
-    Build input, feature, cross-step, optional output, and optional error nodes/edges.
-    List index s maps to CST step t = s+1. ``V`` blocks are materialized in small submatrices only.
-    With ``final_logits`` and ``unembed_weight``: out nodes and feat→out (else last-step a only).
-    If ``output_exclude_eos`` and ``eos_id`` is set, EOS is masked to -inf on each readout row before softmax so mass
-    and top tokens emphasize non-EOS structure (optional interpretability; default off).
-    With ``residual_d``: err nodes and err→feat; with ``residual_l2`` only: err nodes, no err edges.
-    """
+    """Build TAG nodes and edges (input, feature, cross-step, optional out and err)."""
     nodes: List[TAGNode] = []
     edges: List[TAGEdge] = []
     node_ids: set[str] = set()
@@ -230,7 +223,7 @@ def build_tag_graph(
         a_rows, a_pos = 0, 0
     if a_rows > 0:
         for row in range(a_rows):
-            t_err = int(min(row + w_eff, n_t))
+            t_err = int(min(w_cst + row, n_t))
             if t_err < 1:
                 continue
             for i in resp:
@@ -294,30 +287,34 @@ def build_tag_graph(
                         b_ = b_sub.to(dtype=dtype_)
                         ag_ = ag_row[gj].to(dtype=dtype_)
                         w_block = (b_[:, None] * v_sub) * ag_[None, :]
+                        nfi = int(fi.numel())
                         ngj = int(gj.numel())
-                        for q in range(ngj):
-                            w_sum = float(w_block[:, q].sum().item())
-                            if w_sum == 0.0:
-                                continue
-                            g_ = int(gj[q].item())
-                            ddst = _nid_feat(j, t2, g_)
-                            if ddst not in node_ids:
-                                continue
-                            add_edge(
-                                TAGEdge(
-                                    nid,
-                                    ddst,
-                                    w_sum,
-                                    {
-                                        "type": "err_to_feat",
-                                        "row": int(row),
-                                        "delta": int(delta),
-                                        "t_from": t_from,
-                                        "t_to": t2,
-                                        "g": g_,
-                                    },
+                        for p in range(nfi):
+                            f_ = int(fi[p].item())
+                            for q in range(ngj):
+                                w_ef = float(w_block[p, q].item())
+                                if w_ef == 0.0:
+                                    continue
+                                g_ = int(gj[q].item())
+                                ddst = _nid_feat(j, t2, g_)
+                                if ddst not in node_ids:
+                                    continue
+                                add_edge(
+                                    TAGEdge(
+                                        nid,
+                                        ddst,
+                                        w_ef,
+                                        {
+                                            "type": "err_to_feat",
+                                            "row": int(row),
+                                            "delta": int(delta),
+                                            "t_from": t_from,
+                                            "t_to": t2,
+                                            "f": f_,
+                                            "g": g_,
+                                        },
+                                    )
                                 )
-                            )
 
     # --- Output sinks from final_logits ---
     if final_logits is not None and final_logits.numel() > 0:
@@ -345,19 +342,19 @@ def build_tag_graph(
                     break
             out_ids = out_ids[: max_output_tokens]
             out_probs = out_probs[: len(out_ids)]
-            # For influence pruning: up to 10 tokens, cumulative prob ≥ 0.95 (per out position)
+            # For influence pruning: same mass cutoff as feat→out token list
             k_logit = 0
-            cum95 = 0.0
+            cum_sink = 0.0
             logit_p_tokens: List[Dict[str, object]] = []
             for j in range(len(out_ids)):
-                if k_logit >= 10:
+                if k_logit >= max_output_tokens:
                     break
                 logit_p_tokens.append(
                     {"id": int(out_ids[j]), "p": float(out_probs[j])}
                 )
-                cum95 += out_probs[j]
+                cum_sink += out_probs[j]
                 k_logit += 1
-                if cum95 >= 0.95:
+                if cum_sink >= top_output_mass:
                     break
             if not logit_p_tokens and out_ids:
                 logit_p_tokens = [{"id": int(out_ids[0]), "p": float(out_probs[0])}]

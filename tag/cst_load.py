@@ -1,4 +1,4 @@
-"""Load :class:`CSTBank` and weights the same way as eval/cst training."""
+"""Load CST bank and checkpoint."""
 
 from __future__ import annotations
 

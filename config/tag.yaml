@@ -1,4 +1,4 @@
-# Hydra: TAG (Temporal Attribution Graph)
+# Hydra: TAG (Temporal Attribution Graph) — entry point: run_tag.py / ./tag.sh
 defaults:
   - _self_
 
@@ -7,9 +7,11 @@ model_path: ./models/llada
 cst_checkpoint: null
 cst_config: null
 
-# Single prompt: full pipeline writes outputs/tag Run dir with tag_trace.pt, tag_graph.json, tag_view.html
-prompt: "Solve: 2+2="
-out_dir: outputs/tag
+# Full run: prompt + model_path → tag_trace.pt, tag_graph.json, tag_view.html
+# Chunk run: set hidden_pt to skip generation
+prompt: null
+hidden_pt: null
+out_dir: outputs_tag
 
 mode_key: pd
 gen_length: 256
@@ -17,16 +19,15 @@ steps: 256
 # false = reference-style: full step budget, no EOS early stop (same as eval use_eos_harness=false)
 use_eos_harness: true
 device: cuda
-prune_p: 0.1
-# influence (default) | bfs (per-destination in-edges) | none
-prune_mode: influence
 influence_node_mass: 0.8
 influence_edge_mass: 0.98
 mix_uniform: 0.0001
-with_residual: false
+with_residual: true
 write_html: true
-# Output sinks: renormalize logits with EOS masked out (lexical readout; default false; needs model_path for logits)
-output_exclude_eos: false
+# Chunk-only: skip loading model for output sink nodes
+no_logits: false
+top_output_mass: 0.95
+max_output_tokens: 10
+# Output sinks: renormalize logits with EOS masked out (lexical readout; needs model_path for logits)
+output_exclude_eos: true
 # eos_id: null  # optional override; else inferred from model_path via config.json
-# If you already have a .pt, set hidden_pt to skip generation (CLI only)
-# hidden_pt: null
