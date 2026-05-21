@@ -9,6 +9,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from cst.hf_hiddens.config import hf_token
+
 logger = logging.getLogger("cst.hf_hiddens.jobs")
 
 
@@ -186,3 +188,17 @@ def dispatch_or_run(
         done = wait_for_job(queue_dir, job_id, timeout_sec=wait_timeout_sec)
         return done.get("result") or {}
     return _run_job(job)
+
+
+def dispatch_from_config(tr: Any, job: Dict[str, Any]) -> Dict[str, Any]:
+    job = {
+        **job,
+        "cache_dir": str(tr.get("hf_local_cache_dir", "outputs/cst_hf_cache")),
+        "revision": str(tr.get("hf_hiddens_revision", "main")),
+        "hf_token": hf_token(tr),
+        "private_repo": bool(tr.get("hf_hiddens_private", False)),
+    }
+    use_q = bool(tr.get("hf_use_worker_queue", False))
+    qdir = str(tr.get("hf_worker_queue_dir", "outputs/hf_worker_queue"))
+    timeout = float(tr.get("hf_worker_wait_timeout_sec", 86400.0))
+    return dispatch_or_run(qdir, job, use_queue=use_q, wait_timeout_sec=timeout)
