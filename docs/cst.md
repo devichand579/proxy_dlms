@@ -1,159 +1,206 @@
 # CST: pre-logit capture, training, and evaluation
 
-**CST** (context in this repo) refers to the optional path that **captures** last-layer pre-logit hidden states, **trains** a sparse dictionary / bank on those chunks, and **evaluates** alignment metrics—either during lm-eval (per task) or **offline** on a folder of saved `.pt` files.
+**CST** captures last-layer pre-logit hidden states, trains a sparse dictionary on them, and evaluates alignment metrics.
 
-- **Code:** `cst/` (pre-logit wrapper, `CSTBank`, training loop, eval helpers)  
-- **Train config:** `config/cst.yaml` (Hydra for `launch_cst.py` and `cst.sh`) — under **`train`**, `use_eos_harness` (default `true`) is passed to `schedulers.generate` during hidden collection; set to `false` to match reference-style full-step / full-tail behavior, consistent with [Evaluation](evaluation.md).  
-- **LM eval config:** `config/config.yaml` (e.g. `cst_checkpoint`; pre-logit capture is **automatic** when it is set — see `eval.py`)
+## Two entry points
+
+Collection and training are **separate**. Run **`mode=store`** once (LM inference → Hub), then **`mode=train`** (download from Hub → fit CST, no LM).
+
+Everything goes through **`run_cst.py`** / **`./cst.sh`** with `mode=store`, `mode=train`, or `mode=eval`.
+
+| | **`mode=store`** | **`mode=train`** / **`mode=eval`** |
+|---|---|---|
+| **Purpose** | Run LM+scheduler on prompts → **Hugging Face** (train mix or eval task) | **Train** or **score** CST from stored hiddens |
+| **Needs GPU + model** | Yes (collect + scheduler for both train and eval store) | **No** for train (Hub download only); eval scoring only |
+| **Output** | Chunks on `{namespace}/hiddens-train` or `{namespace}/hiddens-eval` | CST checkpoints under `outputs/cst_ckpt/` or eval metrics |
+
+`train.hf_hiddens_org` is your **HF username** if you have no org (e.g. `devichand` → [devichand/hiddens-train](https://huggingface.co/datasets/devichand/hiddens-train)), or an org slug otherwise.
+
+```bash
+# 1) Store (once per model / scheduler / task)
+python run_cst.py mode=store store.scope=train
+python run_cst.py mode=store store.scope=eval store.task_name=gsm8k
+
+# 2) Train CST from Hub (no inference)
+python run_cst.py mode=train
+
+# 3) Eval CST from Hub or local folder
+python run_cst.py mode=eval eval.hidden_source=hf_hub eval.task_name=gsm8k \
+  eval.checkpoint=outputs/cst_ckpt/cst_..._train_best.pt
+python run_cst.py mode=eval eval.hidden_dir=/path/to/hiddens eval.checkpoint=...
+```
+
+**lm-eval + CST metrics during benchmarks:** `launch_eval.py` with `cst_checkpoint=...` (separate from the table above).
+
+**Config:** `config/cst.yaml` — `store.*`, `train.*`, `cst.*`. **Code:** `cst/`, `cst/hf_hiddens/`, `hidden_hf_worker.py`.
 
 ---
 
 ## Pre-logit hidden states
 
-The harness can record **representations immediately before the vocabulary projection** (post final norm: `ln_f` / RMSNorm, depending on the model). Implementation: `cst/pre_logits.py`, wired from `eval.py` when the model is built with `capture_pre_logits=true` and a writable `hidden_capture_path`.
+Representations **immediately before the vocabulary projection** (post final norm). Implementation: `cst/pre_logits.py`.
 
-**Enable**
+Each `.pt` file (minimal on-disk schema):
 
-- **`eval.sh`:** `--capture_pre_logits True` and optionally `--hidden_capture_path /path/to/dir`  
-- **`launch_eval.py` / YAML:** `capture_pre_logits=true`, optional `hidden_capture_path=...` (`null` uses the same auto paths as the shell script)
+- `hidden_states` — bfloat16 tensors (one per forward during generation)
+- `meta.prompt_len` — padded prompt length for eval splits and TAG
 
-**Where files go (depends on lm-eval `resumable`, not on CST):**
+Legacy chunks may still include extra `meta` fields or `token_unmasked` / `token_diffusion_masked`; loaders accept both.
 
-- **Non-resumable (default):** each run uses a new timestamped folder; hiddens default to `outputs/<output_suffix>/hidden/`.  
-- **Resumable:** fixed `outputs/{run_id}/` with `checkpoint.jsonl`; hiddens default to `outputs/{run_id}/hidden/`. If you set `hidden_capture_path` explicitly, that overrides the default.
+Loaded as `[T, B, L, D]` float32 via `cst.train.hidden_chunk.load_chunk_H`.
 
-See [Evaluation — Resumable](evaluation.md#resumable-evaluation) and [Resumable eval and CST](#resumable-eval-and-cst-same-resumable-flag) below.
+**Filename examples** (same pattern for train and eval):
 
-**What is written**
+- Train: `llada_scheduler_pd_k4096_w4_ls0.001_train_seg000_000042.pt`
+- Eval: `llada_scheduler_pd_k4096_w4_ls0.001_task_gsm8k_seg000_000042.pt`
 
-- One PyTorch file per **lm-eval `generate_until` chunk**  
-- Filenames include **model**, **scheduler** (short tag), **CST `k` and `w`** (from your CST YAML), **task name**, and chunk indices, for example:  
-  `llada_scheduler_pd_k4096_w4_task_gsm8k_g00001_chunk_00000.pt`  
-- Payload: dict with `hidden_states` (bfloat16 tensors on disk) and `meta` (chunk index, batch size, `cst_name_token`, `context`, etc.); loads cast to float32; see `cst.pre_logits.save_hidden_records`
-
-Use these for analysis or to feed the **CST training** pipeline below.
+Pattern: `{name_token}_seg{segment:03d}_{batch_idx:06d}.pt`
 
 ---
 
-## Checkpoint and staging names (training)
+## Store hidden data (`mode=store`)
 
-To avoid clobbering runs, **CST training checkpoints** and **collect staging** `.pt` files encode the LM directory name, **scheduler** short code (`train.scheduler_mode` in `cst.yaml`, e.g. `pd`), **`cst.k` and `cst.w`**, and (for collect) **epoch/segment/batch** indices.
+### Train hiddens (`store.scope=train`)
 
-**Training checkpoints** (under `train.checkpoint_dir`, default `outputs/cst_ckpt`):
-
-- `cst_<model>_scheduler_<sched>_k<K>_w<W>_train_latest.pt` — resume / last write  
-- `cst_..._train_best.pt` — best mean loss so far  
-- `cst_..._train_state.json` — best-loss bookkeeping  
-
-Optional: after a **full** training run, set **`train.push_best_to_hf_bucket`** (see `config/cst.yaml`) to upload the best checkpoint and state json to a [Hugging Face bucket](https://huggingface.co/docs/hub/buckets) (e.g. `devichand/strace`), then delete the local `latest` / `best` / `state` files to free disk. Requires a Hub token with write access to the bucket.
-
-Checkpoint **`.pt`** files store float tensors in **bfloat16** to save space; loading promotes them to float32 for the CST module, optimizer, and ramp.
-
-**Resume (weights):** `train.resume_from_latest=true` loads the matching `*_train_latest.pt`, or `cst_latest.pt` if you still have that filename from an older run. You can set **`train.resume_checkpoint`** to an explicit path regardless of naming style.
-
-**Resume (data cursor + W&B + sampling):** After each successful **collect → train → save** segment, the checkpoint `meta` also records:
-
-- **Next collection position:** `data_next_epoch` (0-based), `data_next_batch_idx`, `data_next_segment` — so the next run can continue from the same row-batch index and segment (skipping completed work), as long as **`train.resume_data_from_checkpoint=true`** (default). Set **`train.resume_data_from_checkpoint=false`** to load only weights/optimizer/ramp and **restart** the data schedule from the beginning.
-- **W&B:** `wandb_global_step` and `wandb_run_id` so logging can use `resume=allow` and continue the same run without resetting step to zero.
-- **Row-batch fingerprint:** `train_seed`, `train_samples_per_epoch`, `train_inference_batch_size`, `train_resample_each_epoch`, `train_gsm8k_num_fewshot`, `train_arc_csqa_num_fewshot` — when **`train.resume_override_sampling=true`** (default) and **`resume_data_from_checkpoint`** is on, these values from the checkpoint **override** Hydra so `sample_uniform_batched` matches the original run even if you accidentally change YAML. Set **`train.resume_override_sampling=false`** to keep config as the source of truth.
-
-`num_epochs_checkpointed` is stored for logging if you change **`train.num_epochs`** between save and load. Checkpoints without these keys (older runs) still load weights; data position and fingerprint are ignored until the next save.
-
-**Limitation:** Resume is **segment-safe** (after a full train+checkpoint for a segment). If the process dies **during** collection or before the next checkpoint, the last good **latest** still points at the **previous** segment boundary.
-
-**Staging files** (under `train.staging_dir`):  
-`<same_token_prefix>_e{epoch}_seg{segment}_{batch:06d}.pt`
-
-**Offline eval default path:** if `outputs/cst_ckpt/cst_best.pt` is missing, `launch_cst.py` can fall back to the newest `cst_*_train_best.pt` in that directory (see [Offline CST eval](#offline-cst-eval)).
-
----
-
-## CST training (collect → train → checkpoint → delete chunks)
-
-**Entry points**
-
-- `./cst.sh` (wrapper)  
-- `python launch_cst.py mode=train`  
-
-**Config:** `config/cst.yaml` — `model_path`, `cst` (e.g. `d_model`, `k`, `w`, `max_steps`), and `train` (staging size per segment, `samples_per_epoch`, `num_epochs`, `scheduler_mode`, learning rate, W&B, etc.).
-
-**Flow (simplified):**  
-Sample prompts from `cst.train_data` (see below) → in each **epoch** / **segment**, run LM collection until `target_staging_gb` of hidden `.pt` is written → **train** CST on those files → **save** `latest` / maybe `best` → **delete** the segment’s chunk files → repeat.
-
-**Example overrides**
+Runs the full collect loop (sample prompts → LM + scheduler → `.pt` until `target_staging_gb` per segment) and **uploads each segment to Hub**. Does **not** train CST.
 
 ```bash
-python launch_cst.py mode=train train.target_staging_gb=0.5 cst.w=8
-./cst.sh train.target_staging_gb=2.0
+huggingface-cli login
+python run_cst.py mode=store store.scope=train
 ```
 
-**Resume (YAML / CLI):** `train.resume_checkpoint=/path/to.pt` or `train.resume_from_latest=true` (and correct `train.checkpoint_dir`). See **Resume (data cursor + W&B + sampling)** above for `resume_data_from_checkpoint`, `resume_override_sampling`, and fingerprint fields.
+Uses `train.target_staging_gb`, `train.scheduler_mode`, `train.samples_per_epoch`, etc.
 
----
+Default repo: **`{hf_hiddens_org}/hiddens-train`**.
 
-## lm-eval with a CST checkpoint
+### Eval hiddens (`store.scope=eval`)
 
-To **load** trained CST weights and run **per-chunk** metrics (and optional staging+flush like training), set on the **eval** side:
-
-- `cst_checkpoint=/path/to/cst_<...>_train_best.pt` (match `k`/`w` to the YAML in `cst_config_path`) — this **turns on** pre-logit capture and wrapping in `eval.py` (you do not need to set `capture_pre_logits` separately)
-- Optional: `hidden_capture_path=...` (default: `outputs/<trace>/hidden` or `<output_dir>/hidden` when resumable)
-- `cst_config_path` if not default `config/cst.yaml`
-- **NTF:** `cst_ntf_conf_low` / `cst_ntf_conf_high` define the teacher–max-probability “uncertainty” band for which positions enter the metric. Optional `cst_ntf_first_non_eos=true` makes the teacher vs. substitute comparison use **argmax with `eos_id` masked to −∞** (same on both sides), so NTF is not dominated by trivial EOS-as-top-1 agreement; default `false` keeps raw top-1.
-
-**`eval.sh`** passes through CST-related flags; see `eval.sh --help` or the table in [Evaluation](evaluation.md).
-
-**`launch_eval.py` example:**
-
-```text
-python launch_eval.py task_name=gsm8k cst_checkpoint=outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt
-```
-
-The **hidden file names** on disk use the **same** `k`/`w` as in your CST config YAML so they align with the checkpoint you expect.
-
-### Resumable eval and CST (same `resumable` flag)
-
-- **Yes — it is supported.** The harness uses one **`resumable`** flag (e.g. `./eval.sh --resumable` or `resumable=true` in [launch_eval / config](evaluation.md#resumable-evaluation)). `launch_eval.py` passes `resumable=true` and `output_dir=outputs/{run_id}/` together with `cst_checkpoint` (pre-logit capture is implied) so hidden dumps live under **`outputs/{run_id}/hidden/`** next to **`checkpoint.jsonl`**.
-
-- **What resumes:** The **`checkpoint.jsonl`** file stores **finished generations** (prompt + response) so those `(task_name, doc_id)` rows **skip the forward pass** on restart. That is the same resume mechanism as plain lm-eval (no extra CST flag).
-
-- **What CST does on resume:** Hidden `.pt` files and CST **buffer / segment** processing run **only for chunks that still run the model** in this process. Chunks that are **fully** satisfied from `checkpoint.jsonl` do not write hiddens and do not re-run CST on them.
-
-- **Persisted CST summary (resumable):** This is **not** the hidden **`.pt` tensors** — those are still **deleted** after each CST segment (eval then remove), same as before. We only persist a small **JSON** next to `checkpoint.jsonl`, with the same naming policy as hiddens: **`outputs/{run_id}/cst_<model>_scheduler_<sched>_k<K>_w<W>_task_<task>_eval_agg.json`** (e.g. `cst_llada_scheduler_pd_k4096_w4_task_gsm8k_eval_agg.json`). It stores the running lists of per-chunk **scalars** (e.g. mean NMSE / L0 / cos per file) that feed the final summary. On resume, that aggregate is **reloaded** so new segments **append**; you cannot reconstruct old hiddens from it. If the new-style file is missing, the same folder is checked for **`cst_eval_agg.json`**. If you change `cst_checkpoint` or config so the name token no longer matches, the JSON is **ignored** (with a log) to avoid mixing runs.
-
-- **Limitation — staging buffer** (`cst_target_staging_gb`): if the process dies **before** a segment is fully evaluated and **persisted**, in-memory progress for that in-flight segment is lost. **After** a segment completes, the `*_eval_agg.json` file is updated so a resume keeps prior segments’ CST stats.
-
----
-
-## Offline CST eval
-
-Score a **directory of saved hidden `.pt` files** with a saved CST checkpoint (no full lm-eval loop):
+Runs the **full lm-eval task** through the model + scheduler (same collect loop as train), writing segments to `train.staging_dir` and uploading each slice to Hub. Optional `store.samples` caps how many eval instances to capture (default: all task documents).
 
 ```bash
-python launch_cst.py mode=eval eval.hidden_dir=/path/to/hiddens eval.checkpoint=/path/to/cst_..._train_best.pt
+python run_cst.py mode=store store.scope=eval store.task_name=gsm8k
+# Optional: cap instances or segment size
+python run_cst.py mode=store store.scope=eval store.task_name=gsm8k store.samples=128
 ```
 
-Optional `eval.ntf_first_non_eos=true` (and `eval.model_path` so EOS id can be inferred if needed) matches [lm-eval NTF](#lm-eval-with-a-cst-checkpoint) behavior. Defaults merged in `launch_cst.py` if you omit an `eval:` block in `cst.yaml`. See also `./cst.sh --mode eval --hidden_dir ... --checkpoint ...`.
+Default repo: **`{hf_hiddens_org}/hiddens-eval`**. Requires `store.task_name` (or `store.name_token` override).
 
-For **on-task** numbers with the same prompts as a benchmark, prefer **lm-eval + `cst_checkpoint`** (previous section) so `task_name` and data match.
+Each segment in `manifest.json` (no epoch field — one stored dataset per `name_token`):
+
+```json
+{
+  "schema_version": 2,
+  "scope": "train",
+  "name_token": "llada_scheduler_pd_k4096_w4_ls0.001_train",
+  "segments": [
+    {
+      "segment": 0,
+      "prefix": "llada_scheduler_pd_k4096_w4_ls0.001_train_seg000",
+      "chunks": [{"batch_idx": 42, "filename": "llada_scheduler_pd_k4096_w4_ls0.001_train_seg000_000042.pt", "bytes": 12345678}],
+      "total_bytes": 12345678,
+      "next_batch_idx": 1,
+      "sampling_fingerprint": {"train_samples_per_epoch": 2048, "train_seed": 0}
+    }
+  ]
+}
+```
+
+Upload segments in the manifest are bookkeeping only; train uses a **global batch cursor** across them (`batch_idx` in each filename).
+
+### Restricted GPU / worker queue
+
+When the store or train machine cannot reach the Hub:
+
+```yaml
+train:
+  hf_use_worker_queue: true
+  hf_worker_queue_dir: outputs/hf_worker_queue
+```
+
+On a login machine: `python hidden_hf_worker.py poll --queue-dir outputs/hf_worker_queue --watch`
 
 ---
 
-## `cst.train_data` (mixed prompt pools)
+## Train CST (`mode=train`)
 
-Used by CST **training** to build row batches: math, code-style (TACO), multiple-choice, etc. — similar flavor to lm-eval tasks.
-
-- **`load_pools(...)`** — one list of rows per source: `{id, source, text, meta}`  
-- **`sample_uniform(n, ...)`** — `n` distinct examples, proportional split across pools, without replacement per pool, then shuffle  
-- **`default_source_specs()`** / **`SourceSpec`** — defaults include `gsm8k`, `minerva_math`, `arc_*`, `commonsense_qa`, `taco`  
-
-**Formatting notes:** GSM8K few-shot from public test; Minerva fixed 4-shot option; CommonsenseQA uses **validation** (HF test has no `answerKey`). See `cst/train_data/compose.py`.
-
-**CLI**
+**Requires** hiddens on Hub from `mode=store store.scope=train` first.
 
 ```bash
-python -m cst.train_data
-python -m cst.train_data --samples 8
+python run_cst.py mode=train
 ```
+
+Training never downloads the full subfolder at once. Each step:
+
+1. Download the next slice of chunks until `train.target_staging_gb`
+2. Train CST on those local `.pt` files
+3. Delete local chunks
+4. Repeat until all batches in the manifest are consumed
+5. If `train.num_epochs > 1`, repeat steps 1–4 for another pass over the **same** stored data
+
+Hub layout is one `{name_token}/` subfolder per model + scheduler + k/w/λ (train) or task (eval). Upload segments in the manifest are bookkeeping only; train uses a **global batch cursor** across them.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `target_staging_gb` | `1.0` | Max GB per download slice (store upload segments use the same cap) |
+| `num_epochs` | `1` | CST passes over the stored dataset (not store-time epochs) |
+| `samples_per_epoch` | `2048` | Used at **store** time (`store.samples` override); train reads batch count from manifest |
+
+**Resume:** `train.resume_from_latest=true` — restores CST weights and batch cursor (`data_next_epoch` = CST pass, `data_next_batch_idx`).
+
+---
+
+## Eval CST (`mode=eval`)
+
+Score a CST checkpoint against saved hiddens (no lm-eval loop):
+
+```bash
+# Local folder
+python run_cst.py mode=eval \
+  eval.hidden_dir=outputs/eval_hidden \
+  eval.checkpoint=outputs/cst_ckpt/cst_..._train_best.pt
+
+# From Hub
+python run_cst.py mode=eval eval.hidden_source=hf_hub eval.task_name=gsm8k \
+  eval.checkpoint=outputs/cst_ckpt/cst_..._train_best.pt
+```
+
+---
+
+## Checkpoints and naming
+
+Paths encode **model**, **scheduler**, **`cst.k`**, **`cst.w`**, and **`train.lambda_sparsity`** (as `ls…` in the token).
+
+Hyperparam segment: `k4096_w4_ls0.001` — from `cst.k`, `cst.w`, and `train.lambda_sparsity`.
+
+**Training `name_token`:** `{model}_scheduler_{sched}_k{K}_w{W}_ls{λ}_train`  
+**Eval `name_token`:** `{model}_scheduler_{sched}_k{K}_w{W}_ls{λ}_task_{task}`
+
+**Hidden chunk files** (`train.staging_dir` / Hub `chunks/`):
+
+- `{name_token}_seg{segment:03d}_{batch_idx:06d}.pt` — same pattern for train and eval
+
+**CST checkpoints** (`train.checkpoint_dir`, default `outputs/cst_ckpt`):
+
+- `cst_<model>_scheduler_<sched>_k<K>_w<W>_train_latest.pt`
+- `cst_..._train_best.pt`
+- `cst_..._train_state.json`
+
+---
+
+## lm-eval with CST
+
+```bash
+python launch_eval.py task_name=gsm8k \
+  cst_checkpoint=outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_ls0.001_train_best.pt
+```
+
+See [Evaluation](evaluation.md) for resumable eval and CST aggregates.
+
+---
+
+## `cst.train_data`
+
+Mixed prompt pools for **train store** only: GSM8K, Minerva, ARC, CSQA, TACO. See `cst/train_data/compose.py`.
 
 ---
 
@@ -161,10 +208,9 @@ python -m cst.train_data --samples 8
 
 | File | Role |
 |------|------|
-| `config/cst.yaml` | `launch_cst` train defaults, `cst` hyperparameters |
-| `config/config.yaml` | lm-eval + `cst_checkpoint` (capture auto when set) |
-| `cst.sh` / `eval.sh` | Shell entry points |
-| `launch_cst.py` | Hydra: `mode=train` or `mode=eval` |
-| `launch_eval.py` | Hydra: lm-eval + CST flags |
+| `run_cst.py` | **`mode=store`** / **`train`** / **`eval`** (single entry point) |
+| `hidden_hf_worker.py` | Hub I/O worker + queue |
+| `config/cst.yaml` | All modes |
+| `cst.sh` | Shell / Slurm wrapper |
 
-See also: [Setup](setup.md), [Evaluation](evaluation.md), [Scheduler smoke tests](scheduler-testing.md).
+See also: [Setup](setup.md), [Evaluation](evaluation.md).
