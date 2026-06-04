@@ -164,54 +164,74 @@ def load_trace_json(json_path: str) -> Dict:
     with open(json_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-def reconstruct_tokens_at_step(trace: Dict, step: int, tokenizer, mask_id: Optional[int] = None) -> List[str]:
-    """
-    Reconstruct the token sequence at a specific step.
-    At each step:
-    - Positions that are still masked (mask_index[i] == True) show predictions
-    - Positions that are unmasked (mask_index[i] == False) show the final token
 
-    mask_id: Mask token ID for the chosen model. If None, derived from tokenizer via get_mask_token_id().
-    """
+def trace_prompt_len(trace: Dict) -> int:
+    """Prompt length from trace metadata or the stored prompt."""
+    if trace.get("prompt_len") is not None:
+        return int(trace["prompt_len"])
+    prompt = trace.get("prompt")
+    if prompt and prompt[0] is not None:
+        return len(prompt[0])
+    return 0
+
+
+def trace_step_data_is_gen_only(trace: Dict) -> bool:
+    """True when step arrays cover only the generation region."""
+    if trace.get("gen_only"):
+        return True
+    step_traces = trace.get("step_traces", [])
+    final = trace.get("final_sequence", [[]])
+    if not step_traces or not final or not final[0]:
+        return False
+    pl = trace_prompt_len(trace)
+    mi = step_traces[0].get("mask_index", [[]])
+    if not mi or not mi[0]:
+        return False
+    return len(mi[0]) == len(final[0]) - pl
+
+
+def reconstruct_tokens_at_step(trace: Dict, step: int, tokenizer, mask_id: Optional[int] = None) -> List[str]:
+    """Token strings at one step (gen-only or legacy full-length traces)."""
     if mask_id is None:
         mask_id = get_mask_token_id(tokenizer)
-    prompt = trace['prompt'][0]  # Get first batch
-    final_sequence = trace['final_sequence'][0]  # Get first batch
+    prompt_len = trace_prompt_len(trace)
+    final_sequence = trace['final_sequence'][0]
+    gen_only = trace_step_data_is_gen_only(trace)
+    final_gen = final_sequence[prompt_len:] if gen_only else final_sequence
 
-    # Get all step traces
     step_traces = trace.get('step_traces', [])
-
-    # Initialize mask_state
-    mask_state = []
+    mask_state: List[bool] = []
 
     if step >= len(step_traces):
-        # Use final sequence if step is beyond available traces
-        token_ids = final_sequence
+        token_ids = list(final_gen)
         mask_state = [False] * len(token_ids)
     else:
         step_trace = step_traces[step]
         mask_index = step_trace.get('mask_index', [])
         predictions = step_trace.get('predictions', None)
-
         mask_state = mask_index[0] if mask_index else []
-
-        # Build token sequence: use predictions where masked, final_sequence where unmasked
-        token_ids = []
         preds = predictions[0] if predictions else None
 
-        seq_len = len(final_sequence)
-        for i in range(seq_len):
-            if i < len(mask_state) and mask_state[i]:
-                # Still masked: show prediction if available, otherwise show mask token
-                if preds and i < len(preds):
-                    token_ids.append(preds[i])
+        token_ids = []
+        if gen_only:
+            for i in range(len(final_gen)):
+                if i < len(mask_state) and mask_state[i]:
+                    if preds and i < len(preds):
+                        token_ids.append(preds[i])
+                    else:
+                        token_ids.append(mask_id)
                 else:
-                    token_ids.append(mask_id)
-            else:
-                # Unmasked: show final token
-                token_ids.append(final_sequence[i])
+                    token_ids.append(final_gen[i])
+        else:
+            for i in range(len(final_sequence)):
+                if i < len(mask_state) and mask_state[i]:
+                    if preds and i < len(preds):
+                        token_ids.append(preds[i])
+                    else:
+                        token_ids.append(mask_id)
+                else:
+                    token_ids.append(final_sequence[i])
 
-    # Convert token IDs to text tokens (mask display string from tokenizer when possible)
     try:
         mask_display = tokenizer.convert_ids_to_tokens([mask_id])[0] if tokenizer else '<|mdm_mask|>'
     except (IndexError, TypeError, KeyError):
@@ -219,29 +239,19 @@ def reconstruct_tokens_at_step(trace: Dict, step: int, tokenizer, mask_id: Optio
 
     tokens = []
     for i, token_id in enumerate(token_ids):
-        # Check if this position is still masked
-        is_masked = (i < len(mask_state) and mask_state[i])
-
-        if is_masked:
-            # Still masked at this step - show as mask
-            tokens.append(mask_display)
-        elif token_id == mask_id:
+        is_masked = i < len(mask_state) and mask_state[i]
+        if is_masked or token_id == mask_id:
             tokens.append(mask_display)
         else:
             try:
-                # Convert token ID to token text
-                token_text = tokenizer.convert_ids_to_tokens([token_id])[0]
-                tokens.append(token_text)
-            except:
+                tokens.append(tokenizer.convert_ids_to_tokens([token_id])[0])
+            except Exception:
                 tokens.append(f"<{token_id}>")
-    
+
     return tokens
 
 def get_intervention_at_step(trace: Dict, step: int) -> Dict[str, set]:
-    """
-    Get drop/swap positions for a given step from step_traces.
-    Returns dict with keys: dropped_positions, swapped_out, swapped_in (sets of position indices).
-    """
+    """Drop/swap position sets for one step."""
     result = {"dropped_positions": set(), "swapped_out": set(), "swapped_in": set()}
     step_traces = trace.get("step_traces", [])
     if step < 0 or step >= len(step_traces):
@@ -259,32 +269,31 @@ def get_intervention_at_step(trace: Dict, step: int) -> Dict[str, set]:
 
 
 def track_unmasking_order(trace: Dict) -> Dict[int, int]:
-    """
-    Track when each position was first unmasked.
-    Returns dict mapping position -> step when unmasked.
-    """
-    unmasking_order = {}
+    """Map position index to the step it was first unmasked."""
+    stored = trace.get("unmasking_order")
+    if stored:
+        return {int(k): int(v) for k, v in stored.items()}
+
+    unmasking_order: Dict[int, int] = {}
     step_traces = trace.get('step_traces', [])
-    
-    # Track mask state across steps
+    gen_only = trace_step_data_is_gen_only(trace)
+    prompt_len = trace_prompt_len(trace)
     prev_mask_state = None
-    
+
     for step_idx, step_trace in enumerate(step_traces):
         mask_index = step_trace.get('mask_index', [])
-        if prev_mask_state is None:
-            prev_mask_state = mask_index[0] if mask_index else []
-        
         current_mask_state = mask_index[0] if mask_index else []
-        
-        # Find positions that changed from masked (True) to unmasked (False)
+        if prev_mask_state is None:
+            prev_mask_state = list(current_mask_state)
+
         for pos in range(min(len(prev_mask_state), len(current_mask_state))):
             if prev_mask_state[pos] and not current_mask_state[pos]:
-                # This position was just unmasked
-                if pos not in unmasking_order:
-                    unmasking_order[pos] = step_idx
-        
+                out_pos = pos if gen_only else pos + prompt_len
+                if out_pos not in unmasking_order:
+                    unmasking_order[out_pos] = step_idx
+
         prev_mask_state = current_mask_state
-    
+
     return unmasking_order
 
 def generate_background_color(step: int, max_step: int) -> str:
@@ -432,7 +441,10 @@ def main(json_path: str, model_dir: str = "./models/llada", output_dir: Optional
     
     # Get sequence length
     final_sequence = trace['final_sequence'][0]
-    seq_length = len(final_sequence)
+    if trace_step_data_is_gen_only(trace):
+        seq_length = len(final_sequence) - trace_prompt_len(trace)
+    else:
+        seq_length = len(final_sequence)
     
     print(f"Generating visualizations for {num_steps} steps (sequence length: {seq_length})...")
     
