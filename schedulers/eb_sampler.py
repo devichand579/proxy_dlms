@@ -13,6 +13,7 @@ from schedulers.utils import (
     get_mask_by_confidence,
     get_mask_by_entropy,
     check_eos_stop_condition,
+    check_all_generated_unmasked,
     mask_eos_eot_logits,
 )
 
@@ -173,6 +174,8 @@ def generate_EB(
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
             if use_eos_harness and check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
                 return x, steps_taken, num_block + 1  # Stop generation early
+            if check_all_generated_unmasked(x, mask_id, prompt_len):
+                return x, steps_taken, num_block + 1
 
             del logits, logits_with_noise, p, e, h
             torch.cuda.empty_cache()

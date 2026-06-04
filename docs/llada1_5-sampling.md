@@ -29,6 +29,10 @@ When **true**, **`schedulers.generate.generate`** (and code paths that pass `mod
 
 There is **no** separate switch in `config/lmeval.yaml`, `eval.sh`, or `cst.yaml` — you only need the **model path** to resolve to `llada1_5` (or use the config key above).
 
+**`use_eos_harness` on `llada1_5`:** B.4 prevents EOS from being unmasked, so the harness stop condition (EOS present with no masks before it) **never triggers**. Generation always uses the **full step budget**; `use_eos_harness` has no effect in practice.
+
+Schedulers also stop once **every generated position is unmasked** (`check_all_generated_unmasked`, after the EOS check), so `llada1_5` runs do not keep doing no-op forwards after the tail is full.
+
 ## Why numerics can blow up (and why `torch.multinomial` complains)
 
 B.4 **intentionally** sets EOS / EoT logits to \(-\infty\) in the paths used for sampling and confidence. Side effects:
