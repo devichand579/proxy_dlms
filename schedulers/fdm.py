@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
-from schedulers.utils import add_gumbel_noise, check_eos_stop_condition, mask_eos_eot_logits
+from schedulers.utils import add_gumbel_noise, check_eos_stop_condition, check_all_generated_unmasked, mask_eos_eot_logits
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
     from traces.trace_wrapper import trace_scheduler
@@ -370,6 +370,8 @@ def generate_fdm(
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
             if use_eos_harness and check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
                 return x, steps_taken, num_block + 1  # Stop generation early
+            if check_all_generated_unmasked(x, mask_id, prompt_len):
+                return x, steps_taken, num_block + 1
 
             # Clear intermediate tensors to free memory
             del logits, logits_with_noise, logp, x0_logp, local_logconf, local_p

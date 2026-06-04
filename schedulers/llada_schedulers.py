@@ -14,6 +14,7 @@ from schedulers.utils import (
     get_num_transfer_tokens,
     get_mask_by_confidence,
     check_eos_stop_condition,
+    check_all_generated_unmasked,
     mask_eos_eot_logits,
 )
 
@@ -133,5 +134,7 @@ def generate_llada(
             # Early stopping: Check if EOS is decoded and all tokens before it are unmasked
             if use_eos_harness and check_eos_stop_condition(x, eos_id, mask_id, prompt_len):
                 return x, steps_taken, num_block + 1  # Stop generation early
+            if check_all_generated_unmasked(x, mask_id, prompt_len):
+                return x, steps_taken, num_block + 1
 
     return x, steps_taken, num_blocks

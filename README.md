@@ -1,6 +1,6 @@
-# Scheduler Tracing: Characterization of Unmasking Schedulers in Diffusion Language Models
+# Scheduler Tracing: Understanding Diffusion Language Models and Unmasking Schedulers
 
-Diffusion-based text generation with LLaDA-style **schedulers**, **lm-evaluation-harness** integration, batched generation, **tracing**, optional **interventions**, optional **pre-logit hidden capture** and **CST** training/eval (`cst/`), **TAG** on one prompt or hidden chunk (`tag/`), and **mixed training prompt pools** (`cst.train_data`).
+This repository contains the code for the papers "Scheduler Tracing: Understanding Diffusion Language Models and Unmasking Schedulers" and "Schedulerlens: A Decision Taxonomy and Interpretability Framework for Masked Diffusion Language Models and Schedulers". A unified framework for understanding and characterizing diffusion-based text generation which includes integration of diffusion language models, unmasking schedulers, evaluations, tracing, interpretability, hidden representations capture, cross-step-transcoder training/evaluation and circuit tracing for unmasking sequences.
 
 ## Quick start
 

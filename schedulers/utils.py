@@ -83,3 +83,15 @@ def check_eos_stop_condition(
             return True  # Any done -> stop
     # All samples checked: if require_all_done, every sample was done
     return require_all_done
+
+
+def check_all_generated_unmasked(
+    x: torch.Tensor,
+    mask_id: int,
+    prompt_len: int,
+) -> bool:
+    """True when every batch row has no [MASK] left in the generated tail."""
+    if prompt_len >= x.shape[1]:
+        return True
+    generated = x[:, prompt_len:]
+    return not (generated == mask_id).any().item()
