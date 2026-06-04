@@ -1,6 +1,4 @@
-"""
- Tracing wrapper for schedulers.
-"""
+"""Scheduler tracing via forward, argmax, and setitem hooks."""
 
 from typing import Callable, List, Optional
 import contextvars
@@ -9,7 +7,6 @@ import time
 import warnings
 import numpy as np
 import torch
-import torch.nn.functional as F
 from load_model import LLADA_DEFAULT_MASK_ID
 from traces.trace_generator import TracingContext, InterventionHook
 from traces.utils import is_negative_inf, was_position_masked, was_positions_masked, extract_tensor_value, get_value_item, value_matches_x0, build_transfer_index, build_x0_for_trace, ensure_2d_shape, shapes_match, get_x0_trace, _is_tensor_like
@@ -19,9 +16,7 @@ _task_trace_list_ctx: contextvars.ContextVar[Optional[List]] = contextvars.Conte
 
 
 class ModelTracer:
-    """
-    tracing wrapper that intercepts operations in schedulers.
-    """
+    """Wraps a scheduler to record generation traces."""
     
     def __init__(
         self,
@@ -58,7 +53,7 @@ class ModelTracer:
         self._original_forward = None
     
     def _intercept_model_forward(self, model: torch.nn.Module):
-        """Create a patched forward method that tracks steps."""
+        """Patch model.forward to start each traced step."""
         original_forward = model.forward
         
         def traced_forward(*args, **kwargs):
@@ -72,7 +67,6 @@ class ModelTracer:
                 self._last_x = x
                 batch_size = x.shape[0]
                 if self._batch_contexts is not None and batch_size == len(self._batch_contexts):
-                    # Batched: record step and logits per sample
                     if hasattr(output, 'logits') and output.logits is not None:
                         self._last_logits = output.logits.clone()
                     for b in range(batch_size):
@@ -80,6 +74,8 @@ class ModelTracer:
                         if output.logits is not None:
                             ctx._current_logits = output.logits[b : b + 1].clone()
                         ctx.record_step_start(self._step_counter, x[b : b + 1], self.mask_id)
+                        if output.logits is not None:
+                            ctx.record_logits_metrics(output.logits[b : b + 1])
                     self._step_counter += 1
                 elif self.tracing_context is not None and batch_size == 1:
                     if hasattr(output, 'logits') and output.logits is not None:
@@ -88,13 +84,15 @@ class ModelTracer:
                     self.tracing_context.record_step_start(
                         self._step_counter, x, self.mask_id
                     )
+                    if hasattr(output, 'logits') and output.logits is not None:
+                        self.tracing_context.record_logits_metrics(output.logits)
                     self._step_counter += 1
             return output
         
         return original_forward, traced_forward
     
     def _intercept_argmax(self, original_argmax):
-        """Intercept torch.argmax to capture predictions."""
+        """Patch argmax to capture x0 for transfer detection."""
         def traced_argmax(input, dim=None, keepdim=False, *, out=None):
             result = original_argmax(input, dim=dim, keepdim=keepdim, out=out)
             
@@ -106,23 +104,12 @@ class ModelTracer:
                         probs = torch.softmax(input, dim=-1)
                         confidence = torch.max(probs, dim=-1)[0]
                         self._last_confidence = confidence
-                else:
-                    confidence = None
-                if self._batch_contexts is not None and result.shape[0] == len(self._batch_contexts):
-                    for b in range(result.shape[0]):
-                        conf_b = confidence[b : b + 1] if confidence is not None else None
-                        if conf_b is not None:
-                            self._batch_contexts[b].record_predictions(
-                                result[b : b + 1], conf_b
-                            )
-                elif self.tracing_context is not None and result.shape[0] == 1 and confidence is not None:
-                    self.tracing_context.record_predictions(result, confidence)
             return result
         
         return traced_argmax
     
     def _intercept_topk(self, original_topk):
-        """Intercept torch.topk to detect transfer_index creation."""
+        """Patch topk to detect boolean transfer_index writes."""
         def traced_topk(input, k, dim=None, largest=True, sorted=True, *, out=None):
             # Handle dim=None for 1D tensors 
             # For 1D tensors, dim should be -1 (last dimension)
@@ -156,7 +143,7 @@ class ModelTracer:
         return traced_topk
     
     def _detect_block_boundary(self, key, value):
-        """Detect block boundary pattern: x0_p[:, block_end:] = -np.inf"""
+        """Detect x0_p[:, block_end:] = -inf block-boundary writes."""
         if not (isinstance(key, tuple) and len(key) == 2):
             return False
         
@@ -185,7 +172,7 @@ class ModelTracer:
         return True
     
     def _detect_single_position_transfer(self, x, x0_trace, pos_val, value):
-        """Detect if single position assignment is a transfer."""
+        """True if x[0, pos] = value is a single-token unmask."""
         if pos_val < 0 or x.shape[1] <= pos_val:
             return None
         
@@ -215,7 +202,7 @@ class ModelTracer:
         return None
     
     def _detect_multiple_positions_transfer(self, x, x0_trace, pos_tensor, value):
-        """Detect if multiple positions assignment is a transfer."""
+        """True if x[0, positions] = values is a multi-token unmask."""
         if (pos_tensor.numel() == 0 or 
             not (pos_tensor >= 0).all() or 
             not (pos_tensor < x.shape[1]).all()):
@@ -241,8 +228,7 @@ class ModelTracer:
         return None
     
     def _process_transfer(self, tensor_self, original_key, transfer_index, x0_trace, x, batch_index=None):
-        """Common logic for processing a transfer: apply interventions, record, and apply.
-        When batch_index is not None, use that context only (for integer-indexed x[b, pos] = value)."""
+        """Run interventions, record the transfer, and apply token writes."""
         self._in_intervention = True
         try:
             B = transfer_index.shape[0] if transfer_index.dim() >= 1 else 1
@@ -253,13 +239,7 @@ class ModelTracer:
                 return False
 
             if batch_index is not None and self._batch_contexts is not None:
-                # Single-row update from integer indexing (e.g. FHS x[b, k] = value)
                 ctx = contexts[batch_index]
-                if ctx._current_predictions is None and ctx._current_logits is not None:
-                    pred = torch.argmax(ctx._current_logits, dim=-1)
-                    probs = F.softmax(ctx._current_logits, dim=-1)
-                    conf = torch.max(probs, dim=-1)[0]
-                    ctx.record_predictions(pred, conf)
                 modified_transfer, modified_x0, intervention_applied = ctx.apply_interventions(
                     transfer_index, x0_trace, x, self.mask_id
                 )
@@ -279,13 +259,7 @@ class ModelTracer:
                 modified_x0_list = []
                 any_intervention = False
                 for b in range(B):
-                    # FHS-style: ensure predictions recorded for this batch index
                     ctx = contexts[b]
-                    if ctx._current_predictions is None and ctx._current_logits is not None:
-                        pred_b = torch.argmax(ctx._current_logits, dim=-1)
-                        probs_b = F.softmax(ctx._current_logits, dim=-1)
-                        conf_b = torch.max(probs_b, dim=-1)[0]
-                        ctx.record_predictions(pred_b, conf_b)
                     mod_t, mod_x0, applied = ctx.apply_interventions(
                         transfer_index[b : b + 1],
                         x0_trace[b : b + 1],
@@ -316,13 +290,7 @@ class ModelTracer:
                     return "modified"
                 return True
             else:
-                # Single sample
                 ctx = contexts[0]
-                if ctx._current_predictions is None and ctx._current_logits is not None:
-                    predictions = torch.argmax(ctx._current_logits, dim=-1)
-                    probs = F.softmax(ctx._current_logits, dim=-1)
-                    confidences = torch.max(probs, dim=-1)[0]
-                    ctx.record_predictions(predictions, confidences)
                 modified_transfer, modified_x0, intervention_applied = (
                     ctx.apply_interventions(
                         transfer_index, x0_trace, x, self.mask_id
@@ -354,7 +322,7 @@ class ModelTracer:
             self._in_intervention = False
     
     def _handle_boolean_tensor_transfer(self, tensor_self, key, value):
-        """Handle boolean tensor indexing: x[transfer_index] = x0[transfer_index]"""
+        """Handle x[transfer_index] = x0[transfer_index]."""
         # Use duck typing to avoid isinstance recursion
         if not (_is_tensor_like(key) and hasattr(key, 'dtype') and key.dtype == torch.bool and 
                 _is_tensor_like(value)):
@@ -378,7 +346,7 @@ class ModelTracer:
             return False
     
     def _handle_integer_indexing_transfer(self, tensor_self, key, value):
-        """Handle integer indexing: x[0, pos] = value or x[b, pos] = value (batch), or x[0, positions] = values"""
+        """Handle x[b, pos] = value and x[b, positions] = values."""
         if not (isinstance(key, tuple) and len(key) == 2):
             return False
 
@@ -421,7 +389,7 @@ class ModelTracer:
         return self._process_transfer(tensor_self, key, transfer_index, x0_for_trace, x, batch_index=batch_index)
     
     def _intercept_tensor_setitem(self, original_setitem):
-        """Intercept tensor __setitem__ to detect transfers. Supports batch and single-sample."""
+        """Patch tensor __setitem__ to detect unmask writes."""
         tracer_instance = self  
         
         def traced_setitem(tensor_self, key, value):
@@ -459,7 +427,7 @@ class ModelTracer:
         return traced_setitem
     
     def __call__(self, *args, **kwargs):
-        """Execute scheduler with fully automated tracing."""
+        """Run the scheduler with tracing hooks installed."""
         start_time = time.time()
         
         # Extract mask_id from scheduler kwargs first (before it's used in record_step_start)
@@ -506,7 +474,12 @@ class ModelTracer:
         # Extract prompt (usually second arg) and set up batch contexts when batch_size > 1
         prompt = args[1] if len(args) > 1 else kwargs.get('prompt')
         block_length = kwargs.get('block_length', None)
+        gen_length_kw = kwargs.get('gen_length')
         if prompt is not None:
+            prompt_len = int(prompt.shape[1])
+            if gen_length_kw is not None:
+                gen_len = int(gen_length_kw)
+                self.tracing_context.set_generation_bounds(prompt_len, gen_len)
             batch_size = prompt.shape[0]
             if batch_size > 1 and self.tracing_context.trace_name is not None:
                 base_name = self.tracing_context.trace_name
@@ -521,6 +494,8 @@ class ModelTracer:
                         base_dir=self.tracing_context.base_dir,
                     )
                     ctx.trace.prompt = prompt[b : b + 1].clone()
+                    if gen_length_kw is not None:
+                        ctx.set_generation_bounds(prompt_len, int(gen_length_kw))
                     if block_length is not None:
                         ctx._block_length = block_length
                     self._batch_contexts.append(ctx)
@@ -624,9 +599,7 @@ def trace_scheduler(
     save_confidences: bool = True,
     upload_to_wandb: bool = False
 ):
-    """
-    tracing wrapper - requires NO code changes to schedulers!
-    """
+    """Decorator that traces a scheduler without editing its source."""
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapped(*args, **kwargs):

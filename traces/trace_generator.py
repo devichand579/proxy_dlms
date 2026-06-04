@@ -1,7 +1,4 @@
-"""
-General tracing and causal intervention system for masked diffusion schedulers.
-Works with any scheduler by intercepting token selection through a callback mechanism.
-"""
+"""Tracing and intervention hooks for masked diffusion schedulers."""
 
 import torch
 import json
@@ -10,8 +7,32 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 
+def gen_region_slice(prompt_len: int, gen_length: int) -> slice:
+    """Slice index for the generation region."""
+    return slice(int(prompt_len), int(prompt_len) + int(gen_length))
+
+
+def slice_gen_region(
+    tensor: torch.Tensor, prompt_len: int, gen_length: int
+) -> torch.Tensor:
+    """Generation-tail slice of a batch tensor."""
+    return tensor[:, gen_region_slice(prompt_len, gen_length)].contiguous()
+
+
+def logits_to_step_metrics(
+    logits: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Predictions, max-prob confidences, and entropy from logits."""
+    with torch.no_grad():
+        probs = torch.softmax(logits.float(), dim=-1)
+        confidences = probs.max(dim=-1).values
+        entropies = -(probs * torch.log(probs + 1e-10)).sum(dim=-1)
+        predictions = logits.argmax(dim=-1)
+    return predictions, confidences, entropies
+
+
 def _tensor_to_list(tensor: Optional[torch.Tensor]) -> Optional[List]:
-    """Convert torch tensor to JSON-serializable list."""
+    """Tensor to JSON-serializable list."""
     if tensor is None:
         return None
     # Move to CPU
@@ -31,7 +52,7 @@ def _tensor_to_list(tensor: Optional[torch.Tensor]) -> Optional[List]:
     return tensor.detach().numpy().tolist()
 
 def _list_to_tensor(data: Optional[List], dtype=None) -> Optional[torch.Tensor]:
-    """Convert list back to torch tensor."""
+    """JSON list to tensor."""
     if data is None:
         return None
     # Try to infer dtype from data if not provided
@@ -46,70 +67,76 @@ def _list_to_tensor(data: Optional[List], dtype=None) -> Optional[torch.Tensor]:
 
 @dataclass
 class StepTrace:
-    """Records the state at a single generation step."""
+    """One diffusion step in the generation region."""
     step: int
-    mask_index: torch.Tensor  # Which positions are still masked [1, L]
-    predictions: Optional[torch.Tensor] = None  # Predicted tokens [1, L]
-    confidences: Optional[torch.Tensor] = None  # Confidence scores [1, L]
-    selected_positions: Optional[torch.Tensor] = None  # Positions that were actually unmasked [1, L]
-    selected_tokens: Optional[torch.Tensor] = None  # Tokens that were unmasked [1, L]
-    intervention_applied: bool = False  # Whether intervention was applied this step
-    intervention_type: Optional[str] = None  # Type of intervention if applied
-    metadata: Dict = field(default_factory=dict)  # Additional metadata, This can store values to be tracked like mutual information, attention scores, etc.
-    
+    mask_index: torch.Tensor  # Still masked [1, gen_length]
+    predictions: Optional[torch.Tensor] = None  # Argmax token id [1, gen_length]
+    confidences: Optional[torch.Tensor] = None  # Max softmax prob [1, gen_length]
+    entropies: Optional[torch.Tensor] = None  # Shannon entropy [1, gen_length]
+    selected_positions: Optional[torch.Tensor] = None  # Unmasked this step [1, gen_length]
+    selected_tokens: Optional[torch.Tensor] = None  # Tokens unmasked this step [1, gen_length]
+    intervention_applied: bool = False
+    intervention_type: Optional[str] = None
+    metadata: Dict = field(default_factory=dict)
+
     def to_dict(self) -> Dict:
-        """Convert StepTrace to JSON-serializable dictionary."""
+        """Step as a JSON dict."""
         return {
             "step": self.step,
             "mask_index": _tensor_to_list(self.mask_index),
             "predictions": _tensor_to_list(self.predictions) if self.predictions is not None else None,
             "confidences": _tensor_to_list(self.confidences) if self.confidences is not None else None,
+            "entropies": _tensor_to_list(self.entropies) if self.entropies is not None else None,
             "selected_positions": _tensor_to_list(self.selected_positions) if self.selected_positions is not None else None,
             "selected_tokens": _tensor_to_list(self.selected_tokens) if self.selected_tokens is not None else None,
             "intervention_applied": self.intervention_applied,
             "intervention_type": self.intervention_type,
-            "metadata": self.metadata
+            "metadata": self.metadata,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict) -> "StepTrace":
-        """Create StepTrace from dictionary."""
+        """StepTrace from a JSON dict."""
         return cls(
             step=data["step"],
             mask_index=_list_to_tensor(data["mask_index"], dtype=torch.bool),
             predictions=_list_to_tensor(data.get("predictions"), dtype=torch.long),
             confidences=_list_to_tensor(data.get("confidences"), dtype=torch.float32),
+            entropies=_list_to_tensor(data.get("entropies"), dtype=torch.float32),
             selected_positions=_list_to_tensor(data.get("selected_positions"), dtype=torch.bool),
             selected_tokens=_list_to_tensor(data.get("selected_tokens"), dtype=torch.long),
             intervention_applied=data.get("intervention_applied", False),
             intervention_type=data.get("intervention_type"),
-            metadata=data.get("metadata", {})
+            metadata=data.get("metadata", {}),
         )
 
 
 @dataclass
 class GenerationTrace:
-    """Complete trace of a generation process."""
+    """Full generation trace."""
     prompt: torch.Tensor
     final_sequence: torch.Tensor
     step_traces: List[StepTrace] = field(default_factory=list)
-    unmasking_order: Dict[int, int] = field(default_factory=dict)  # position -> step when unmasked, use this to calculate Kendall's tau
+    unmasking_order: Dict[int, int] = field(default_factory=dict)  # gen index -> step unmasked
+    prompt_len: Optional[int] = None
+    gen_length: Optional[int] = None
     start_time: Optional[float] = None
     end_time: Optional[float] = None
-    
+
     def get_unmasking_step(self, position: int) -> Optional[int]:
-        """Get the step at which a position was unmasked."""
+        """First unmask step for a gen-region index."""
         return self.unmasking_order.get(position)
-    
+
     def get_token_at_step(self, step: int, position: int) -> Optional[int]:
-        """Get the token at a specific position at a specific step."""
+        """Predicted token at a gen index on a given step."""
         if step < len(self.step_traces):
-            if self.step_traces[step].predictions is not None:
-                return int(self.step_traces[step].predictions[0, position].item())
+            preds = self.step_traces[step].predictions
+            if preds is not None and position < preds.shape[1]:
+                return int(preds[0, position].item())
         return None
     
     def get_all_unmasked_positions(self) -> List[int]:
-        """Get all positions that were unmasked, in order."""
+        """Gen indices sorted by first unmask step."""
         return sorted(self.unmasking_order.keys(), key=lambda p: self.unmasking_order[p])
     
     @property
@@ -119,20 +146,21 @@ class GenerationTrace:
         return self.end_time - self.start_time
     
     def to_dict(self) -> Dict:
-        """Convert GenerationTrace to JSON-serializable dictionary."""
+        """Trace as a JSON dict."""
         return {
+            "gen_only": True,
             "prompt": _tensor_to_list(self.prompt) if self.prompt is not None else None,
             "final_sequence": _tensor_to_list(self.final_sequence) if self.final_sequence is not None else None,
+            "prompt_len": self.prompt_len,
+            "gen_length": self.gen_length,
             "step_traces": [st.to_dict() for st in self.step_traces],
             "unmasking_order": self.unmasking_order,
             "start_time": self.start_time,
-            "end_time": self.end_time
+            "end_time": self.end_time,
         }
     
     def save_to_json(self, name: str, base_dir: str = "trace_outputs") -> str:
-        """
-        Save trace to JSON file.
-        """
+        """Write trace JSON to disk."""
         os.makedirs(base_dir, exist_ok=True)
         filepath = os.path.join(base_dir, f"{name}.json")
         
@@ -143,9 +171,7 @@ class GenerationTrace:
         return filepath
     
     def upload_to_wandb(self, name: Optional[str] = None, base_dir: str = "trace_outputs"):
-        """
-        Upload trace to wandb as an artifact.
-        """
+        """Upload trace as a W&B artifact."""
         try:
             import wandb
         except ImportError:
@@ -182,9 +208,7 @@ class GenerationTrace:
     
     @classmethod
     def load_from_json(cls, name: str, base_dir: str = "trace_outputs") -> "GenerationTrace":
-        """
-        Load trace from JSON file.
-        """
+        """Load trace from JSON."""
         filepath = os.path.join(base_dir, f"{name}.json")
         
         if not os.path.exists(filepath):
@@ -199,8 +223,10 @@ class GenerationTrace:
             final_sequence=_list_to_tensor(trace_dict.get("final_sequence"), dtype=torch.long) if trace_dict.get("final_sequence") is not None else None,
             step_traces=[StepTrace.from_dict(st) for st in trace_dict.get("step_traces", [])],
             unmasking_order={int(k): v for k, v in trace_dict.get("unmasking_order", {}).items()},
+            prompt_len=trace_dict.get("prompt_len"),
+            gen_length=trace_dict.get("gen_length"),
             start_time=trace_dict.get("start_time"),
-            end_time=trace_dict.get("end_time")
+            end_time=trace_dict.get("end_time"),
         )
         
         return trace
@@ -220,9 +246,7 @@ class InterventionHook:
         return self.mode is not None and step in self.steps
 
 class TracingContext:
-    """
-    Tracing + causal intervention context.
-    """
+    """Collects step traces and applies interventions."""
 
     def __init__(
         self, 
@@ -232,15 +256,18 @@ class TracingContext:
         base_dir: str = "trace_outputs",
         save_predictions: bool = True,
         save_confidences: bool = True,
+        save_entropies: bool = True,
         upload_to_wandb: bool = False
     ):
         self.trace = GenerationTrace(prompt=None, final_sequence=None)
         self.intervention_hook = intervention_hook or InterventionHook()
         self.current_step = 0
+        self.prompt_len: Optional[int] = None
+        self.gen_length: Optional[int] = None
 
         self._current_predictions = None
         self._current_confidences = None
-        self._current_logits = None  # Store logits for computing predictions on-demand
+        self._current_logits = None
         
         # Block boundaries 
         self._current_block_start = None
@@ -257,34 +284,75 @@ class TracingContext:
         # Performance options
         self.save_predictions = save_predictions
         self.save_confidences = save_confidences
+        self.save_entropies = save_entropies
         self.upload_to_wandb = upload_to_wandb
+
+    def set_generation_bounds(self, prompt_len: int, gen_length: int) -> None:
+        """Set prompt_len and gen_length for gen-only fields."""
+        self.prompt_len = int(prompt_len)
+        self.gen_length = int(gen_length)
+        self.trace.prompt_len = self.prompt_len
+        self.trace.gen_length = self.gen_length
+
+    def _ensure_generation_bounds(self, x: torch.Tensor) -> None:
+        if self.trace.prompt is not None and self.prompt_len is None:
+            self.prompt_len = int(self.trace.prompt.shape[1])
+        if self.prompt_len is None:
+            self.prompt_len = 0
+        if self.gen_length is None:
+            self.gen_length = int(x.shape[1]) - int(self.prompt_len)
+        self.trace.prompt_len = self.prompt_len
+        self.trace.gen_length = self.gen_length
 
     def record_step_start(self, step: int, x: torch.Tensor, mask_id: int):
         self.current_step = step
-        mask_index = (x == mask_id)
+        self._ensure_generation_bounds(x)
+        pl, gl = self.prompt_len, self.gen_length
+        mask_gen = (x[:, gen_region_slice(pl, gl)] == mask_id)
 
         step_trace = StepTrace(
             step=step,
-            mask_index=mask_index.clone()
+            mask_index=mask_gen.clone(),
         )
         self.trace.step_traces.append(step_trace)
-        
-        # Reset block boundaries at start of each step 
+
         self._current_block_start = None
         self._current_block_end = None
+
+    def record_logits_metrics(self, logits: torch.Tensor) -> None:
+        """Store predictions, max-prob confidences, and entropies from logits."""
+        if not self.trace.step_traces or self.prompt_len is None or self.gen_length is None:
+            return
+        predictions, confidences, entropies = logits_to_step_metrics(logits)
+        pl, gl = self.prompt_len, self.gen_length
+        pred_g = slice_gen_region(predictions, pl, gl)
+        conf_g = slice_gen_region(confidences, pl, gl)
+        ent_g = slice_gen_region(entropies, pl, gl)
+        step_trace = self.trace.step_traces[-1]
+        if self.save_predictions:
+            step_trace.predictions = pred_g
+        if self.save_confidences:
+            step_trace.confidences = conf_g
+        if self.save_entropies:
+            step_trace.entropies = ent_g
+        self._current_predictions = predictions
+        self._current_confidences = conf_g
 
     def record_timestamps(self, start_time: float, end_time: float):
         self.trace.start_time = start_time
         self.trace.end_time = end_time
 
     def record_predictions(self, predictions: torch.Tensor, confidences: torch.Tensor):
-        if self.trace.step_traces:
-            if self.save_predictions:
-                self.trace.step_traces[-1].predictions = predictions.clone()
-            if self.save_confidences:
-                self.trace.step_traces[-1].confidences = confidences.clone()
-            self._current_predictions = predictions
-            self._current_confidences = confidences
+        """Legacy argmax path; prefer record_logits_metrics."""
+        if not self.trace.step_traces or self.prompt_len is None or self.gen_length is None:
+            return
+        pl, gl = self.prompt_len, self.gen_length
+        if self.save_predictions:
+            self.trace.step_traces[-1].predictions = slice_gen_region(predictions, pl, gl).clone()
+        if self.save_confidences:
+            self.trace.step_traces[-1].confidences = slice_gen_region(confidences, pl, gl).clone()
+        self._current_predictions = predictions
+        self._current_confidences = confidences
 
     def apply_interventions(
         self,
@@ -299,7 +367,10 @@ class TracingContext:
 
         hook = self.intervention_hook
         step_trace = self.trace.step_traces[-1]
-        mask_index = step_trace.mask_index
+        pl = int(self.prompt_len or 0)
+        gl = int(self.gen_length or transfer_index.shape[1] - pl)
+        transfer_gen = transfer_index[:, gen_region_slice(pl, pl + gl)]
+        mask_gen = step_trace.mask_index
 
         modified_transfer = transfer_index.clone()
         modified_x0 = x0.clone()
@@ -308,22 +379,20 @@ class TracingContext:
         if not hook.active(self.current_step):
             return modified_transfer, modified_x0, False
 
-        S = torch.nonzero(transfer_index[0], as_tuple=False).squeeze(-1)
+        S = torch.nonzero(transfer_gen[0], as_tuple=False).squeeze(-1)
 
-        # For swap: use block boundaries detected from scheduler operations
-        # block_end is detected from slice assignment (x0_p[:, block_end:] = -np.inf)
-        # block_start is calculated as block_end - block_length
         block_start = self._current_block_start
         block_end = self._current_block_end
+        block_start_gen = block_start - pl if block_start is not None else None
+        block_end_gen = block_end - pl if block_end is not None else None
 
         R_all = torch.nonzero(
-            mask_index[0] & (~transfer_index[0]),
-            as_tuple=False
+            mask_gen[0] & (~transfer_gen[0]),
+            as_tuple=False,
         ).squeeze(-1)
-        
-        # For swap: filter R to only include positions within the same block as S
-        if hook.mode == "swap" and block_start is not None and block_end is not None:
-            R = R_all[(R_all >= block_start) & (R_all < block_end)]
+
+        if hook.mode == "swap" and block_start_gen is not None and block_end_gen is not None:
+            R = R_all[(R_all >= block_start_gen) & (R_all < block_end_gen)]
         else:
             R = R_all
 
@@ -333,13 +402,14 @@ class TracingContext:
 
             k = min(hook.k, S.numel())
             perm = torch.randperm(S.numel(), device=S.device)
-            dropped = S[perm[:k]]
+            dropped_gen = S[perm[:k]]
+            dropped_abs = dropped_gen + pl
 
-            modified_transfer[0, dropped] = False
+            modified_transfer[0, dropped_abs] = False
 
             intervention_applied = True
             step_trace.intervention_type = "drop"
-            step_trace.metadata["dropped_positions"] = dropped.tolist()
+            step_trace.metadata["dropped_positions"] = dropped_gen.tolist()
             step_trace.metadata["k"] = k
             step_trace.metadata["S_size"] = int(S.numel())
 
@@ -351,40 +421,36 @@ class TracingContext:
             perm_S = torch.randperm(S.numel(), device=S.device)
             perm_R = torch.randperm(R.numel(), device=R.device)
 
-            removed = S[perm_S[:k]]
-            added = R[perm_R[:k]]
+            removed_gen = S[perm_S[:k]]
+            added_gen = R[perm_R[:k]]
+            removed_abs = removed_gen + pl
+            added_abs = added_gen + pl
 
-            modified_transfer[0, removed] = False
+            modified_transfer[0, removed_abs] = False
+            modified_transfer[0, added_abs] = True
 
-            modified_transfer[0, added] = True
-            
-            # Get predictions for added positions
-            # For schedulers like FHS that don't use argmax, compute from logits
             if self._current_predictions is not None:
-                modified_x0[0, added] = self._current_predictions[0, added]
+                modified_x0[0, added_abs] = self._current_predictions[0, added_abs]
             elif self._current_logits is not None:
-                # Compute predictions from logits (for FHS-style schedulers)
-                predictions = torch.argmax(self._current_logits, dim=-1)  # [1, L]
-                modified_x0[0, added] = predictions[0, added]
+                predictions = torch.argmax(self._current_logits, dim=-1)
+                modified_x0[0, added_abs] = predictions[0, added_abs]
             else:
-                # Fallback: use x0 parameter if available
-                if x0.shape[1] > added.max().item():
-                    modified_x0[0, added] = x0[0, added]
+                if x0.shape[1] > added_abs.max().item():
+                    modified_x0[0, added_abs] = x0[0, added_abs]
                 else:
-                    # Can't swap - no predictions available
-                    modified_transfer[0, added] = False
+                    modified_transfer[0, added_abs] = False
                     return modified_transfer, modified_x0, False
 
             intervention_applied = True
             step_trace.intervention_type = "swap"
-            step_trace.metadata["swapped_out"] = removed.tolist()
-            step_trace.metadata["swapped_in"] = added.tolist()
+            step_trace.metadata["swapped_out"] = removed_gen.tolist()
+            step_trace.metadata["swapped_in"] = added_gen.tolist()
             step_trace.metadata["k"] = k
             step_trace.metadata["S_size"] = int(S.numel())
             step_trace.metadata["R_size"] = int(R.numel())
-            if block_start is not None and block_end is not None:
-                step_trace.metadata["block_start"] = block_start
-                step_trace.metadata["block_end"] = block_end
+            if block_start_gen is not None and block_end_gen is not None:
+                step_trace.metadata["block_start"] = block_start_gen
+                step_trace.metadata["block_end"] = block_end_gen
 
         step_trace.intervention_applied = intervention_applied
         return modified_transfer, modified_x0, intervention_applied
@@ -393,25 +459,29 @@ class TracingContext:
         if not self.trace.step_traces:
             return
 
-        step_trace = self.trace.step_traces[-1]
-        step_trace.selected_positions = transfer_index.clone()
+        self._ensure_generation_bounds(x0)
+        pl = int(self.prompt_len or 0)
+        gl = int(self.gen_length or transfer_index.shape[1] - pl)
+        transfer_gen = transfer_index[:, gen_region_slice(pl, pl + gl)]
+        x0_gen = x0[:, gen_region_slice(pl, pl + gl)]
 
-        selected_tokens = torch.zeros_like(x0)
-        selected_tokens[transfer_index] = x0[transfer_index]
+        step_trace = self.trace.step_traces[-1]
+        step_trace.selected_positions = transfer_gen.clone()
+
+        selected_tokens = torch.zeros_like(x0_gen)
+        selected_tokens[transfer_gen] = x0_gen[transfer_gen]
         step_trace.selected_tokens = selected_tokens.clone()
 
-        positions = torch.nonzero(transfer_index[0], as_tuple=False).squeeze(-1)
+        positions = torch.nonzero(transfer_gen[0], as_tuple=False).squeeze(-1)
         if positions.dim() == 0:
             positions = positions.unsqueeze(0)
 
         for pos in positions.tolist():
             if pos not in self.trace.unmasking_order:
-                self.trace.unmasking_order[pos] = self.current_step
+                self.trace.unmasking_order[int(pos)] = self.current_step
     
     def save_trace(self, name: Optional[str] = None) -> str:
-        """
-        Save the current trace to JSON file.
-        """
+        """Write the in-memory trace to JSON."""
         save_name = name or self.trace_name
         if save_name is None:
             raise ValueError("trace_name must be provided in __init__ or as argument to save_trace()")
@@ -419,10 +489,7 @@ class TracingContext:
         return self.trace.save_to_json(save_name, self.base_dir)
     
     def save_incremental(self, clear_memory: bool = True):
-        """
-        Save step traces incrementally to reduce memory usage.
-        Saves completed steps to disk and optionally clears them from memory.
-        """
+        """Flush new steps to disk; optionally drop them from memory."""
         if not self.save_to_disk or self.trace_name is None:
             return
         
@@ -459,9 +526,7 @@ def create_intervention_hook(
     steps: Optional[List[int]] = None,
     k: int = 1
 ) -> InterventionHook:
-    """
-    Create a scheduler-relative intervention hook.
-    """
+    """Build a drop/swap intervention hook."""
     return InterventionHook(
         mode=mode,
         steps=set(steps) if steps is not None else set(),
