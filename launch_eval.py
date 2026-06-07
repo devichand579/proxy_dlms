@@ -46,6 +46,36 @@ def _resumable_output_basename(model: str, task_name: str, mode: str, strategy) 
     return f"{model}_{task_name}_{mode}"
 
 
+def _intervention_suffix(intervention_mode, intervention_steps, intervention_k: int) -> str:
+    steps_raw = intervention_steps if intervention_steps is not None else "0"
+    if isinstance(steps_raw, (list, tuple)):
+        steps_safe = "_".join(str(s) for s in steps_raw)
+    else:
+        steps_safe = re.sub(r"[,_]", "_", str(steps_raw))
+    return f"_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}"
+
+
+def _eval_output_basename(
+    model: str,
+    task_name: str,
+    mode: str,
+    strategy,
+    *,
+    steps: int,
+    intervention_mode=None,
+    intervention_steps=None,
+    intervention_k: int = 1,
+    include_steps: bool = True,
+) -> str:
+    """Auto run/trace basename: ``{model}_{task}_{mode}[_s{steps}]`` (+ intervention tags when set)."""
+    base = _resumable_output_basename(model, task_name, mode, strategy)
+    if intervention_mode:
+        base = f"{base}{_intervention_suffix(intervention_mode, intervention_steps, intervention_k)}"
+    if include_steps:
+        base = f"{base}_s{int(steps)}"
+    return base
+
+
 def get_num_fewshot(task_name: str) -> int:
     if "humaneval" in task_name:
         return 0
@@ -145,28 +175,34 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     resumable = _to_bool(cfg.get("resumable", False))
     run_id = cfg.get("run_id") or None
 
-    if resumable and run_id:
+    run_id_explicit = bool(resumable and run_id)
+    if run_id_explicit:
         output_suffix = str(run_id)
     elif resumable:
-        base = _resumable_output_basename(model, task_name, mode, strategy)
-        output_suffix = base
-        if intervention_mode:
-            steps_raw = intervention_steps if intervention_steps is not None else "0"
-            if isinstance(steps_raw, (list, tuple)):
-                steps_safe = "_".join(str(s) for s in steps_raw)
-            else:
-                steps_safe = re.sub(r"[,_]", "_", str(steps_raw))
-            output_suffix = f"{base}_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}"
+        output_suffix = _eval_output_basename(
+            model,
+            task_name,
+            mode,
+            strategy,
+            steps=steps,
+            intervention_mode=intervention_mode,
+            intervention_steps=intervention_steps,
+            intervention_k=intervention_k,
+            include_steps=True,
+        )
     else:
-        base_ts = _resumable_output_basename(model, task_name, mode, strategy)
-        output_suffix = f"{base_ts}_{timestamp}"
-        if intervention_mode:
-            steps_raw = intervention_steps if intervention_steps is not None else "0"
-            if isinstance(steps_raw, (list, tuple)):
-                steps_safe = "_".join(str(s) for s in steps_raw)
-            else:
-                steps_safe = re.sub(r"[,_]", "_", str(steps_raw))
-            output_suffix = f"{base_ts}_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}_{timestamp}"
+        base = _eval_output_basename(
+            model,
+            task_name,
+            mode,
+            strategy,
+            steps=steps,
+            intervention_mode=intervention_mode,
+            intervention_steps=intervention_steps,
+            intervention_k=intervention_k,
+            include_steps=True,
+        )
+        output_suffix = f"{base}_{timestamp}"
     wandb_name = output_suffix
 
     checkpoint_dir = f"outputs/{output_suffix}" if resumable else None
