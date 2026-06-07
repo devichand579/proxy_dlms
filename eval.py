@@ -17,6 +17,7 @@ from load_model import (
 )
 from schedulers.generate import generate
 from traces.trace_wrapper import _task_trace_list_ctx
+from traces.hf_trace_upload import maybe_upload_eval_trace_file
 
 import warnings
 import json
@@ -771,14 +772,21 @@ class LLaDAEvalHarness(LM):
                     n = trace_writer.count
                     if n > 0:
                         self.logger.info(f"Wrote {n} trace(s) to {trace_writer._path}")
+                        trace_name_safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', str(self.trace_name))
                         if self.use_wandb and WANDB_AVAILABLE and wandb.run is not None:
                             try:
-                                trace_name_safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', str(self.trace_name))
                                 artifact = wandb.Artifact(name=f"trace_{trace_name_safe}", type="trace", description=f"All sample traces for task (trace_name={trace_name_safe})")
                                 artifact.add_file(trace_writer._path, name=os.path.basename(trace_writer._path))
                                 wandb.log_artifact(artifact)
                             except Exception as e:
                                 self.logger.warning(f"Failed to upload task traces to wandb: {e}")
+                        maybe_upload_eval_trace_file(
+                            trace_writer._path,
+                            trace_name=trace_name_safe,
+                            task_name=getattr(self, "task_name", None),
+                            num_samples=n,
+                            log=self.logger,
+                        )
                 except Exception as e:
                     self.logger.warning(f"Failed to close trace file: {e}")
 

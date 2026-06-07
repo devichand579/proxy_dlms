@@ -57,6 +57,9 @@ INTERVENTION_STEPS=""
 INTERVENTION_K=""
 WANDB=""
 TRACING_ENABLED_ARG=""
+TRACE_HF_UPLOAD_ARG=""
+TRACE_HF_DATASET_REPO_ARG=""
+TRACE_HF_NAMESPACE_ARG=""
 NUM_FEWSHOT_OVERRIDE=""
 BLOCK_LENGTH_OVERRIDE=""
 TOP_K_OVERRIDE=""
@@ -108,6 +111,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --tracing_enabled)
             TRACING_ENABLED_ARG="$2"
+            shift 2
+            ;;
+        --trace_hf_upload)
+            TRACE_HF_UPLOAD_ARG="$2"
+            shift 2
+            ;;
+        --trace_hf_dataset_repo)
+            TRACE_HF_DATASET_REPO_ARG="$2"
+            shift 2
+            ;;
+        --trace_hf_namespace)
+            TRACE_HF_NAMESPACE_ARG="$2"
             shift 2
             ;;
         --num_fewshot)
@@ -186,6 +201,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Core optional: --num_fewshot <n> --block_length <n> --top_k <n> --steps <n> --gen_length <n> --compile_model <bool>"
     echo "  Harness (see eval.LLaDAEvalHarness): --intervention_mode drop|swap, --intervention_steps 0,128,256, --intervention_k <k>"
     echo "  --wandb <True|False>  --tracing_enabled <True|False>  (tracing: trace_outputs/ or JSONL when --resumable)"
+    echo "  --trace_hf_upload <True|False>  --trace_hf_dataset_repo <id>  --trace_hf_namespace <user|org>  (Hub dataset push; default repo schedulerlens when tracing on)"
     echo "  Decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode, see eval.py)"
     echo "  Run: --slurm (srun for sbatch)  --resumable [--run_id]  (checkpoint under outputs/…)"
     echo "  Multi-GPU: --parallel_config <yaml> per-GPU settings (launch_eval parallel_runs_file=); see docs/evaluation.md"
@@ -273,6 +289,21 @@ else
     export TRACING_ENABLED=FALSE
 fi
 
+# HF dataset upload for final trace file (default: on when tracing is on → repo schedulerlens)
+if [[ -n "$TRACE_HF_UPLOAD_ARG" ]]; then
+    if [[ "${TRACE_HF_UPLOAD_ARG,,}" == "true" ]]; then
+        export TRACE_HF_UPLOAD=TRUE
+    else
+        export TRACE_HF_UPLOAD=FALSE
+    fi
+elif [[ "${TRACING_ENABLED_ARG,,}" == "true" ]]; then
+    export TRACE_HF_UPLOAD=TRUE
+else
+    export TRACE_HF_UPLOAD=FALSE
+fi
+export TRACE_HF_DATASET_REPO="${TRACE_HF_DATASET_REPO_ARG:-schedulerlens}"
+[[ -n "$TRACE_HF_NAMESPACE_ARG" ]] && export TRACE_HF_NAMESPACE="$TRACE_HF_NAMESPACE_ARG"
+
 export TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 if [[ -n "$PARALLEL_CONFIG" ]]; then
@@ -286,6 +317,9 @@ if [[ -n "$PARALLEL_CONFIG" ]]; then
     [[ -n "$BATCH_SIZE" ]] && OVERRIDES+=(batch_size="$BATCH_SIZE")
     [[ -n "$WANDB" ]] && OVERRIDES+=(wandb="$WANDB")
     [[ -n "$TRACING_ENABLED_ARG" ]] && OVERRIDES+=(tracing_enabled="$TRACING_ENABLED_ARG")
+    [[ -n "$TRACE_HF_UPLOAD_ARG" ]] && OVERRIDES+=(trace_hf_upload="$TRACE_HF_UPLOAD_ARG")
+    [[ -n "$TRACE_HF_DATASET_REPO_ARG" ]] && OVERRIDES+=(trace_hf_dataset_repo="$TRACE_HF_DATASET_REPO_ARG")
+    [[ -n "$TRACE_HF_NAMESPACE_ARG" ]] && OVERRIDES+=(trace_hf_namespace="$TRACE_HF_NAMESPACE_ARG")
     [[ "$RESUMABLE" == "true" ]] && OVERRIDES+=(resumable=true)
     [[ -n "$RUN_ID" ]] && OVERRIDES+=(run_id="$RUN_ID")
     [[ -n "$COMPILE_MODEL" ]] && OVERRIDES+=(compile_model="$COMPILE_MODEL")
@@ -420,6 +454,7 @@ run_eval_for_task() {
     fi
     echo "  Wandb: ${WANDB:-False}"
     echo "  Tracing enabled: ${TRACING_ENABLED_ARG:-False}"
+    echo "  Trace HF upload: ${TRACE_HF_UPLOAD:-False} (repo: ${TRACE_HF_DATASET_REPO:-schedulerlens})"
     echo "  SLURM mode (srun outer): ${SLURM_MODE}"
     if [[ -n "$WANDB_NAME" ]]; then
         echo "  Wandb Name: $WANDB_NAME"
