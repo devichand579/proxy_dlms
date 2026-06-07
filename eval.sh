@@ -381,27 +381,26 @@ run_eval_for_task() {
         COMPILE_MODEL="False"
     fi
 
-    # Generate wandb name and output suffix: MODEL_TASK_MODE; use stable run_id when resumable for checkpointing
+    # Generate wandb/trace/checkpoint suffix: MODEL_TASK_MODE[_intv_…][_s{steps}]; explicit --run_id wins as-is
+    BASE_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}"
+    if [[ -n "$INTERVENTION_MODE" ]]; then
+        INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
+        INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
+        BASE_SUFFIX="${BASE_SUFFIX}_intv_${INTERVENTION_MODE}_steps${INTERVENTION_STEPS_SAFE}_k${INTERVENTION_K:-1}"
+    fi
+    if [[ -z "$RUN_ID" ]]; then
+        BASE_SUFFIX="${BASE_SUFFIX}_s${STEPS}"
+    fi
     if [[ "$RESUMABLE" == "true" ]]; then
         if [[ -n "$RUN_ID" ]]; then
             OUTPUT_SUFFIX="$RUN_ID"
         else
-            OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}"
-            if [[ -n "$INTERVENTION_MODE" ]]; then
-                INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
-                INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
-                OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}_intv_${INTERVENTION_MODE}_steps${INTERVENTION_STEPS_SAFE}_k${INTERVENTION_K:-1}"
-            fi
+            OUTPUT_SUFFIX="$BASE_SUFFIX"
         fi
         CHECKPOINT_DIR="outputs/${OUTPUT_SUFFIX}"
         mkdir -p "$CHECKPOINT_DIR"
     else
-        OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}_${TIMESTAMP}"
-        if [[ -n "$INTERVENTION_MODE" ]]; then
-            INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
-            INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
-            OUTPUT_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}_intv_${INTERVENTION_MODE}_steps${INTERVENTION_STEPS_SAFE}_k${INTERVENTION_K:-1}_${TIMESTAMP}"
-        fi
+        OUTPUT_SUFFIX="${BASE_SUFFIX}_${TIMESTAMP}"
         CHECKPOINT_DIR=""
     fi
     WANDB_NAME="${OUTPUT_SUFFIX}"

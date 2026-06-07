@@ -81,10 +81,10 @@ Requests are grouped by **prompt length buckets** (e.g. 0–32, 32–64, …, 51
 
 ### Outputs
 
-- **Default run:** `outputs/{model}_{task_name}_{mode}_{timestamp}.json`  
+- **Default run:** `outputs/{model}_{task_name}_{mode}_s{steps}_{timestamp}.json`  
 - **Resumable run:** `outputs/{run_id}/` with `results.json` (see below)  
 - **Logs:** `logs/{model}_{task_name}_{mode}_{timestamp}.log`  
-- **Traces (if enabled):** `trace_outputs/{trace_name}.json` or `.jsonl` when resumable
+- **Traces (if enabled):** `trace_outputs/{trace_name}.json` or `.jsonl` when resumable (`trace_name` matches the run suffix, including `_s{steps}` unless you set `--run_id`)
 
 ---
 
@@ -94,7 +94,7 @@ Long jobs can save partial progress and continue with the same command.
 
 **Enable:** `--resumable` in `eval.sh`, or `resumable=true` in `config/lmeval.yaml` / CLI. Optional `run_id=my_run` for a custom folder.
 
-**Paths:** without resumable, filenames get a timestamp. With resumable, outputs live under `outputs/{run_id}/` (`run_id` or `{model}_{task}_{mode}` plus `_{strategy}` for `top_k` when not using explicit `run_id`, plus intervention tags when set).
+**Paths:** without resumable, filenames get a timestamp. With resumable, outputs live under `outputs/{run_id}/` (`run_id` or `{model}_{task}_{mode}_s{steps}` plus `_{strategy}` for `top_k` when not using explicit `run_id`, plus intervention tags when set). Diffusion step count is in auto-generated trace/checkpoint names (e.g. `llada1_5_mbpp_fhs_s512`); override entirely with `--run_id`.
 
 **Checkpoint file:** `outputs/{run_id}/checkpoint.jsonl` — one line per completed sample (`doc_id`, `task_name`, `prompt`, `resps`). On restart, those pairs are skipped; new lines append so crashes do not lose work.
 
