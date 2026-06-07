@@ -64,6 +64,28 @@ def get_num_fewshot(task_name: str) -> int:
 
 
 
+def _apply_trace_hf_env(env: dict[str, str], cfg: dict) -> None:
+    """Env vars read by ``traces.hf_trace_upload`` when eval closes a trace file."""
+    tracing = _to_bool(cfg.get("tracing_enabled", True))
+    upload = cfg.get("trace_hf_upload")
+    if upload is None:
+        upload = tracing
+    else:
+        upload = _to_bool(upload)
+    env["TRACE_HF_UPLOAD"] = "TRUE" if upload else "FALSE"
+    repo = cfg.get("trace_hf_dataset_repo")
+    if repo is not None and str(repo).strip():
+        env["TRACE_HF_DATASET_REPO"] = str(repo).strip()
+    ns = cfg.get("trace_hf_namespace")
+    if ns is not None and str(ns).strip():
+        env["TRACE_HF_NAMESPACE"] = str(ns).strip()
+    if cfg.get("trace_hf_dataset_private") is not None:
+        env["TRACE_HF_DATASET_PRIVATE"] = "TRUE" if _to_bool(cfg.get("trace_hf_dataset_private")) else "FALSE"
+    rev = cfg.get("trace_hf_revision")
+    if rev is not None and str(rev).strip():
+        env["TRACE_HF_REVISION"] = str(rev).strip()
+
+
 def _to_bool(val) -> bool:
     if isinstance(val, bool):
         return val
@@ -171,6 +193,7 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     env.setdefault("LMEVAL_LOG_LEVEL", "INFO")
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     env["TRACING_ENABLED"] = "TRUE" if tracing_enabled else "FALSE"
+    _apply_trace_hf_env(env, cfg)
     if resumable:
         env["RESUMABLE_RUN_ID"] = output_suffix
         env["CHECKPOINT_DIR"] = checkpoint_dir
@@ -192,7 +215,11 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         f"  compile_model={compile_model} use_eos_harness={use_eos_harness} "
         f"gen_length={gen_length} steps={steps} block_length={block_length} top_k={top_k}"
     )
-    print(f"  num_fewshot={num_fewshot} wandb={wandb} tracing_enabled={tracing_enabled} resumable={resumable}")
+    print(
+        f"  num_fewshot={num_fewshot} wandb={wandb} tracing_enabled={tracing_enabled} "
+        f"trace_hf_upload={env.get('TRACE_HF_UPLOAD')} trace_hf_repo={env.get('TRACE_HF_DATASET_REPO', 'schedulerlens')} "
+        f"resumable={resumable}"
+    )
     if intervention_mode:
         print(f"  intervention: mode={intervention_mode} steps={intervention_steps} k={intervention_k}")
     print(f"  output: outputs/{output_suffix}/" if resumable else f"  output: outputs/{output_suffix}.json")

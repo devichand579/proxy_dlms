@@ -102,7 +102,7 @@ Long jobs can save partial progress and continue with the same command.
 
 **W&B:** `launch_eval.py` passes `resume=allow,id=<run_id>` to lm-eval when `outputs/{run_id}/.wandb_id` exists. The harness writes that file the first time the active W&B run id is known — including at the **start of the first `generate_until`**, because Weights & Biases is often initialized **after** the model is constructed (so writing only in the model constructor was unreliable). Until `.wandb_id` exists, the next launch may start a **new** W&B run.
 
-**Tracing:** with tracing on, JSONL under `trace_outputs/` supports appending after resume.
+**Tracing:** with tracing on, JSONL under `trace_outputs/` supports appending after resume. When tracing is enabled, the final trace file is also pushed to a Hugging Face **dataset** repo (default `schedulerlens`, resolved as `{HF user}/schedulerlens` unless you pass `org/schedulerlens`). Disable with `trace_hf_upload=false` in `config/lmeval.yaml` or `TRACE_HF_UPLOAD=FALSE` / `--trace_hf_upload False` in `eval.sh`. Configure repo via `trace_hf_dataset_repo` and optional `trace_hf_namespace`. Requires `HF_TOKEN` or `huggingface-cli login`.
 
 ```bash
 ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --compile_model False --resumable

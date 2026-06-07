@@ -22,6 +22,11 @@ use_eos_harness: true
 top_k: 2  # null = 1. Number of tokens to transfer per step (top_k scheduler only). Set to int to override.
 wandb: true
 tracing_enabled: true
+# When tracing is on, upload the final trace file to a Hub dataset (see traces/hf_trace_upload.py).
+trace_hf_upload: true
+trace_hf_dataset_repo: schedulerlens  # use org/schedulerlens for org-owned repos
+trace_hf_namespace: null  # if repo has no slash, prefix with this or HF whoami
+trace_hf_dataset_private: false
 num_fewshot: null  # null = use per-task default (humaneval 0, gsm8k 4, mbpp 3, arc_challenge_chat 5). Set to int to override.
 
 # Sampling (harness model_args). null gen_length/steps = task defaults (see sampling_defaults.py).
