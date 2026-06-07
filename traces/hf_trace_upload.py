@@ -72,6 +72,81 @@ def path_in_repo_for_trace(local_path: str | Path) -> str:
     return Path(local_path).name
 
 
+def _hf_api(token: bool | str | None = True):
+    from huggingface_hub import HfApi
+
+    return HfApi(token=token)
+
+
+def ensure_dataset_repo(
+    repo_id: str,
+    *,
+    token: bool | str | None = True,
+    private: bool = False,
+) -> None:
+    """Create the dataset repo if it does not exist."""
+    api = _hf_api(token)
+    try:
+        api.create_repo(
+            repo_id=repo_id,
+            repo_type="dataset",
+            private=bool(private),
+            exist_ok=True,
+        )
+    except Exception as e:
+        logger.warning("create_repo(%s) note: %s", repo_id, e)
+
+
+def upload_file_to_dataset(
+    repo_id: str,
+    local_path: str | Path,
+    path_in_repo: str,
+    *,
+    revision: str = "main",
+    token: bool | str | None = True,
+    commit_message: Optional[str] = None,
+) -> str:
+    api = _hf_api(token)
+    local_path = Path(local_path)
+    if not local_path.is_file():
+        raise FileNotFoundError(local_path)
+    api.upload_file(
+        path_or_fileobj=str(local_path),
+        path_in_repo=path_in_repo,
+        repo_id=repo_id,
+        repo_type="dataset",
+        revision=revision,
+        commit_message=commit_message or f"upload {path_in_repo}",
+        token=token,
+    )
+    return path_in_repo
+
+
+def download_file_from_dataset(
+    repo_id: str,
+    path_in_repo: str,
+    local_path: str | Path,
+    *,
+    revision: str = "main",
+    token: bool | str | None = True,
+) -> Path:
+    from huggingface_hub import hf_hub_download
+
+    local_path = Path(local_path)
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    cached = hf_hub_download(
+        repo_id=repo_id,
+        filename=path_in_repo,
+        repo_type="dataset",
+        revision=revision,
+        token=token,
+    )
+    src = Path(cached)
+    if src.resolve() != local_path.resolve():
+        local_path.write_bytes(src.read_bytes())
+    return local_path
+
+
 def upload_trace_file_to_hf_dataset(
     local_path: str | Path,
     *,
@@ -85,8 +160,6 @@ def upload_trace_file_to_hf_dataset(
     create_repo: bool = True,
 ) -> str:
     """Upload a trace file; returns hub path."""
-    from cst.hf_hiddens.store import ensure_dataset_repo, upload_file
-
     local_path = Path(local_path)
     if not local_path.is_file():
         raise FileNotFoundError(local_path)
@@ -100,7 +173,7 @@ def upload_trace_file_to_hf_dataset(
         ensure_dataset_repo(full_repo, token=token, private=priv)
 
     msg = commit_message or f"eval trace {hub_path} ({local_path.stat().st_size} bytes)"
-    upload_file(
+    upload_file_to_dataset(
         full_repo,
         local_path,
         hub_path,
@@ -122,14 +195,12 @@ def download_trace_file_from_hf_dataset(
     token: bool | str | None = True,
 ) -> Path:
     """Download a trace by hub filename; writes to ``local_path`` or cwd."""
-    from cst.hf_hiddens.store import download_hub_file
-
     hub_path = Path(path_in_repo).name
     dest = Path(local_path) if local_path is not None else Path(hub_path)
     full_repo = normalize_dataset_repo_id(repo_id or trace_hf_dataset_repo(), namespace)
     rev = revision if revision is not None else trace_hf_revision()
 
-    download_hub_file(
+    download_file_from_dataset(
         full_repo,
         hub_path,
         dest,
