@@ -1,14 +1,4 @@
-"""Per-step proxy computations for ordering quality (M̂_t) and parallelism error (Ĵ_t).
-
-Notation follows the paper:
-  S_t   = positions unmasked at step t      (selected_positions in trace)
-  S̄_t   = positions still masked after step t
-  C_t   = positions committed before step t (i.e. ~mask_index at step t start)
-  w_t   = entropy-drop weight = sum of entropies of S_t tokens before commitment
-
-M̂_t(t) = mean_pos_regret(C_t, t) / (1 + max(0, cascade_gain(t)))
-Ĵ_t(t) = inst(t) * vol(t)
-"""
+"""Per-step M̂_t and Ĵ_t proxies from a generation trace."""
 
 from __future__ import annotations
 
@@ -16,7 +6,24 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import numpy as np
-import torch
+
+# Step-level series aggregated to sample/task caps and trends.
+PROXY_ATTRS = (
+    "M_hat_t",
+    "mean_regret",
+    "cascade_gain",
+    "J_hat_t",
+    "instability",
+    "rank_volatility",
+)
+M_PROXY_ATTRS = ("M_hat_t", "mean_regret", "cascade_gain")
+J_PROXY_ATTRS = ("J_hat_t", "instability", "rank_volatility")
+
+
+@dataclass
+class CapsPair:
+    entropy: float = 0.0
+    uniform: float = 0.0
 
 
 @dataclass
@@ -37,14 +44,39 @@ class StepProxies:
 
 @dataclass
 class SampleProxies:
-    """Per-sample aggregated proxies (entropy-weighted over steps)."""
+    """Per-sample caps (entropy + uniform) for M̂/Ĵ and sub-proxies."""
     M_hat: float
     J_hat: float
+    M_hat_uniform: float
+    J_hat_uniform: float
+    caps: Dict[str, CapsPair] = field(default_factory=dict)
     step_proxies: List[StepProxies] = field(default_factory=list)
 
 
+def _empty_caps() -> Dict[str, CapsPair]:
+    return {name: CapsPair() for name in PROXY_ATTRS}
+
+
+def _caps_pair(step_proxies: List[StepProxies], attr: str) -> CapsPair:
+    if not step_proxies:
+        return CapsPair()
+    values = [float(getattr(sp, attr)) for sp in step_proxies]
+    uniform = float(np.mean(values))
+    total_weight = sum(sp.weight for sp in step_proxies)
+    if total_weight <= 0:
+        return CapsPair(entropy=uniform, uniform=uniform)
+    entropy = float(
+        sum(sp.weight * v for sp, v in zip(step_proxies, values)) / total_weight
+    )
+    return CapsPair(entropy=entropy, uniform=uniform)
+
+
+def _aggregate_sample_caps(step_proxies: List[StepProxies]) -> Dict[str, CapsPair]:
+    return {name: _caps_pair(step_proxies, name) for name in PROXY_ATTRS}
+
+
 def _kendall_tau(a: np.ndarray, b: np.ndarray) -> float:
-    """Kendall's tau-b between two ranking vectors."""
+    """Kendall tau between two rank vectors."""
     n = len(a)
     if n < 2:
         return 0.0
@@ -65,7 +97,7 @@ def _kendall_tau(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _fast_kendall_tau(a: np.ndarray, b: np.ndarray) -> float:
-    """Faster Kendall's tau using scipy if available, else fallback."""
+    """Kendall tau via scipy, with a numpy fallback."""
     if len(a) < 2:
         return 0.0
     try:
@@ -77,26 +109,21 @@ def _fast_kendall_tau(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def compute_sample_proxies(trace_dict: dict) -> SampleProxies:
-    """Compute per-step and aggregated M̂/Ĵ proxies for one generation trace.
-
-    Args:
-        trace_dict: dict from GenerationTrace.to_dict(), with fields:
-            step_traces: list of step dicts, each with:
-                mask_index, predictions, confidences, entropies,
-                selected_positions, selected_tokens
-            unmasking_order: {gen_idx -> step_first_unmasked}
-            gen_length: int
-
-    Returns:
-        SampleProxies with M̂, Ĵ scalars and per-step StepProxies list.
-    """
+    """Compute M̂, Ĵ, and per-step proxies for one trace dict."""
     step_traces = trace_dict.get("step_traces", [])
     unmasking_order: Dict[int, int] = {
         int(k): int(v) for k, v in trace_dict.get("unmasking_order", {}).items()
     }
     T = len(step_traces)
     if T == 0:
-        return SampleProxies(M_hat=0.0, J_hat=0.0)
+        empty = _empty_caps()
+        return SampleProxies(
+            M_hat=0.0,
+            J_hat=0.0,
+            M_hat_uniform=0.0,
+            J_hat_uniform=0.0,
+            caps=empty,
+        )
 
     # ---- Pre-load all step tensors (gen-region, shape [gen_length]) ---- #
     def _to_np(data, dtype=np.float32) -> Optional[np.ndarray]:
@@ -213,19 +240,15 @@ def compute_sample_proxies(trace_dict: dict) -> SampleProxies:
 
         # ---- Rank volatility vol(t) ---- #
         rank_vol_val = 0.0
-        if t > 0:
+        if t > 0 and gen_length >= 2:
             conf_prev = steps[t - 1]["confidences"]
             if conf_t is not None and conf_prev is not None:
-                # Compute over all still-masked positions at start of step t
-                masked_pos = np.where(mask_t)[0]
-                if len(masked_pos) >= 2:
-                    c_cur = conf_t[masked_pos].astype(np.float64)
-                    c_prv = conf_prev[masked_pos].astype(np.float64)
-                    # Use ranks (argsort argsort gives rank)
-                    r_cur = np.argsort(np.argsort(c_cur)).astype(np.float64)
-                    r_prv = np.argsort(np.argsort(c_prv)).astype(np.float64)
-                    tau = _fast_kendall_tau(r_cur, r_prv)
-                    rank_vol_val = 1.0 - (tau + 1.0) / 2.0
+                c_cur = conf_t.astype(np.float64)
+                c_prv = conf_prev.astype(np.float64)
+                r_cur = np.argsort(np.argsort(c_cur)).astype(np.float64)
+                r_prv = np.argsort(np.argsort(c_prv)).astype(np.float64)
+                tau = _fast_kendall_tau(r_cur, r_prv)
+                rank_vol_val = 1.0 - (tau + 1.0) / 2.0
 
         # ---- Ĵ_t ---- #
         J_hat_t = instability_val * rank_vol_val
@@ -244,15 +267,17 @@ def compute_sample_proxies(trace_dict: dict) -> SampleProxies:
             n_remaining=n_remaining,
         ))
 
-    # ---- Entropy-weighted aggregation ---- #
-    total_weight = sum(sp.weight for sp in step_proxy_list)
-    if total_weight <= 0:
-        # Fallback: uniform weights
-        total_weight = max(len(step_proxy_list), 1)
-        M_hat = float(np.mean([sp.M_hat_t for sp in step_proxy_list])) if step_proxy_list else 0.0
-        J_hat = float(np.mean([sp.J_hat_t for sp in step_proxy_list])) if step_proxy_list else 0.0
-    else:
-        M_hat = sum(sp.weight * sp.M_hat_t for sp in step_proxy_list) / total_weight
-        J_hat = sum(sp.weight * sp.J_hat_t for sp in step_proxy_list) / total_weight
+    caps = _aggregate_sample_caps(step_proxy_list)
+    M_hat = caps["M_hat_t"].entropy
+    J_hat = caps["J_hat_t"].entropy
+    M_hat_uniform = caps["M_hat_t"].uniform
+    J_hat_uniform = caps["J_hat_t"].uniform
 
-    return SampleProxies(M_hat=M_hat, J_hat=J_hat, step_proxies=step_proxy_list)
+    return SampleProxies(
+        M_hat=M_hat,
+        J_hat=J_hat,
+        M_hat_uniform=M_hat_uniform,
+        J_hat_uniform=J_hat_uniform,
+        caps=caps,
+        step_proxies=step_proxy_list,
+    )
