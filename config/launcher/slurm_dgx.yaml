@@ -14,7 +14,7 @@ hydra:
     qos: gpu2
     timeout_min: 4320   # 72h
     mem_gb: 128
-    gres: gpu:2
+    # gres set at submit time from parallel_runs_file slot count (gpus_per_node)
     cpus_per_task: 8
     nodes: 1
     tasks_per_node: 1
