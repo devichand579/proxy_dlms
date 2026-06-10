@@ -374,11 +374,58 @@ def _slurm_gpus_allocated() -> Optional[int]:
     return None
 
 
-def _is_slurm_launcher(cfg: DictConfig) -> bool:
-    launcher = str(OmegaConf.select(cfg, "launcher") or "local").strip().lower()
-    if launcher != "local" and launcher.startswith("slurm"):
-        return True
-    return OmegaConf.select(cfg, "hydra.launcher.partition") is not None
+def _launcher_name_from_argv() -> Optional[str]:
+    argv = _normalize_hydra_cli(sys.argv)
+    for arg in argv[1:]:
+        if arg.startswith("launcher="):
+            val = arg.split("=", 1)[1].strip()
+            if val:
+                return val
+    return None
+
+
+def _selected_launcher_name() -> str:
+    """Hydra config-group choice (``launcher=slurm_dgx``) is not copied onto ``cfg``."""
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        choice = HydraConfig.get().runtime.choices.get("launcher")
+        if choice:
+            return str(choice)
+    except Exception:
+        pass
+    return _launcher_name_from_argv() or "local"
+
+
+def _load_launcher_yaml(name: str) -> dict[str, Any]:
+    path = Path(__file__).resolve().parent / "config" / "launcher" / f"{name}.yaml"
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    launcher = (data.get("hydra") or {}).get("launcher") or {}
+    return launcher if isinstance(launcher, dict) else {}
+
+
+def _resolved_hydra_launcher_cfg() -> dict[str, Any]:
+    """SLURM partition/mem/setup live under ``hydra.launcher``, not the app ``cfg`` passed to ``run()``."""
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        hlaunch = HydraConfig.get().cfg.hydra.launcher
+        container = OmegaConf.to_container(hlaunch, resolve=True)
+        if isinstance(container, dict) and container:
+            return container
+    except Exception:
+        pass
+    name = _selected_launcher_name()
+    if name == "local":
+        return {}
+    return _load_launcher_yaml(name)
+
+
+def _is_slurm_launcher(_cfg: DictConfig) -> bool:
+    return _selected_launcher_name().lower().startswith("slurm")
 
 
 def _hydra_multirun_active() -> bool:
@@ -432,7 +479,14 @@ def _parallel_slurm_worker(repo_root: str, overrides: list[str], setup_cmds: lis
 def _submit_parallel_slurm_job(cfg: DictConfig, slot_count: int) -> int:
     import submitit
 
-    hlaunch = cfg.hydra.launcher
+    launcher_name = _selected_launcher_name()
+    hlaunch = _resolved_hydra_launcher_cfg()
+    if not hlaunch:
+        raise RuntimeError(
+            f"Could not resolve SLURM launcher settings for launcher={launcher_name!r}. "
+            "Pass launcher=slurm_dgx (etc.) or submit via sbatch/salloc."
+        )
+
     folder = str(hlaunch.get("submitit_folder", "job_outputs/%j"))
     executor = submitit.AutoExecutor(folder=folder)
 
@@ -448,7 +502,7 @@ def _submit_parallel_slurm_job(cfg: DictConfig, slot_count: int) -> int:
     qos = hlaunch.get("qos")
     if qos is not None and str(qos).strip().lower() not in ("", "null", "none"):
         params["slurm_qos"] = qos
-    addl = OmegaConf.to_container(hlaunch.get("additional_parameters") or {}, resolve=True)
+    addl = hlaunch.get("additional_parameters") or {}
     if isinstance(addl, dict) and addl:
         params["slurm_additional_parameters"] = addl
 
@@ -456,11 +510,11 @@ def _submit_parallel_slurm_job(cfg: DictConfig, slot_count: int) -> int:
 
     repo_root = Path(__file__).resolve().parent
     overrides = _cfg_cli_overrides(cfg)
-    setup_cmds = [str(x) for x in (OmegaConf.select(cfg, "hydra.launcher.setup") or [])]
+    setup_cmds = [str(x) for x in (hlaunch.get("setup") or [])]
 
     job = executor.submit(_parallel_slurm_worker, str(repo_root), overrides, setup_cmds)
     print(
-        f"Submitted parallel SLURM job {job.job_id} "
+        f"Submitted parallel SLURM job {job.job_id} via launcher={launcher_name} "
         f"({slot_count} GPU(s), partition={params.get('slurm_partition')})"
     )
     return 0
@@ -524,8 +578,14 @@ def run(cfg: DictConfig) -> int:
     """Single eval, parallel multi-GPU eval, or auto-submit one multi-GPU SLURM job."""
     slot_specs = _parallel_slot_specs_from_file(cfg)
     if slot_specs:
-        if _should_submit_parallel_slurm(cfg, len(slot_specs)):
-            return _submit_parallel_slurm_job(cfg, len(slot_specs))
+        n_slots = len(slot_specs)
+        if _should_submit_parallel_slurm(cfg, n_slots):
+            print(
+                f"Login-node parallel submit: launcher={_selected_launcher_name()}, "
+                f"slots={n_slots}, visible_gpus={_count_visible_gpus()}",
+                flush=True,
+            )
+            return _submit_parallel_slurm_job(cfg, n_slots)
         return _run_parallel_evals(cfg, slot_specs)
 
     return _run_single_eval(cfg)
