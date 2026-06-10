@@ -25,33 +25,33 @@ if hf_token:
     except Exception as e:
         print(f"Warning: Could not authenticate: {e}")
 
+# Each entry: (full_org_name, short_name_alias, config, display_name)
+# Both names are cached so offline mode works regardless of which name lm-eval uses.
 datasets_to_download = [
-    ("openai/gsm8k", "main", "GSM8K"),
-    ("google-research-datasets/mbpp", "full", "MBPP"),
-    ("BAAI/TACO", "ALL", "TACO"),
-    ("openai/openai_humaneval", None, "HumanEval"),
-    ("allenai/ai2_arc", "ARC-Challenge", "ARC Challenge"),
-    ("HuggingFaceH4/MATH-500", None, "Minerva MATH-500"),
+    ("openai/gsm8k",                    "gsm8k",            "main",          "GSM8K"),
+    ("google-research-datasets/mbpp",   "mbpp",             "full",          "MBPP"),
+    ("BAAI/TACO",                        None,               "ALL",           "TACO"),
+    ("openai/openai_humaneval",          "openai_humaneval", None,            "HumanEval"),
+    ("allenai/ai2_arc",                  None,               "ARC-Challenge", "ARC Challenge"),
+    ("HuggingFaceH4/MATH-500",           None,               None,            "Minerva MATH-500"),
 ]
 
 print("\n" + "="*60)
-for dataset_name, config_name, display_name in datasets_to_download:
-    print(f"\nDownloading{display_name} dataset...")
-    try:
-        if config_name:
-            dataset = load_dataset(dataset_name, config_name, token=hf_token)
-        else:
-            dataset = load_dataset(dataset_name, token=hf_token)
-        
-        print(f"{display_name} downloaded successfully!")
-        
-        # Show split information
-        for split_name in dataset.keys():
-            print(f"   - {split_name}: {len(dataset[split_name])} samples")
-    except Exception as e:
-        print(f"Error downloading {display_name}: {e}")
-        print(f"   Dataset: {dataset_name}, Config: {config_name}")
-        continue
+for full_name, short_name, config_name, display_name in datasets_to_download:
+    names_to_cache = [n for n in [full_name, short_name] if n]
+    print(f"\nDownloading {display_name} dataset...")
+    for name in names_to_cache:
+        try:
+            if config_name:
+                dataset = load_dataset(name, config_name, token=hf_token)
+            else:
+                dataset = load_dataset(name, token=hf_token)
+            print(f"  Cached as '{name}' ({display_name})")
+            for split_name in dataset.keys():
+                print(f"   - {split_name}: {len(dataset[split_name])} samples")
+        except Exception as e:
+            print(f"  Warning: could not cache as '{name}': {e}")
+            continue
 
 print("\n" + "="*60)
 print(f"All datasets downloaded to: {os.environ.get('HF_DATASETS_CACHE')}")
