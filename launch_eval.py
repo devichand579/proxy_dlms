@@ -459,8 +459,9 @@ def _cfg_cli_overrides(cfg: DictConfig) -> list[str]:
 
 def _parallel_slurm_worker(repo_root: str, overrides: list[str], setup_cmds: list[str]) -> int:
     root = Path(repo_root)
-    for cmd in setup_cmds:
-        subprocess.run(cmd, shell=True, executable="/bin/bash", cwd=root, check=True)
+    if setup_cmds:
+        combined = " && ".join(setup_cmds)
+        subprocess.run(combined, shell=True, executable="/bin/bash", cwd=root, check=True)
     env = os.environ.copy()
     env["STRACE_PARALLEL_SLURM_CHILD"] = "1"
     cmd = [sys.executable, str(root / "launch_eval.py"), *overrides]
