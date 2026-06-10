@@ -7,9 +7,11 @@
 - mode: pd
   task_name: gsm8k
   model: llada
+  steps: 256
   batch_size: 32
 
 - mode: bd
   task_name: gsm8k
   model: llada  
+  steps: 256
   batch_size: 32
