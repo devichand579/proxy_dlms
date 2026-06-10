@@ -469,23 +469,27 @@ def _parallel_slurm_worker(repo_root: str, overrides: list[str], setup_cmds: lis
 
 
 def _build_submitit_slurm_params(hlaunch: dict[str, Any], slot_count: int) -> dict[str, Any]:
-    """Map launcher YAML → submitit SlurmExecutor params (whitelist only; no Hydra plugin keys)."""
+    """Map launcher YAML → submitit ``SlurmExecutor`` parameter names."""
+    mem_gb = float(hlaunch.get("mem_gb", 64))
     params: dict[str, Any] = {
-        "slurm_partition": hlaunch.get("partition"),
-        "timeout_min": int(hlaunch.get("timeout_min", 4320)),
-        "mem_gb": float(hlaunch.get("mem_gb", 64)),
+        "partition": hlaunch.get("partition"),
+        "time": int(hlaunch.get("timeout_min", 4320)),
+        "mem": int(mem_gb * 1024),
         "cpus_per_task": int(hlaunch.get("cpus_per_task", 8)),
         "nodes": int(hlaunch.get("nodes", 1)),
-        "tasks_per_node": int(hlaunch.get("tasks_per_node", 1)),
+        "ntasks_per_node": int(hlaunch.get("tasks_per_node", 1)),
         "gpus_per_node": int(slot_count),
-        "name": "strace_parallel_eval",
+        "job_name": "strace_parallel_eval",
     }
     qos = hlaunch.get("qos")
     if qos is not None and str(qos).strip().lower() not in ("", "null", "none"):
-        params["slurm_qos"] = str(qos).strip()
+        params["qos"] = str(qos).strip()
     addl = hlaunch.get("additional_parameters")
     if isinstance(addl, dict) and addl:
-        params["slurm_additional_parameters"] = dict(addl)
+        params["additional_parameters"] = dict(addl)
+    signal_delay = hlaunch.get("signal_delay_s")
+    if signal_delay is not None:
+        params["signal_delay_s"] = int(signal_delay)
     return {k: v for k, v in params.items() if v is not None}
 
 
@@ -510,8 +514,7 @@ def _submit_parallel_slurm_job(cfg: DictConfig, slot_count: int) -> int:
 
     params = _build_submitit_slurm_params(hlaunch, slot_count)
     folder = _parallel_submitit_folder(hlaunch)
-    executor_cls = getattr(submitit, "SlurmExecutor", submitit.AutoExecutor)
-    executor = executor_cls(folder=str(folder))
+    executor = submitit.SlurmExecutor(folder=str(folder))
     executor.update_parameters(**params)
 
     overrides = _cfg_cli_overrides(cfg)
@@ -520,7 +523,7 @@ def _submit_parallel_slurm_job(cfg: DictConfig, slot_count: int) -> int:
     job = executor.submit(_parallel_slurm_worker, str(_REPO_ROOT), overrides, setup_cmds)
     print(
         f"Submitted parallel SLURM job {job.job_id} via launcher={launcher_name} "
-        f"({slot_count} GPU(s), partition={params.get('slurm_partition')})"
+        f"({slot_count} GPU(s), partition={params.get('partition')})"
     )
     return 0
 
