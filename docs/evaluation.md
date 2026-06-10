@@ -48,6 +48,9 @@ Task-specific **generation length** and **diffusion step count** are centralized
 | `--slurm`                                    | Use when submitting via `sbatch` so the command runs under `srun`.                                                                                                                                                                           |
 | `--resumable`                                | Checkpointed evaluation: fixed output directory, sample-level resume (see below).                                                                                                                                                            |
 | `--run_id`                                   | With `--resumable`, fixed folder under `outputs/` (default auto: `{model}_{task}_{mode}_s{steps}`, with `_{strategy}` for `top_k_*` and intervention tags when set). Use a custom id when varying steps/tracing so checkpoints do not collide. |
+| `--offline`                                  | Use cached HF datasets/models only and `WANDB_MODE=offline` (no Hub or W&B network). Disables trace Hub upload. Prefetch datasets with `./download_datasets.sh` on a networked machine first. |
+| `--device`                                   | Harness device / GPU pin: `0`, `1`, `cuda`, `cuda:0`, `cpu`. Integer or `cuda:N` sets `CUDA_VISIBLE_DEVICES` and passes `device=cuda` to the harness. Default (local, non-SLURM): GPU `0`. Ignored for GPU binding when `--slurm` allocates the job GPU. |
+| `--launcher`                                 | With `--parallel_config`: cluster launcher for auto-submit from login node (e.g. `slurm_dgx`, `slurm_h100`). Requests one SLURM job with `--gres=gpu:N` (N = slots in parallel YAML). Omit on an already-allocated node (`launcher=local` default). |
 | Hidden / CST                                 | Use `**capture_hiddens.sh`** / `**launch_capture_hiddens.py**`, then `**hidden_cst_eval.sh**` / `**launch_hidden_cst_eval.py**` — see [CST](cst.md). `eval.sh` no longer accepts `--capture_pre_logits` or `--cst_checkpoint`.               |
 
 
@@ -80,7 +83,26 @@ Requests are grouped by **prompt length buckets** (e.g. 0–32, 32–64, …, 51
 ./eval.sh --parallel_config config/parallel_eval_runs.yaml --wandb True --slurm
 ./eval.sh --batch_size 1 --mode bd --task_name humaneval --model llada --compile_model False
 ./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True
+# Offline on GPU 1 (datasets must be cached; W&B logs locally)
+./eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada --offline --device 1 --wandb True
 ```
+
+### Offline and device selection
+
+**Offline (`--offline` / `offline=true`):** for compute nodes without outbound network access. Sets `HF_DATASETS_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `HF_HUB_OFFLINE=1`, and `WANDB_MODE=offline`. Trace Hub upload is forced off (`TRACE_HF_UPLOAD=FALSE`). Models must already live under `./models/`; lm-eval datasets must be in the HF cache — run `./download_datasets.sh` once from a machine with network access. W&B metrics are written under a local `wandb/` directory and can be synced later with `wandb sync`.
+
+**Device (`--device` / `device=`):** pick the GPU interactively without exporting `CUDA_VISIBLE_DEVICES` yourself.
+
+| Value | `CUDA_VISIBLE_DEVICES` | Harness `device` |
+| ----- | ---------------------- | ---------------- |
+| `0`, `1`, … | that index | `cuda` |
+| `cuda:0`, `cuda:1` | index after `:` | `cuda` |
+| `cuda` | unchanged, or `0` locally if unset | `cuda` |
+| `cpu` | cleared | `cpu` |
+
+Locally (without `--slurm`), the default is GPU `0` when `--device` is omitted. With `--slurm`, SLURM/`srun` owns GPU allocation — pass `--device` only if you need to override that binding.
+
+Hydra equivalents: `offline=true`, `device=1`, `device=cuda:0`, `device=cpu`. Defaults in `config/lmeval.yaml`: `offline: false`, `device: null`.
 
 ### Outputs
 
@@ -103,9 +125,20 @@ Long jobs can save partial progress and continue with the same command.
 
 **Diffusion aggregates (steps / NFE):** With `resumable`, the harness also writes `**outputs/{run_id}/.eval_diffusion_metrics.json`** so a **new Python process** can restore cumulative diffusion counters next to `checkpoint.jsonl`.
 
-**W&B:** `launch_eval.py` passes `resume=allow,id=<run_id>` to lm-eval when `outputs/{run_id}/.wandb_id` exists. The harness writes that file the first time the active W&B run id is known — including at the **start of the first `generate_until`**, because Weights & Biases is often initialized **after** the model is constructed (so writing only in the model constructor was unreliable). Until `.wandb_id` exists, the next launch may start a **new** W&B run.
+**W&B:** `launch_eval.py` passes `resume=allow,id=<run_id>` to lm-eval when `outputs/{run_id}/.wandb_id` exists. The harness writes that file the first time the active W&B run id is known — including at the **start of the first `generate_until`**, because Weights & Biases is often initialized **after** the model is constructed (so writing only in the model constructor was unreliable). Until `.wandb_id` exists, the next launch may start a **new** W&B run. With `--offline` / `offline=true`, runs log locally (`WANDB_MODE=offline`); sync later with `wandb sync`.
 
-**Tracing:** with tracing on, JSONL under `trace_outputs/{trace_name}.jsonl` supports appending after resume (`trace_name` includes `_s{steps}` in auto names, e.g. `llada1_5_mbpp_fhs_s512.jsonl`). When tracing is enabled, the final trace file is also pushed to a Hugging Face **dataset** repo (default `schedulerlens`, resolved as `{HF user}/schedulerlens` unless you pass `org/schedulerlens`). Disable with `trace_hf_upload=false` in `config/lmeval.yaml` or `TRACE_HF_UPLOAD=FALSE` / `--trace_hf_upload False` in `eval.sh`. Configure repo via `trace_hf_dataset_repo` and optional `trace_hf_namespace`. Requires `HF_TOKEN` or `huggingface-cli login`.
+**Tracing:** with tracing on, JSONL under `trace_outputs/{trace_name}.jsonl` supports appending after resume (`trace_name` includes `_s{steps}` in auto names, e.g. `llada1_5_mbpp_fhs_s512.jsonl`). When tracing is enabled, the final trace file is also pushed to a Hugging Face **dataset** repo (default `schedulerlens`, resolved as `{HF user}/schedulerlens` unless you pass `org/schedulerlens`). Disable with `trace_hf_upload=false` in `config/lmeval.yaml` or `TRACE_HF_UPLOAD=FALSE` / `--trace_hf_upload False` in `eval.sh`. Configure repo via `trace_hf_dataset_repo` and optional `trace_hf_namespace`. Requires `HF_TOKEN` or `huggingface-cli login`. With `--offline` / `offline=true`, Hub trace upload is always disabled — push traces later with `traces/hf_trace_upload.py` (see below).
+
+**Manual trace upload (offline or retry):** upload one file, every file in a directory, or a glob expansion from the shell:
+
+```bash
+python traces/hf_trace_upload.py upload trace_outputs/llada_gsm8k_pd_s512.jsonl
+python traces/hf_trace_upload.py upload trace_outputs/
+python traces/hf_trace_upload.py upload trace_outputs/ --recursive --repo org/schedulerlens
+python traces/hf_trace_upload.py download llada_gsm8k_pd_s512.jsonl -o trace_outputs/llada_gsm8k_pd_s512.jsonl
+```
+
+Uses `TRACE_HF_DATASET_REPO` / `TRACE_HF_NAMESPACE` from the environment when `--repo` is omitted (same defaults as eval). `--dry-run` lists planned uploads without calling the Hub.
 
 **Changing steps or tracing:** use a **new** `--run_id` (or let auto naming pick a new `_s{steps}` suffix). Do not resume an existing checkpoint with different `--steps` — sample outputs would be inconsistent.
 
@@ -123,11 +156,30 @@ Long jobs can save partial progress and continue with the same command.
 ```bash
 python launch_eval.py task_name=gsm8k mode=pd
 python launch_eval.py task_name=gsm8k mode=pd steps=256 gen_length=512
+python launch_eval.py task_name=gsm8k mode=pd offline=true device=1
 ```
 
-YAML keys `**gen_length**`, `**steps**`, and `**block_length**` live in `config/lmeval.yaml` under the sampling block (`null` = defaults: lengths from `sampling_defaults.py`; block size from mode — see “Auto-configured from task”).
+YAML keys `**gen_length**`, `**steps**`, and `**block_length**` live in `config/lmeval.yaml` under the sampling block (`null` = defaults: lengths from `sampling_defaults.py`; block size from mode — see “Auto-configured from task”). Env keys `offline` and `device` are in the same file.
 
-**Multi-GPU (one job):** set `parallel_runs_file` in `config/lmeval.yaml` or on the CLI to a YAML file (list of dicts, one per GPU; see `config/parallel_eval_runs.yaml`). `launch_eval.py` merges each dict onto the base config and binds **GPU `i`** to `CUDA_VISIBLE_DEVICES=i`.
+**Multi-GPU (one job):** set `parallel_runs_file` in `config/lmeval.yaml` or on the CLI to a YAML file (list of dicts, one per GPU; see `config/parallel_eval_runs.yaml`). `launch_eval.py` merges each dict onto the base config and binds **GPU `i`** to `CUDA_VISIBLE_DEVICES=i` unless that slot sets `device:` (e.g. `device: cuda:1`).
+
+**From a SLURM login node (auto-submit one N-GPU job):** add a cluster launcher — the slot count sets `--gres=gpu:N`. Inside the allocation (or after auto-submit), evals run in parallel on GPUs 0…N−1.
+
+```bash
+# Login node → one DGX job with 2 GPUs (matches 2 entries in parallel_eval_runs.yaml)
+python launch_eval.py parallel_runs_file=config/parallel_eval_runs.yaml launcher=slurm_dgx offline=true
+
+# Same via eval.sh
+./eval.sh --parallel_config config/parallel_eval_runs.yaml --launcher slurm_dgx --offline
+```
+
+If you are **already on an allocated node** (`salloc` / inside `sbatch`) with enough GPUs, use `launcher=local` (default) — no re-submit:
+
+```bash
+python launch_eval.py parallel_runs_file=config/parallel_eval_runs.yaml offline=true
+```
+
+If you `sbatch eval.sh --parallel_config ... --slurm`, set `#SBATCH --gres=gpu:N` to match the number of YAML slots (the script checks this at startup).
 
 ```bash
 python launch_eval.py parallel_runs_file=config/parallel_eval_runs.yaml
@@ -137,7 +189,8 @@ From `eval.sh` (after conda; no inner `srun` for the children — same as other 
 
 ```bash
 ./eval.sh --parallel_config config/parallel_eval_runs.yaml
-# Optional global defaults still apply on top of lmeval.yaml: --batch_size 4 --wandb True --steps 256 --gen_length 512
+# Optional global defaults still apply on top of lmeval.yaml: --batch_size 4 --wandb True --steps 256 --gen_length 512 --offline --device 0
+python launch_eval.py parallel_runs_file=config/parallel_eval_runs.yaml offline=true
 ```
 
 **Multirun (local, sequential):**

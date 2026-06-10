@@ -1,7 +1,8 @@
 # @package _global_
 # SLURM launcher for DGX2
-# Use: launcher=slurm_dgx. Requires --multirun for multirun.
-# Example: python launch_eval.py task_name=gsm8k mode=pd --multirun launcher=slurm_dgx
+# Use: launcher=slurm_dgx. Requires --multirun for multirun sweeps.
+# Parallel multi-GPU (one job, N slots): launcher=slurm_dgx parallel_runs_file=config/parallel_eval_runs.yaml
+# Example: python launch_eval.py parallel_runs_file=config/parallel_eval_runs.yaml launcher=slurm_dgx offline=true
 
 defaults:
   - override /hydra/launcher: submitit_slurm

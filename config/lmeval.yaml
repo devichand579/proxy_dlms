@@ -14,6 +14,7 @@ batch_size: 4
 mode: pd
 task_name: gsm8k
 # Multi-GPU (`launch_eval.py` / `eval.sh --parallel_config`): path to YAML — list of dicts merged per GPU (see config/parallel_eval_runs.yaml).
+# With `launcher=slurm_dgx` (etc.) from a login node, submits one SLURM job requesting one GPU per slot.
 parallel_runs_file: null
 model: llada  # dirname under ./models/: llada | llada1_5 | dream
 compile_model: false
@@ -43,6 +44,10 @@ run_id: null  # optional custom dir name; if null: {model}_{task}_{mode}, or for
 
 # Env / paths
 wandb_project: strace
+# offline=true: cached HF datasets + WANDB_MODE=offline (see download_datasets.sh)
+offline: false
+# Harness device: cuda | cpu | 0 | 1 | cuda:0 (integer/cuda:N pins CUDA_VISIBLE_DEVICES)
+device: null
 
 # Hydra: run in project root so outputs/ and trace_outputs/ are in same directory
 hydra:

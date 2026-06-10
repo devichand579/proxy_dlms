@@ -15,7 +15,7 @@ _REPO_ROOT = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from repo_env_defaults import apply_repo_env_defaults
+from repo_env_defaults import apply_offline_env, apply_repo_env_defaults, resolve_eval_device
 from sampling_defaults import resolve_gen_length_steps
 
 import hydra
@@ -94,11 +94,13 @@ def get_num_fewshot(task_name: str) -> int:
 
 
 
-def _apply_trace_hf_env(env: dict[str, str], cfg: dict) -> None:
+def _apply_trace_hf_env(env: dict[str, str], cfg: dict, *, offline: bool = False) -> None:
     """Env vars read by ``traces.hf_trace_upload`` when eval closes a trace file."""
     tracing = _to_bool(cfg.get("tracing_enabled", True))
     upload = cfg.get("trace_hf_upload")
-    if upload is None:
+    if offline:
+        upload = False
+    elif upload is None:
         upload = tracing
     else:
         upload = _to_bool(upload)
@@ -124,6 +126,20 @@ def _to_bool(val) -> bool:
     return bool(val)
 
 
+def _apply_device_env(env: dict[str, str], cfg: DictConfig, extra_env: Optional[dict[str, str]]) -> str:
+    """Pin GPU via CUDA_VISIBLE_DEVICES when requested; return harness model_args device."""
+    device_cfg = cfg.get("device")
+    model_device, cuda_visible = resolve_eval_device(
+        None if device_cfg is None else str(device_cfg)
+    )
+    if extra_env and "CUDA_VISIBLE_DEVICES" in extra_env and cuda_visible is None:
+        cuda_visible = extra_env["CUDA_VISIBLE_DEVICES"]
+    if cuda_visible is not None:
+        env["CUDA_VISIBLE_DEVICES"] = cuda_visible
+    env.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    return model_device
+
+
 def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None) -> int:
     """Build and run one accelerate eval; optional env overrides (e.g. CUDA_VISIBLE_DEVICES per slot)."""
     apply_repo_env_defaults()
@@ -140,6 +156,7 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     else:
         use_eos_harness = True if ueh is None else bool(ueh)
     wandb = _to_bool(cfg.get("wandb", True))
+    offline = _to_bool(cfg.get("offline", False))
     tracing_enabled = _to_bool(cfg.get("tracing_enabled", True))
 
     intervention = cfg.get("intervention") or {}
@@ -207,10 +224,16 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
 
     checkpoint_dir = f"outputs/{output_suffix}" if resumable else None
 
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+    model_device = _apply_device_env(env, cfg, extra_env)
+
     model_args = (
         f"model_path={model_path},gen_length={gen_length},steps={steps},"
         f"block_length={block_length},mode={mode},strategy={str(strategy)},top_k={top_k},compile_model={str(compile_model).lower()},"
-        f"task_name={task_name},trace_name={output_suffix},use_eos_harness={str(use_eos_harness).lower()}"
+        f"task_name={task_name},trace_name={output_suffix},use_eos_harness={str(use_eos_harness).lower()},"
+        f"device={model_device}"
     )
     if resumable and checkpoint_dir:
         model_args += f",resumable=true,output_dir={checkpoint_dir}"
@@ -221,15 +244,14 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
             steps_arg = re.sub(r",", "_", str(intervention_steps or "0"))
         model_args += f",intervention_mode={intervention_mode},intervention_steps={steps_arg},intervention_k={intervention_k}"
 
-    env = os.environ.copy()
-    if extra_env:
-        env.update(extra_env)
     env.setdefault("HF_ALLOW_CODE_EVAL", "1")
     env.setdefault("HF_DATASETS_TRUST_REMOTE_CODE", "true")
     env.setdefault("LMEVAL_LOG_LEVEL", "INFO")
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     env["TRACING_ENABLED"] = "TRUE" if tracing_enabled else "FALSE"
-    _apply_trace_hf_env(env, cfg)
+    if offline:
+        apply_offline_env(env)
+    _apply_trace_hf_env(env, cfg, offline=offline)
     if resumable:
         env["RESUMABLE_RUN_ID"] = output_suffix
         env["CHECKPOINT_DIR"] = checkpoint_dir
@@ -252,7 +274,9 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         f"gen_length={gen_length} steps={steps} block_length={block_length} top_k={top_k}"
     )
     print(
-        f"  num_fewshot={num_fewshot} wandb={wandb} tracing_enabled={tracing_enabled} "
+        f"  num_fewshot={num_fewshot} wandb={wandb} offline={offline} device={model_device} "
+        f"cuda_visible={env.get('CUDA_VISIBLE_DEVICES', '(unchanged)')} "
+        f"tracing_enabled={tracing_enabled} "
         f"trace_hf_upload={env.get('TRACE_HF_UPLOAD')} trace_hf_repo={env.get('TRACE_HF_DATASET_REPO', 'schedulerlens')} "
         f"resumable={resumable}"
     )
@@ -306,6 +330,22 @@ def _slot_dict(item: Any) -> dict[str, Any]:
     raise ValueError(f"parallel slot entries must be dicts mapping config keys for that GPU; got {type(item)!r}")
 
 
+def count_parallel_slots(path: str | Path) -> int:
+    """Number of GPU slots in a parallel runs YAML file."""
+    specs = load_parallel_slot_specs(path)
+    return len(specs)
+
+
+def load_parallel_slot_specs(path: str | Path) -> list[dict[str, Any]]:
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"parallel runs file not found: {path.resolve()}")
+    with path.open(encoding="utf-8") as f:
+        payload = yaml.safe_load(f)
+    slots_raw = _normalize_parallel_slots_payload(payload)
+    return [_slot_dict(item) for item in slots_raw]
+
+
 def _parallel_slot_specs_from_file(cfg: DictConfig) -> Optional[list[dict[str, Any]]]:
     """YAML list (or ``{\"runs\": [...]}``) merged per GPU; ``None`` if unset → single eval."""
     raw_file = cfg.get("parallel_runs_file")
@@ -314,40 +354,179 @@ def _parallel_slot_specs_from_file(cfg: DictConfig) -> Optional[list[dict[str, A
     fs = str(raw_file).strip()
     if fs.lower() in ("", "none", "null"):
         return None
-    path = Path(fs).expanduser()
-    if not path.is_file():
-        raise FileNotFoundError(f"parallel_runs_file not found: {path.resolve()}")
-    with path.open(encoding="utf-8") as f:
-        payload = yaml.safe_load(f)
-    slots_raw = _normalize_parallel_slots_payload(payload)
-    out = [_slot_dict(item) for item in slots_raw]
-    return out or None
+    return load_parallel_slot_specs(fs) or None
+
+
+def _count_visible_gpus() -> int:
+    try:
+        import torch
+
+        return int(torch.cuda.device_count())
+    except Exception:
+        return 0
+
+
+def _slurm_gpus_allocated() -> Optional[int]:
+    for key in ("SLURM_GPUS_ON_NODE", "SLURM_GPUS"):
+        raw = os.environ.get(key)
+        if raw and str(raw).strip().isdigit():
+            return int(str(raw).strip())
+    return None
+
+
+def _is_slurm_launcher(cfg: DictConfig) -> bool:
+    launcher = str(OmegaConf.select(cfg, "launcher") or "local").strip().lower()
+    if launcher != "local" and launcher.startswith("slurm"):
+        return True
+    return OmegaConf.select(cfg, "hydra.launcher.partition") is not None
+
+
+def _hydra_multirun_active() -> bool:
+    return "--multirun" in sys.argv or "-m" in sys.argv
+
+
+def _cfg_cli_overrides(cfg: DictConfig) -> list[str]:
+    """Serialize resolved eval config back to Hydra CLI overrides for child re-invocation."""
+    container = OmegaConf.to_container(cfg, resolve=True)
+    if not isinstance(container, dict):
+        return ["launcher=local"]
+
+    overrides: list[str] = []
+    for key, val in container.items():
+        if key in ("hydra", "launcher"):
+            continue
+        if val is None:
+            continue
+        if key == "parallel_runs_file":
+            overrides.append(f"parallel_runs_file={Path(str(val)).expanduser().resolve()}")
+            continue
+        if isinstance(val, bool):
+            overrides.append(f"{key}={'true' if val else 'false'}")
+        elif isinstance(val, (int, float, str)):
+            overrides.append(f"{key}={val}")
+        elif key == "intervention" and isinstance(val, dict):
+            for sub_key, sub_val in val.items():
+                if sub_val is None:
+                    continue
+                if isinstance(sub_val, bool):
+                    overrides.append(f"intervention.{sub_key}={'true' if sub_val else 'false'}")
+                elif isinstance(sub_val, (int, float, str)):
+                    overrides.append(f"intervention.{sub_key}={sub_val}")
+                elif isinstance(sub_val, list):
+                    overrides.append(f"intervention.{sub_key}=[{','.join(str(x) for x in sub_val)}]")
+    overrides.append("launcher=local")
+    return overrides
+
+
+def _parallel_slurm_worker(repo_root: str, overrides: list[str], setup_cmds: list[str]) -> int:
+    root = Path(repo_root)
+    for cmd in setup_cmds:
+        subprocess.run(cmd, shell=True, executable="/bin/bash", cwd=root, check=True)
+    env = os.environ.copy()
+    env["STRACE_PARALLEL_SLURM_CHILD"] = "1"
+    cmd = [sys.executable, str(root / "launch_eval.py"), *overrides]
+    print("Running parallel eval child:", " ".join(cmd), flush=True)
+    return int(subprocess.run(cmd, env=env, cwd=root).returncode)
+
+
+def _submit_parallel_slurm_job(cfg: DictConfig, slot_count: int) -> int:
+    import submitit
+
+    hlaunch = cfg.hydra.launcher
+    folder = str(hlaunch.get("submitit_folder", "job_outputs/%j"))
+    executor = submitit.AutoExecutor(folder=folder)
+
+    params: dict[str, Any] = {
+        "slurm_partition": hlaunch.get("partition"),
+        "timeout_min": hlaunch.get("timeout_min", 4320),
+        "mem_gb": hlaunch.get("mem_gb", 64),
+        "cpus_per_worker": hlaunch.get("cpus_per_task", 8),
+        "nodes": hlaunch.get("nodes", 1),
+        "name": "strace_parallel_eval",
+        "gres": f"gpu:{slot_count}",
+    }
+    qos = hlaunch.get("qos")
+    if qos is not None and str(qos).strip().lower() not in ("", "null", "none"):
+        params["slurm_qos"] = qos
+    addl = OmegaConf.to_container(hlaunch.get("additional_parameters") or {}, resolve=True)
+    if isinstance(addl, dict) and addl:
+        params["slurm_additional_parameters"] = addl
+
+    executor.update_parameters(**{k: v for k, v in params.items() if v is not None})
+
+    repo_root = Path(__file__).resolve().parent
+    overrides = _cfg_cli_overrides(cfg)
+    setup_cmds = [str(x) for x in (OmegaConf.select(cfg, "hydra.launcher.setup") or [])]
+
+    job = executor.submit(_parallel_slurm_worker, str(repo_root), overrides, setup_cmds)
+    print(
+        f"Submitted parallel SLURM job {job.job_id} "
+        f"({slot_count} GPU(s), partition={params.get('slurm_partition')})"
+    )
+    return 0
+
+
+def _should_submit_parallel_slurm(cfg: DictConfig, slot_count: int) -> bool:
+    if os.environ.get("STRACE_PARALLEL_SLURM_CHILD") == "1":
+        return False
+    if _hydra_multirun_active():
+        return False
+    if slot_count < 1 or not _is_slurm_launcher(cfg):
+        return False
+    allocated = _slurm_gpus_allocated()
+    visible = _count_visible_gpus()
+    if os.environ.get("SLURM_JOB_ID"):
+        have = allocated if allocated is not None else visible
+        if have >= slot_count:
+            return False
+    return True
+
+
+def _run_parallel_evals(cfg: DictConfig, slot_specs: list[dict[str, Any]]) -> int:
+    n = len(slot_specs)
+    if n == 0:
+        raise ValueError("parallel_runs_file is empty")
+    if os.environ.get("SLURM_JOB_ID"):
+        allocated = _slurm_gpus_allocated()
+        visible = _count_visible_gpus()
+        have = allocated if allocated is not None else visible
+        if have and have < n:
+            raise RuntimeError(
+                f"parallel_runs_file defines {n} GPU slots but this SLURM allocation has {have} GPU(s). "
+                f"Request --gres=gpu:{n} (or use launcher=slurm_dgx from the login node to auto-submit)."
+            )
+
+    base_plain = OmegaConf.to_container(cfg, resolve=True)
+    assert isinstance(base_plain, dict)
+    base_plain.pop("parallel_runs_file", None)
+    base_oc = OmegaConf.create(base_plain)
+
+    def _run_slot(slot_idx: int, overrides: dict[str, Any]) -> int:
+        merged = OmegaConf.merge(base_oc, OmegaConf.create(overrides))
+        slot_env: dict[str, str] = {}
+        if merged.get("device") is None:
+            slot_env["CUDA_VISIBLE_DEVICES"] = str(slot_idx)
+        return _run_single_eval(merged, extra_env=slot_env or None)
+
+    if n == 1:
+        return _run_slot(0, slot_specs[0])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+        futures = [pool.submit(_run_slot, i, spec) for i, spec in enumerate(slot_specs)]
+        codes = [f.result() for f in futures]
+    for c in codes:
+        if c != 0:
+            return c
+    return 0
 
 
 def run(cfg: DictConfig) -> int:
-    """Either one eval from config, or one eval per YAML slot (parallel_runs_file) with CUDA_VISIBLE_DEVICES per slot."""
+    """Single eval, parallel multi-GPU eval, or auto-submit one multi-GPU SLURM job."""
     slot_specs = _parallel_slot_specs_from_file(cfg)
     if slot_specs:
-        n = len(slot_specs)
-        base_plain = OmegaConf.to_container(cfg, resolve=True)
-        assert isinstance(base_plain, dict)
-        base_plain.pop("parallel_runs_file", None)
-        base_oc = OmegaConf.create(base_plain)
-
-        def _run_slot(slot_idx: int, overrides: dict[str, Any]) -> int:
-            merged = OmegaConf.merge(base_oc, OmegaConf.create(overrides))
-            return _run_single_eval(merged, extra_env={"CUDA_VISIBLE_DEVICES": str(slot_idx)})
-
-        if n == 1:
-            return _run_slot(0, slot_specs[0])
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
-            futures = [pool.submit(_run_slot, i, spec) for i, spec in enumerate(slot_specs)]
-            codes = [f.result() for f in futures]
-        for c in codes:
-            if c != 0:
-                return c
-        return 0
+        if _should_submit_parallel_slurm(cfg, len(slot_specs)):
+            return _submit_parallel_slurm_job(cfg, len(slot_specs))
+        return _run_parallel_evals(cfg, slot_specs)
 
     return _run_single_eval(cfg)
 

@@ -17,3 +17,43 @@ def apply_repo_env_defaults() -> None:
     os.environ.setdefault("HF_TOKEN", HF_TOKEN_DEFAULT)
     os.environ.setdefault("WANDB_API_KEY", WANDB_API_KEY_DEFAULT)
     os.environ.setdefault("WANDB_PROJECT", WANDB_PROJECT_DEFAULT)
+
+
+def apply_offline_env(target: dict[str, str] | None = None) -> None:
+    """Use cached HF datasets/models and local W&B (no Hub/network for eval telemetry)."""
+    env = target if target is not None else os.environ
+    env["HF_DATASETS_OFFLINE"] = "1"
+    env["TRANSFORMERS_OFFLINE"] = "1"
+    env["HF_HUB_OFFLINE"] = "1"
+    env["WANDB_MODE"] = "offline"
+    env["TRACE_HF_UPLOAD"] = "FALSE"
+
+
+def resolve_eval_device(device: str | None = None) -> tuple[str, str | None]:
+    """Map CLI/YAML device to harness ``device`` and optional ``CUDA_VISIBLE_DEVICES``.
+
+    Returns ``(model_device, cuda_visible_devices)`` where ``cuda_visible_devices`` is
+    ``None`` when the caller should not change ``CUDA_VISIBLE_DEVICES`` (empty string = unset CPU).
+    """
+    if device is None or not str(device).strip():
+        return "cuda", None
+
+    s = str(device).strip()
+    lower = s.lower()
+
+    if lower == "cpu":
+        return "cpu", ""
+
+    if s.isdigit():
+        return "cuda", s
+
+    if lower == "cuda":
+        return "cuda", None
+
+    if lower.startswith("cuda:"):
+        idx = s.split(":", 1)[1].strip()
+        if idx.isdigit():
+            return "cuda", idx
+        return s, None
+
+    return s, None
