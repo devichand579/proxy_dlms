@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -185,6 +187,74 @@ def upload_trace_file_to_hf_dataset(
     return hub_path
 
 
+def iter_local_upload_targets(
+    path: str | Path,
+    *,
+    recursive: bool = False,
+) -> list[tuple[Path, str]]:
+    """Expand a file or directory into ``(local_path, path_in_repo)`` pairs."""
+    root = Path(path).expanduser().resolve()
+    if root.is_file():
+        return [(root, root.name)]
+    if root.is_dir():
+        if recursive:
+            files = sorted(f for f in root.rglob("*") if f.is_file())
+            return [(f, str(f.relative_to(root))) for f in files]
+        return [(f, f.name) for f in sorted(root.iterdir()) if f.is_file()]
+    raise FileNotFoundError(root)
+
+
+def upload_paths_to_hf_dataset(
+    paths: list[str | Path],
+    *,
+    repo_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    revision: Optional[str] = None,
+    private: Optional[bool] = None,
+    token: bool | str | None = True,
+    create_repo: bool = True,
+    recursive: bool = False,
+    dry_run: bool = False,
+) -> list[str]:
+    """Upload files and/or all files in directories. Returns hub paths (flat names or relative paths)."""
+    targets: list[tuple[Path, str]] = []
+    for path in paths:
+        targets.extend(iter_local_upload_targets(path, recursive=recursive))
+    if not targets:
+        raise ValueError("no files to upload (paths must be files or non-empty directories)")
+
+    full_repo = normalize_dataset_repo_id(repo_id or trace_hf_dataset_repo(), namespace)
+    rev = revision if revision is not None else trace_hf_revision()
+    priv = private if private is not None else trace_hf_dataset_private()
+
+    if create_repo and not dry_run:
+        ensure_dataset_repo(full_repo, token=token, private=priv)
+
+    hub_paths: list[str] = []
+    for local_path, hub_path in targets:
+        if dry_run:
+            logger.info("[dry-run] would upload %s -> %s (revision=%s)", local_path, hub_path, rev)
+            hub_paths.append(hub_path)
+            continue
+        upload_file_to_dataset(
+            full_repo,
+            local_path,
+            hub_path,
+            revision=rev,
+            token=token,
+            commit_message=f"eval trace {hub_path} ({local_path.stat().st_size} bytes)",
+        )
+        logger.info(
+            "Uploaded %s -> https://huggingface.co/datasets/%s/tree/%s/%s",
+            local_path,
+            full_repo,
+            rev,
+            hub_path,
+        )
+        hub_paths.append(hub_path)
+    return hub_paths
+
+
 def download_trace_file_from_hf_dataset(
     path_in_repo: str,
     local_path: str | Path | None = None,
@@ -248,3 +318,149 @@ def maybe_upload_eval_trace_file(
     except Exception as e:
         log.warning("Failed to upload trace to HF dataset: %s", e)
         return None
+
+
+def _add_repo_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--repo",
+        "--repo-id",
+        dest="repo_id",
+        default=None,
+        help=f"Hub dataset repo (default: TRACE_HF_DATASET_REPO or {DEFAULT_DATASET_REPO})",
+    )
+    p.add_argument(
+        "--namespace",
+        default=None,
+        help="HF user/org when --repo has no slash (else TRACE_HF_NAMESPACE / whoami)",
+    )
+    p.add_argument("--revision", default=None, help=f"Branch/tag (default: {trace_hf_revision()})")
+    p.add_argument(
+        "--private",
+        action="store_true",
+        help="Create/use a private dataset repo",
+    )
+
+
+def build_argparser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Upload or download eval trace files on the SchedulerLens HF dataset.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python traces/hf_trace_upload.py upload trace_outputs/llada_gsm8k_pd_s512.jsonl
+  python traces/hf_trace_upload.py upload trace_outputs/
+  python traces/hf_trace_upload.py upload trace_outputs/ --recursive
+  python traces/hf_trace_upload.py upload trace_outputs/*.jsonl --repo org/schedulerlens
+  python traces/hf_trace_upload.py download llada_gsm8k_pd_s512.jsonl -o trace_outputs/llada_gsm8k_pd_s512.jsonl
+""".strip(),
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_up = sub.add_parser(
+        "upload",
+        help="Upload one or more files, or every file in each directory",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python traces/hf_trace_upload.py upload trace_outputs/foo.jsonl
+  python traces/hf_trace_upload.py upload trace_outputs/
+  python traces/hf_trace_upload.py upload trace_outputs/ --recursive --dry-run
+""".strip(),
+    )
+    p_up.add_argument(
+        "paths",
+        nargs="+",
+        help="File(s) and/or directory(ies) to upload",
+    )
+    p_up.add_argument(
+        "--recursive",
+        action="store_true",
+        help="When a path is a directory, include files in subdirectories (repo paths keep relative paths)",
+    )
+    p_up.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List uploads without calling the Hub API",
+    )
+    p_up.add_argument(
+        "--no-create-repo",
+        action="store_true",
+        help="Do not call create_repo before uploading",
+    )
+    _add_repo_args(p_up)
+    p_up.set_defaults(func=cmd_upload)
+
+    p_dl = sub.add_parser(
+        "download",
+        help="Download a trace file from the dataset by hub filename",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python traces/hf_trace_upload.py download llada_gsm8k_pd_s512.jsonl
+  python traces/hf_trace_upload.py download llada_gsm8k_pd_s512.jsonl -o /tmp/trace.jsonl
+""".strip(),
+    )
+    p_dl.add_argument("path_in_repo", help="Filename as stored on the Hub (basename)")
+    p_dl.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Local destination path (default: ./<path_in_repo>)",
+    )
+    _add_repo_args(p_dl)
+    p_dl.set_defaults(func=cmd_download)
+
+    return parser
+
+
+def cmd_upload(args: argparse.Namespace) -> int:
+    hub_paths = upload_paths_to_hf_dataset(
+        args.paths,
+        repo_id=args.repo_id,
+        namespace=args.namespace,
+        revision=args.revision,
+        private=True if args.private else None,
+        create_repo=not args.no_create_repo,
+        recursive=args.recursive,
+        dry_run=args.dry_run,
+    )
+    repo = normalize_dataset_repo_id(args.repo_id or trace_hf_dataset_repo(), args.namespace)
+    rev = args.revision or trace_hf_revision()
+    print(f"repo: https://huggingface.co/datasets/{repo}/tree/{rev}")
+    print(f"uploaded: {len(hub_paths)}")
+    for hub_path in hub_paths:
+        print(f"  {hub_path}")
+    return 0
+
+
+def cmd_download(args: argparse.Namespace) -> int:
+    dest = download_trace_file_from_hf_dataset(
+        args.path_in_repo,
+        local_path=args.output,
+        repo_id=args.repo_id,
+        namespace=args.namespace,
+        revision=args.revision,
+    )
+    print(f"downloaded: {dest}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    _repo_root = Path(__file__).resolve().parent.parent
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+    from repo_env_defaults import apply_repo_env_defaults
+
+    apply_repo_env_defaults()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    args = build_argparser().parse_args(argv)
+    try:
+        return int(args.func(args))
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

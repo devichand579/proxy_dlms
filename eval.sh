@@ -43,7 +43,8 @@
 #          Weights/tokenizer load from ./models/<model>/; mask/EOS/EoT ids come from that folder's config when not overridden.
 # --slurm: run the eval command under srun (use when script is submitted via sbatch so the job uses the allocated GPU).
 # Multi-GPU: use --parallel_config <YAML> → launch_eval.py parallel_runs_file= (see config/parallel_eval_runs.yaml).
-# Local GPU: run without --slurm; optionally export CUDA_VISIBLE_DEVICES=0 or 1  before running.
+# Local GPU: run without --slurm; use --device 0|1|cuda:0 or export CUDA_VISIBLE_DEVICES before running.
+# Offline (cached datasets + local W&B): add --offline (run download_datasets.sh first).
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BATCH_SIZE=""
@@ -70,6 +71,10 @@ RESUMABLE=false
 RUN_ID=""
 USE_EOS_HARNESS="true"
 PARALLEL_CONFIG=""
+OFFLINE=false
+DEVICE=""
+LAUNCHER=""
+MODEL_DEVICE="cuda"
 while [[ $# -gt 0 ]]; do
     case $1 in
         --batch_size)
@@ -169,6 +174,18 @@ while [[ $# -gt 0 ]]; do
             USE_EOS_HARNESS="false"
             shift
             ;;
+        --offline)
+            OFFLINE=true
+            shift
+            ;;
+        --device)
+            DEVICE="$2"
+            shift 2
+            ;;
+        --launcher)
+            LAUNCHER="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
@@ -177,6 +194,9 @@ while [[ $# -gt 0 ]]; do
             echo "  EOS decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode)"
             echo "  Alternative multi-GPU: --parallel_config <parallel_runs.yaml> (per-GPU overrides: mode/model/task/batch — delegates to launch_eval.py parallel_runs_file=)"
             echo "Run: --resumable [--run_id] --slurm  |  Multi-GPU: --parallel_config <parallel_runs.yaml>"
+            echo "  Offline: --offline (HF cache + WANDB_MODE=offline; prefetch with download_datasets.sh)"
+            echo "  GPU: --device <0|1|cuda|cuda:0|cpu>  (default cuda on GPU 0 when not --slurm)"
+            echo "  Cluster parallel: --parallel_config <yaml> --launcher slurm_dgx  (auto sbatch N GPUs from login node)"
             exit 1
             ;;
     esac
@@ -205,6 +225,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode, see eval.py)"
     echo "  Run: --slurm (srun for sbatch)  --resumable [--run_id]  (checkpoint under outputs/…)"
     echo "  Multi-GPU: --parallel_config <yaml> per-GPU settings (launch_eval parallel_runs_file=); see docs/evaluation.md"
+    echo "  Offline: --offline  |  GPU: --device <0|1|cuda|cuda:0|cpu>"
     echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm, fhs, top_k_c (top_k+confidence), top_k_m (top_k+top_margin), dus"
     echo "  Few-shot defaults: humaneval/arc 0, gsm8k/math500 4, mbpp 3, arc_challenge_chat 5; block_length defaults: bd 32, fdm 64, dus 16, else gen_length"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
@@ -273,10 +294,46 @@ export LMEVAL_LOG_LEVEL=INFO
 export TOKENIZERS_PARALLELISM=false
 export HF_TOKEN=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
 
-# When running locally (not --slurm), pin GPU 0 by default. Multi-GPU: use launch_eval via --parallel_config.
+if [[ "$OFFLINE" == "true" ]]; then
+    export HF_DATASETS_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+    export HF_HUB_OFFLINE=1
+    export WANDB_MODE=offline
+    export TRACE_HF_UPLOAD=FALSE
+    export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+    export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+fi
+
+# When running locally (not --slurm), pin GPU via --device or default GPU 0.
 if [[ "$SLURM_MODE" != "true" ]]; then
     export CUDA_DEVICE_ORDER=PCI_BUS_ID
-    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+    if [[ -n "$DEVICE" ]]; then
+        case "$DEVICE" in
+            cpu|CPU)
+                export CUDA_VISIBLE_DEVICES=""
+                MODEL_DEVICE="cpu"
+                ;;
+            cuda)
+                export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+                MODEL_DEVICE="cuda"
+                ;;
+            cuda:*)
+                GPU_IDX="${DEVICE#cuda:}"
+                export CUDA_VISIBLE_DEVICES="$GPU_IDX"
+                MODEL_DEVICE="cuda"
+                ;;
+            [0-9]*)
+                export CUDA_VISIBLE_DEVICES="$DEVICE"
+                MODEL_DEVICE="cuda"
+                ;;
+            *)
+                MODEL_DEVICE="$DEVICE"
+                ;;
+        esac
+    else
+        export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+        MODEL_DEVICE="cuda"
+    fi
 fi
 
 export WANDB_API_KEY=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
@@ -313,6 +370,15 @@ if [[ -n "$PARALLEL_CONFIG" ]]; then
         exit 1
     fi
     cd "$SCRIPT_ROOT" || exit 1
+    PARALLEL_SLOTS=$(python -c "from launch_eval import count_parallel_slots; print(count_parallel_slots('$ABS_PARALLEL_CFG'))")
+    if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+        SLURM_GPUS="${SLURM_GPUS_ON_NODE:-${SLURM_GPUS:-}}"
+        if [[ -n "$SLURM_GPUS" && "$SLURM_GPUS" -lt "$PARALLEL_SLOTS" ]]; then
+            echo "Error: parallel_config has ${PARALLEL_SLOTS} slots but SLURM job has ${SLURM_GPUS} GPU(s)."
+            echo "  Set #SBATCH --gres=gpu:${PARALLEL_SLOTS} in eval.sh (or submit from login with --launcher slurm_dgx)."
+            exit 1
+        fi
+    fi
     OVERRIDES=(parallel_runs_file="$ABS_PARALLEL_CFG")
     [[ -n "$BATCH_SIZE" ]] && OVERRIDES+=(batch_size="$BATCH_SIZE")
     [[ -n "$WANDB" ]] && OVERRIDES+=(wandb="$WANDB")
@@ -327,6 +393,9 @@ if [[ -n "$PARALLEL_CONFIG" ]]; then
     [[ -n "$TOP_K_OVERRIDE" ]] && OVERRIDES+=(top_k="$TOP_K_OVERRIDE")
     [[ -n "$STEPS_OVERRIDE" ]] && OVERRIDES+=(steps="$STEPS_OVERRIDE")
     [[ -n "$GEN_LENGTH_OVERRIDE" ]] && OVERRIDES+=(gen_length="$GEN_LENGTH_OVERRIDE")
+    [[ "$OFFLINE" == "true" ]] && OVERRIDES+=(offline=true)
+    [[ -n "$DEVICE" ]] && OVERRIDES+=(device="$DEVICE")
+    [[ -n "$LAUNCHER" ]] && OVERRIDES+=(launcher="$LAUNCHER")
     exec python launch_eval.py "${OVERRIDES[@]}"
 fi
 
@@ -424,7 +493,7 @@ run_eval_for_task() {
     fi
 
     # Build model_args (base args + optional intervention params + checkpoint paths when resumable)
-    MODEL_ARGS="model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},strategy=${STRATEGY},top_k=${TOP_K},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME},trace_name=${OUTPUT_SUFFIX},use_eos_harness=${USE_EOS_HARNESS}"
+    MODEL_ARGS="model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},strategy=${STRATEGY},top_k=${TOP_K},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME},trace_name=${OUTPUT_SUFFIX},use_eos_harness=${USE_EOS_HARNESS},device=${MODEL_DEVICE}"
     if [[ "$RESUMABLE" == "true" ]]; then
         MODEL_ARGS="${MODEL_ARGS},resumable=true,output_dir=${CHECKPOINT_DIR}"
     fi
@@ -444,6 +513,8 @@ run_eval_for_task() {
     echo "  Block Length: $BLOCK_LENGTH"
     echo "  Top-k: $TOP_K"
     echo "  Compile Model: $COMPILE_MODEL"
+    echo "  Device: $MODEL_DEVICE (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset})"
+    echo "  Offline: ${OFFLINE}"
     echo "  use_eos_harness: $USE_EOS_HARNESS (false = full steps + full-tail decode, reference LLaDA-style)"
     echo "  Num Fewshot: $NUM_FEWSHOT"
     if [[ -n "$INTERVENTION_MODE" ]]; then
