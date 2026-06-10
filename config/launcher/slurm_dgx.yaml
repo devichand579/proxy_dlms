@@ -26,7 +26,7 @@ hydra:
       open_mode: append
 
     setup:
-      - ssource $HOME/miniconda3/etc/profile.d/conda.sh
+      - source $HOME/miniconda3/etc/profile.d/conda.sh
       - conda activate strace
       # Activate these if you want complete offline running
       - export HF_DATASETS_OFFLINE=1
