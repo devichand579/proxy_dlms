@@ -92,8 +92,6 @@ def get_num_fewshot(task_name: str) -> int:
     return 0
 
 
-
-
 def _apply_trace_hf_env(env: dict[str, str], cfg: dict, *, offline: bool = False) -> None:
     """Env vars read by ``traces.hf_trace_upload`` when eval closes a trace file."""
     tracing = _to_bool(cfg.get("tracing_enabled", True))
@@ -143,8 +141,7 @@ def _apply_device_env(env: dict[str, str], cfg: DictConfig, extra_env: Optional[
 def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None) -> int:
     """Build and run one accelerate eval; optional env overrides (e.g. CUDA_VISIBLE_DEVICES per slot)."""
     apply_repo_env_defaults()
-    # Use script dir as project root so SLURM jobs (which may run from sweep dir) still find eval.py
-    project_root = Path(__file__).resolve().parent
+    project_root = _REPO_ROOT
     batch_size = int(cfg.get("batch_size", 4))
     mode_input = str(cfg.get("mode", "pd")).strip().lower()
     task_name = str(cfg.get("task_name", "gsm8k"))
@@ -193,33 +190,23 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     run_id = cfg.get("run_id") or None
 
     run_id_explicit = bool(resumable and run_id)
+    base_suffix = _eval_output_basename(
+        model,
+        task_name,
+        mode,
+        strategy,
+        steps=steps,
+        intervention_mode=intervention_mode,
+        intervention_steps=intervention_steps,
+        intervention_k=intervention_k,
+        include_steps=True,
+    )
     if run_id_explicit:
         output_suffix = str(run_id)
     elif resumable:
-        output_suffix = _eval_output_basename(
-            model,
-            task_name,
-            mode,
-            strategy,
-            steps=steps,
-            intervention_mode=intervention_mode,
-            intervention_steps=intervention_steps,
-            intervention_k=intervention_k,
-            include_steps=True,
-        )
+        output_suffix = base_suffix
     else:
-        base = _eval_output_basename(
-            model,
-            task_name,
-            mode,
-            strategy,
-            steps=steps,
-            intervention_mode=intervention_mode,
-            intervention_steps=intervention_steps,
-            intervention_k=intervention_k,
-            include_steps=True,
-        )
-        output_suffix = f"{base}_{timestamp}"
+        output_suffix = f"{base_suffix}_{timestamp}"
     wandb_name = output_suffix
 
     checkpoint_dir = f"outputs/{output_suffix}" if resumable else None
@@ -286,7 +273,6 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     print()
 
     cmd = [
-        "env", f"TRACING_ENABLED={'TRUE' if tracing_enabled else 'FALSE'}",
         "accelerate", "launch", "eval.py",
         "--tasks", task_name,
         "--batch_size", str(batch_size),
@@ -374,9 +360,19 @@ def _slurm_gpus_allocated() -> Optional[int]:
     return None
 
 
+def _available_gpu_count() -> int:
+    """GPUs on this node: SLURM allocation when set, else torch.cuda.device_count()."""
+    allocated = _slurm_gpus_allocated()
+    if allocated is not None:
+        return allocated
+    return _count_visible_gpus()
+
+
+_LAUNCHER_DIR = _REPO_ROOT / "config" / "launcher"
+
+
 def _launcher_name_from_argv() -> Optional[str]:
-    argv = _normalize_hydra_cli(sys.argv)
-    for arg in argv[1:]:
+    for arg in sys.argv[1:]:
         if arg.startswith("launcher="):
             val = arg.split("=", 1)[1].strip()
             if val:
@@ -398,7 +394,7 @@ def _selected_launcher_name() -> str:
 
 
 def _load_launcher_yaml(name: str) -> dict[str, Any]:
-    path = Path(__file__).resolve().parent / "config" / "launcher" / f"{name}.yaml"
+    path = _LAUNCHER_DIR / f"{name}.yaml"
     if not path.is_file():
         return {}
     with path.open(encoding="utf-8") as f:
@@ -422,10 +418,6 @@ def _resolved_hydra_launcher_cfg() -> dict[str, Any]:
     if name == "local":
         return {}
     return _load_launcher_yaml(name)
-
-
-def _is_slurm_launcher(_cfg: DictConfig) -> bool:
-    return _selected_launcher_name().lower().startswith("slurm")
 
 
 def _hydra_multirun_active() -> bool:
@@ -476,6 +468,35 @@ def _parallel_slurm_worker(repo_root: str, overrides: list[str], setup_cmds: lis
     return int(subprocess.run(cmd, env=env, cwd=root).returncode)
 
 
+def _build_submitit_slurm_params(hlaunch: dict[str, Any], slot_count: int) -> dict[str, Any]:
+    """Map launcher YAML → submitit SlurmExecutor params (whitelist only; no Hydra plugin keys)."""
+    params: dict[str, Any] = {
+        "slurm_partition": hlaunch.get("partition"),
+        "timeout_min": int(hlaunch.get("timeout_min", 4320)),
+        "mem_gb": float(hlaunch.get("mem_gb", 64)),
+        "cpus_per_task": int(hlaunch.get("cpus_per_task", 8)),
+        "nodes": int(hlaunch.get("nodes", 1)),
+        "tasks_per_node": int(hlaunch.get("tasks_per_node", 1)),
+        "gpus_per_node": int(slot_count),
+        "name": "strace_parallel_eval",
+    }
+    qos = hlaunch.get("qos")
+    if qos is not None and str(qos).strip().lower() not in ("", "null", "none"):
+        params["slurm_qos"] = str(qos).strip()
+    addl = hlaunch.get("additional_parameters")
+    if isinstance(addl, dict) and addl:
+        params["slurm_additional_parameters"] = dict(addl)
+    return {k: v for k, v in params.items() if v is not None}
+
+
+def _parallel_submitit_folder(hlaunch: dict[str, Any]) -> Path:
+    """Dedicated folder so AutoExecutor does not reuse stale params from other jobs."""
+    raw = str(hlaunch.get("submitit_folder", "job_outputs/strace_parallel"))
+    folder = Path(raw.replace("%j", "strace_parallel"))
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 def _submit_parallel_slurm_job(cfg: DictConfig, slot_count: int) -> int:
     import submitit
 
@@ -487,32 +508,16 @@ def _submit_parallel_slurm_job(cfg: DictConfig, slot_count: int) -> int:
             "Pass launcher=slurm_dgx (etc.) or submit via sbatch/salloc."
         )
 
-    folder = str(hlaunch.get("submitit_folder", "job_outputs/%j"))
-    executor = submitit.AutoExecutor(folder=folder)
+    params = _build_submitit_slurm_params(hlaunch, slot_count)
+    folder = _parallel_submitit_folder(hlaunch)
+    executor_cls = getattr(submitit, "SlurmExecutor", submitit.AutoExecutor)
+    executor = executor_cls(folder=str(folder))
+    executor.update_parameters(**params)
 
-    params: dict[str, Any] = {
-        "slurm_partition": hlaunch.get("partition"),
-        "timeout_min": hlaunch.get("timeout_min", 4320),
-        "mem_gb": hlaunch.get("mem_gb", 64),
-        "cpus_per_worker": hlaunch.get("cpus_per_task", 8),
-        "nodes": hlaunch.get("nodes", 1),
-        "name": "strace_parallel_eval",
-        "gres": f"gpu:{slot_count}",
-    }
-    qos = hlaunch.get("qos")
-    if qos is not None and str(qos).strip().lower() not in ("", "null", "none"):
-        params["slurm_qos"] = qos
-    addl = hlaunch.get("additional_parameters") or {}
-    if isinstance(addl, dict) and addl:
-        params["slurm_additional_parameters"] = addl
-
-    executor.update_parameters(**{k: v for k, v in params.items() if v is not None})
-
-    repo_root = Path(__file__).resolve().parent
     overrides = _cfg_cli_overrides(cfg)
     setup_cmds = [str(x) for x in (hlaunch.get("setup") or [])]
 
-    job = executor.submit(_parallel_slurm_worker, str(repo_root), overrides, setup_cmds)
+    job = executor.submit(_parallel_slurm_worker, str(_REPO_ROOT), overrides, setup_cmds)
     print(
         f"Submitted parallel SLURM job {job.job_id} via launcher={launcher_name} "
         f"({slot_count} GPU(s), partition={params.get('slurm_partition')})"
@@ -525,14 +530,10 @@ def _should_submit_parallel_slurm(cfg: DictConfig, slot_count: int) -> bool:
         return False
     if _hydra_multirun_active():
         return False
-    if slot_count < 1 or not _is_slurm_launcher(cfg):
+    if slot_count < 1 or not _selected_launcher_name().lower().startswith("slurm"):
         return False
-    allocated = _slurm_gpus_allocated()
-    visible = _count_visible_gpus()
-    if os.environ.get("SLURM_JOB_ID"):
-        have = allocated if allocated is not None else visible
-        if have >= slot_count:
-            return False
+    if os.environ.get("SLURM_JOB_ID") and _available_gpu_count() >= slot_count:
+        return False
     return True
 
 
@@ -541,9 +542,7 @@ def _run_parallel_evals(cfg: DictConfig, slot_specs: list[dict[str, Any]]) -> in
     if n == 0:
         raise ValueError("parallel_runs_file is empty")
     if os.environ.get("SLURM_JOB_ID"):
-        allocated = _slurm_gpus_allocated()
-        visible = _count_visible_gpus()
-        have = allocated if allocated is not None else visible
+        have = _available_gpu_count()
         if have and have < n:
             raise RuntimeError(
                 f"parallel_runs_file defines {n} GPU slots but this SLURM allocation has {have} GPU(s). "
@@ -597,10 +596,9 @@ def _normalize_hydra_cli(argv: list[str]) -> list[str]:
         return argv
 
     # Discover valid launcher names from config group.
-    launcher_dir = Path(__file__).resolve().parent / "config" / "launcher"
     valid_launchers: set[str] = set()
-    if launcher_dir.is_dir():
-        valid_launchers = {p.stem for p in launcher_dir.glob("*.yaml")}
+    if _LAUNCHER_DIR.is_dir():
+        valid_launchers = {p.stem for p in _LAUNCHER_DIR.glob("*.yaml")}
 
     # Hydra options that take a value as the next argv token.
     opts_with_value = {
@@ -645,7 +643,7 @@ def _normalize_hydra_cli(argv: list[str]) -> list[str]:
     return [argv[0], *flags, *overrides]
 
 
-_CONFIG_DIR = Path(__file__).resolve().parent / "config"
+_CONFIG_DIR = _REPO_ROOT / "config"
 
 
 @hydra.main(version_base="1.2", config_path=str(_CONFIG_DIR), config_name="lmeval")
