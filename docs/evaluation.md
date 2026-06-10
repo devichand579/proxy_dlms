@@ -163,7 +163,7 @@ YAML keys `**gen_length**`, `**steps**`, and `**block_length**` live in `config/
 
 **Multi-GPU (one job):** set `parallel_runs_file` in `config/lmeval.yaml` or on the CLI to a YAML file (list of dicts, one per GPU; see `config/parallel_eval_runs.yaml`). `launch_eval.py` merges each dict onto the base config and binds **GPU `i`** to `CUDA_VISIBLE_DEVICES=i` unless that slot sets `device:` (e.g. `device: cuda:1`).
 
-**From a SLURM login node (auto-submit one N-GPU job):** add a cluster launcher — the slot count sets `--gres=gpu:N`. Inside the allocation (or after auto-submit), evals run in parallel on GPUs 0…N−1.
+**From a SLURM login node (auto-submit one N-GPU job):** add a cluster launcher — the slot count sets `--gres=gpu:N`. Launcher detection uses Hydra's config-group choice (`HydraConfig.runtime.choices.launcher`), not a top-level `cfg.launcher` key. Inside the allocation (or after auto-submit), evals run in parallel on GPUs 0…N−1.
 
 ```bash
 # Login node → one DGX job with 2 GPUs (matches 2 entries in parallel_eval_runs.yaml)
