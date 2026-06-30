@@ -40,6 +40,7 @@ def generate(
     eot_id: Optional[int] = LLADA_DEFAULT_EOT_ID,
     model_path: Optional[Union[str, Path]] = None,
     use_eos_harness: bool = True,
+    invalid_token_ids: Optional[torch.Tensor] = None,
 ):
     """Batched mask-diffusion `generate` for all rows in `input_ids`.
 
@@ -101,7 +102,8 @@ def generate(
         gen, steps_taken = generate_fhs(
             model, input_ids, attention_mask,
             steps=steps, gen_length=gen_length, temperature=1.0,
-            pass_time_to_model=True, **common_trace_kw,
+            pass_time_to_model=True, invalid_token_ids=invalid_token_ids,
+            **common_trace_kw,
         )
         blocks = 0
     elif mode == "eb_sampler":
