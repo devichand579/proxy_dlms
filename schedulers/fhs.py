@@ -12,7 +12,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
-from schedulers.utils import check_eos_stop_condition, check_all_generated_unmasked, mask_eos_eot_logits
+from schedulers.utils import check_eos_stop_condition, check_all_generated_unmasked, mask_eos_eot_logits, mask_invalid_token_logits
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
     from traces.trace_wrapper import trace_scheduler
@@ -139,6 +139,7 @@ def generate_fhs_extrapolation(
     intervention_steps=None,
     intervention_k=1,
     use_eos_harness: bool = True,
+    invalid_token_ids: Optional[torch.Tensor] = None,
 ):
     '''
     Args:
@@ -209,6 +210,7 @@ def generate_fhs_extrapolation(
                 logits = _model_logits(model, x, attention_mask, t_cond)
 
                 mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
+                mask_invalid_token_logits(logits, invalid_token_ids)
 
                 mu = logits
                 tau_curr = tau_new.clone()
@@ -286,6 +288,7 @@ def generate_fhs_predictor_corrector(
     intervention_steps=None,
     intervention_k=1,
     use_eos_harness: bool = True,
+    invalid_token_ids: Optional[torch.Tensor] = None,
 ):
     '''
     Args:
@@ -353,6 +356,7 @@ def generate_fhs_predictor_corrector(
             logits = _model_logits(model, x, attention_mask, t_cond)
 
             mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
+            mask_invalid_token_logits(logits, invalid_token_ids)
 
             mu_pred = logits
             seq_len = x.shape[1]
@@ -378,6 +382,7 @@ def generate_fhs_predictor_corrector(
                 logits_corr = _model_logits(model, x, attention_mask, t_cond)
 
                 mask_eos_eot_logits(logits_corr, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
+                mask_invalid_token_logits(logits_corr, invalid_token_ids)
 
                 mu_corr = logits_corr
 
@@ -423,6 +428,7 @@ def generate_fhs(
     intervention_steps=None,
     intervention_k=1,
     use_eos_harness: bool = True,
+    invalid_token_ids: Optional[torch.Tensor] = None,
 ):
     '''
     Matches paper recommendation:
@@ -454,6 +460,7 @@ def generate_fhs(
         intervention_steps=intervention_steps,
         intervention_k=intervention_k,
         use_eos_harness=use_eos_harness,
+        invalid_token_ids=invalid_token_ids,
     )
     if steps <= 128:
         return generate_fhs_extrapolation(

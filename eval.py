@@ -3,6 +3,7 @@ import sys
 import torch
 import re
 from pathlib import Path
+from typing import Optional
 import random
 import numpy as np
 from lm_eval.__main__ import cli_evaluate
@@ -371,6 +372,13 @@ class LLaDAEvalHarness(LM):
         # Set up logger
         self.logger = setup_logger(trace_name)
 
+        # Token ids the tokenizer cannot decode to a string (reserved/undefined slots in the
+        # model's padded output vocab). Greedy decoding never selects them, but stochastic
+        # schedulers (FHS, temperature>0) can; sampling one later crashes
+        # convert_tokens_to_string ("expected str instance, NoneType found"). Precompute once
+        # so the FHS scheduler can mask their logits to -inf.
+        self._invalid_token_ids = self._compute_invalid_token_ids()
+
         if self.resumable and self.output_dir:
             _agg = _load_diffusion_metrics_aggregate(self.output_dir)
             if _agg:
@@ -419,6 +427,36 @@ class LLaDAEvalHarness(LM):
         self.logger.info(f"Intervention mode: {self.intervention_mode}")
         self.logger.info(f"Intervention steps: {self.intervention_steps}")
         self.logger.info(f"Intervention k: {self.intervention_k}")
+
+    def _compute_invalid_token_ids(self) -> Optional[torch.Tensor]:
+        """Return a LongTensor of token ids with no decodable string in the tokenizer.
+
+        These are reserved/undefined slots within the model's (padded) output vocab that
+        ``convert_ids_to_tokens`` maps to ``None``. A stochastic sampler can draw one of
+        them, after which ``convert_tokens_to_string`` fails on ``"".join(...)``. Masking
+        their logits to ``-inf`` (see ``schedulers.utils.mask_invalid_token_logits``)
+        prevents that without otherwise changing sampling. Returns ``None`` when every id
+        is decodable.
+        """
+        try:
+            vocab_size = int(getattr(self.model.config, "vocab_size", 0)) or len(self.tokenizer)
+        except Exception:
+            vocab_size = len(self.tokenizer)
+        try:
+            tokens = self.tokenizer.convert_ids_to_tokens(list(range(vocab_size)))
+        except Exception as e:
+            self.logger.warning("Could not compute invalid token ids: %s", e)
+            return None
+        invalid = [i for i, tok in enumerate(tokens) if tok is None]
+        if not invalid:
+            self.logger.info("No undecodable token ids found in vocab (size=%d)", vocab_size)
+            return None
+        self.logger.info(
+            "Masking %d undecodable token id(s) for stochastic sampling (vocab size=%d)",
+            len(invalid),
+            vocab_size,
+        )
+        return torch.tensor(invalid, dtype=torch.long, device=self.device)
 
     def _maybe_persist_wandb_run_id(self) -> None:
         """Write ``output_dir/.wandb_id`` on first success so a later process can pass ``resume=allow,id=...``."""
@@ -675,6 +713,7 @@ class LLaDAEvalHarness(LM):
                         eot_id=self.eot_id,
                         use_eos_harness=self.use_eos_harness,
                         model_path=self._model_path,
+                        invalid_token_ids=self._invalid_token_ids,
                     )
 
                     prompt_len = int(input_ids.shape[1])

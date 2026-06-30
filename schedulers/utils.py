@@ -17,6 +17,25 @@ def mask_eos_eot_logits(
         logits[:, :, eot_id] = -torch.inf
 
 
+def mask_invalid_token_logits(
+    logits: torch.Tensor,
+    invalid_token_ids: Optional[torch.Tensor],
+) -> None:
+    """In-place set ``-inf`` for token ids that have no decodable string in the tokenizer.
+
+    The model's output logits span the full (padded) embedding matrix, which includes
+    reserved/undefined ids the tokenizer maps to ``None``. Greedy decoding never selects
+    them, but stochastic samplers (e.g. FHS with ``temperature>0``) can, which later
+    crashes ``convert_tokens_to_string`` ("expected str instance, NoneType found").
+    Masking them here guarantees only decodable tokens are ever sampled.
+    """
+    if invalid_token_ids is None or invalid_token_ids.numel() == 0:
+        return
+    if invalid_token_ids.device != logits.device:
+        invalid_token_ids = invalid_token_ids.to(logits.device)
+    logits[:, :, invalid_token_ids] = -torch.inf
+
+
 def add_gumbel_noise(logits, temperature):
     """Gumbel–max noise for sampling; `temperature==0` passthrough. Uses float64 (MDM note)."""
     if temperature == 0:
