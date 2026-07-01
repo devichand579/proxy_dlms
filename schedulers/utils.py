@@ -24,7 +24,7 @@ def mask_invalid_token_logits(
     """In-place set ``-inf`` for token ids that have no decodable string in the tokenizer.
 
     The model's output logits span the full (padded) embedding matrix, which includes
-    reserved/undefined ids the tokenizer maps to ``None``. Greedy decoding never selects
+    reserved/undefined ids the tokenizer cannot decode. Greedy decoding never selects
     them, but stochastic samplers (e.g. FHS with ``temperature>0``) can, which later
     crashes ``convert_tokens_to_string`` ("expected str instance, NoneType found").
     Masking them here guarantees only decodable tokens are ever sampled.
@@ -33,7 +33,19 @@ def mask_invalid_token_logits(
         return
     if invalid_token_ids.device != logits.device:
         invalid_token_ids = invalid_token_ids.to(logits.device)
-    logits[:, :, invalid_token_ids] = -torch.inf
+    logits[..., invalid_token_ids] = -torch.inf
+
+
+def zero_invalid_token_probs(
+    probs: torch.Tensor,
+    invalid_token_ids: Optional[torch.Tensor],
+) -> None:
+    """In-place zero probability mass on undecodable token ids, then safe to renormalize."""
+    if invalid_token_ids is None or invalid_token_ids.numel() == 0:
+        return
+    if invalid_token_ids.device != probs.device:
+        invalid_token_ids = invalid_token_ids.to(probs.device)
+    probs[..., invalid_token_ids] = 0.0
 
 
 def add_gumbel_noise(logits, temperature):

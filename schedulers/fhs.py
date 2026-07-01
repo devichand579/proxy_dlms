@@ -12,7 +12,13 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
-from schedulers.utils import check_eos_stop_condition, check_all_generated_unmasked, mask_eos_eot_logits, mask_invalid_token_logits
+from schedulers.utils import (
+    check_eos_stop_condition,
+    check_all_generated_unmasked,
+    mask_eos_eot_logits,
+    mask_invalid_token_logits,
+    zero_invalid_token_probs,
+)
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
     from traces.trace_wrapper import trace_scheduler
@@ -74,7 +80,12 @@ def _rescale_hitting_times_survival(tau_per_token, masked, k, tau_new, tau_upper
     tau_b[mask_b] = (tau_b[mask_b] - tau_new) / denom
 
 
-def sample_categorical(logits, temperature=1.0, use_fp64=True):
+def sample_categorical(
+    logits,
+    temperature=1.0,
+    use_fp64=True,
+    invalid_token_ids: Optional[torch.Tensor] = None,
+):
     """
     Sample from a categorical distribution.
 
@@ -82,7 +93,12 @@ def sample_categorical(logits, temperature=1.0, use_fp64=True):
     logits are pathological (e.g. after B.4 EOS/EoT ``-inf`` masking) or extrapolation produces non-finite values.
     """
     if temperature == 0.0:
-        return torch.argmax(logits, dim=-1)
+        masked = logits
+        if invalid_token_ids is not None and invalid_token_ids.numel() > 0:
+            masked = logits.clone()
+            mask_invalid_token_logits(masked.unsqueeze(0), invalid_token_ids)
+            masked = masked.squeeze(0)
+        return torch.argmax(masked, dim=-1)
 
     if use_fp64:
         logits = logits.double()
@@ -96,13 +112,16 @@ def sample_categorical(logits, temperature=1.0, use_fp64=True):
     scaled = logits / temperature if temperature != 1.0 else logits
     probs = F.softmax(scaled, dim=-1)
     probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+    zero_invalid_token_probs(probs, invalid_token_ids)
     denom = probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
     probs = (probs / denom).clamp(min=0.0)
     denom2 = probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
     probs = probs / denom2
 
     if not torch.isfinite(probs).all():
-        return torch.argmax(logits, dim=-1)
+        fallback = logits.clone()
+        mask_invalid_token_logits(fallback.unsqueeze(0), invalid_token_ids)
+        return torch.argmax(fallback.squeeze(0), dim=-1)
 
     return torch.multinomial(probs, num_samples=1, replacement=True).squeeze(-1)
 
@@ -233,6 +252,7 @@ def generate_fhs_extrapolation(
                     coeff1 * mu + coeff2 * mu_prev,
                     mu,
                 )
+                mask_invalid_token_logits(mu_hat, invalid_token_ids)
 
             # Decode ONE token per batch; tau_new = actual hitting time; rescale on survival
             seq_len = x.shape[1]
@@ -242,7 +262,7 @@ def generate_fhs_extrapolation(
                     continue
                 if not (0 <= k < seq_len):
                     continue
-                token = sample_categorical(mu_hat[b, k], temperature)
+                token = sample_categorical(mu_hat[b, k], temperature, invalid_token_ids=invalid_token_ids)
                 x[b, k] = token
                 masked[b, k] = False
                 _rescale_hitting_times_survival(
@@ -368,7 +388,7 @@ def generate_fhs_predictor_corrector(
                     continue
                 if not (0 <= k < seq_len):
                     continue
-                token = sample_categorical(mu_pred[b, k], temperature)
+                token = sample_categorical(mu_pred[b, k], temperature, invalid_token_ids=invalid_token_ids)
                 x[b, k] = token
                 masked[b, k] = False
                 decoded_this_chunk[b].append(k)
@@ -389,7 +409,7 @@ def generate_fhs_predictor_corrector(
                 # Refine tokens at positions decoded in predictor (re-sample, no new unmasking)
                 for b in range(prompt.shape[0]):
                     for k in decoded_this_chunk[b]:
-                        token = sample_categorical(mu_corr[b, k], temperature)
+                        token = sample_categorical(mu_corr[b, k], temperature, invalid_token_ids=invalid_token_ids)
                         x[b, k] = token
 
                 del logits_corr, mu_corr

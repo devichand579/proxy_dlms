@@ -431,23 +431,37 @@ class LLaDAEvalHarness(LM):
     def _compute_invalid_token_ids(self) -> Optional[torch.Tensor]:
         """Return a LongTensor of token ids with no decodable string in the tokenizer.
 
-        These are reserved/undefined slots within the model's (padded) output vocab that
-        ``convert_ids_to_tokens`` maps to ``None``. A stochastic sampler can draw one of
-        them, after which ``convert_tokens_to_string`` fails on ``"".join(...)``. Masking
-        their logits to ``-inf`` (see ``schedulers.utils.mask_invalid_token_logits``)
-        prevents that without otherwise changing sampling. Returns ``None`` when every id
-        is decodable.
+        The model's padded output vocab includes ids beyond the tokenizer's BPE decoder
+        (Dream: ids 151667..152063). ``convert_ids_to_tokens`` may return ``None`` or an
+        empty piece for those slots; either can break ``convert_tokens_to_string``. Mask
+        their logits to ``-inf`` so stochastic FHS never samples them.
         """
         try:
             vocab_size = int(getattr(self.model.config, "vocab_size", 0)) or len(self.tokenizer)
         except Exception:
             vocab_size = len(self.tokenizer)
+
+        valid_ids: set[int] = set()
         try:
-            tokens = self.tokenizer.convert_ids_to_tokens(list(range(vocab_size)))
-        except Exception as e:
-            self.logger.warning("Could not compute invalid token ids: %s", e)
-            return None
-        invalid = [i for i, tok in enumerate(tokens) if tok is None]
+            valid_ids.update(getattr(self.tokenizer, "decoder", {}).keys())
+        except Exception:
+            pass
+        try:
+            valid_ids.update(getattr(self.tokenizer, "added_tokens_encoder", {}).values())
+        except Exception:
+            pass
+
+        invalid: list[int] = []
+        if valid_ids:
+            invalid = [i for i in range(vocab_size) if i not in valid_ids]
+        else:
+            try:
+                tokens = self.tokenizer.convert_ids_to_tokens(list(range(vocab_size)))
+                invalid = [i for i, tok in enumerate(tokens) if tok is None]
+            except Exception as e:
+                self.logger.warning("Could not compute invalid token ids: %s", e)
+                return None
+
         if not invalid:
             self.logger.info("No undecodable token ids found in vocab (size=%d)", vocab_size)
             return None
@@ -457,6 +471,17 @@ class LLaDAEvalHarness(LM):
             vocab_size,
         )
         return torch.tensor(invalid, dtype=torch.long, device=self.device)
+
+    def _clamp_generated_for_decode(self, generated: torch.Tensor, prompt_len: int) -> torch.Tensor:
+        """Replace any sampled padding/reserved ids with EOS so ``batch_decode`` cannot crash."""
+        if self._invalid_token_ids is None or self._invalid_token_ids.numel() == 0:
+            return generated
+        out = generated.clone()
+        tail = out[:, prompt_len:]
+        invalid = self._invalid_token_ids.to(out.device)
+        tail[torch.isin(tail, invalid)] = self.eos_id
+        out[:, prompt_len:] = tail
+        return out
 
     def _maybe_persist_wandb_run_id(self) -> None:
         """Write ``output_dir/.wandb_id`` on first success so a later process can pass ``resume=allow,id=...``."""
@@ -717,6 +742,7 @@ class LLaDAEvalHarness(LM):
                     )
 
                     prompt_len = int(input_ids.shape[1])
+                    generated = self._clamp_generated_for_decode(generated, prompt_len)
                     if not self.use_eos_harness:
                         chunk_gen_texts = self.tokenizer.batch_decode(
                             generated[:, prompt_len:], skip_special_tokens=True
