@@ -207,4 +207,42 @@ python launch_eval.py task_name=gsm8k,humaneval mode=pd,bd --multirun launcher=s
 
 Install: `pip install hydra-core hydra-submitit-launcher` (or `requirements.txt`).
 
+---
+
+## Fetching W&B metrics (`fetch_evals/`)
+
+After eval runs are logged to Weights & Biases, export a flat CSV with task scores and NFE:
+
+```bash
+cd /path/to/Strace
+python fetch_evals/fetch_wandb_metrics.py
+```
+
+**Default output:** `fetch_evals/strace_metrics.csv`
+
+**W&B project:** `devichand579-iit-kharagpur/strace` (override with `--project`).
+
+Run names are parsed as `{model}_{task}_{mode}_s{steps}` (same as `eval.sh` / resumable `outputs/{run_id}/`).
+
+### Metrics exported
+
+| Task | Score column |
+| ---- | ------------ |
+| `gsm8k` | `strict_match` (not flexible `exact_match`) |
+| `minerva_math500` | `exact_match` (fallback `math_verify`) |
+| `arc_challenge_chat` | `exact_match` |
+| `mbpp`, `humaneval` | `pass_at_1` |
+| All runs | `avg_nfe_per_sample` (`global/avg_nfe_per_sample` from eval) |
+
+The script reads W&B run summaries first, then falls back to W&B history, then local checkpoint files under `outputs/{run}/` when `--no-merge-local` is not set (`results.json`, `.eval_diffusion_metrics.json`, optional SchedulerLens `metrics.json`).
+
+### Options
+
+```bash
+python fetch_evals/fetch_wandb_metrics.py --include-unfinished   # include crashed/running runs
+python fetch_evals/fetch_wandb_metrics.py --no-merge-local       # W&B only
+python fetch_evals/fetch_wandb_metrics.py -o fetch_evals/my.csv  # custom output path
+```
+---
+
 **EOS harness (`use_eos_harness`, default `true` in `config/lmeval.yaml`):** when `true`, schedulers may exit early on the batch EOS stop condition and chunk decode truncates at the first EOS (legacy harness behavior). For reference LLaDA-style sampling (full step budget, `batch_decode` of the full generated tail), set `**use_eos_harness=false`** in YAML, e.g. `python launch_eval.py task_name=gsm8k mode=pd use_eos_harness=false`, or in `**eval.sh`:** `--no_eos_harness` or `--use_eos_harness false`. The same flag is passed into `LLaDAEvalHarness` via `model_args`. Scheduler smoke tests use `**--no-eos-harness`** (hyphens) on `test_schedulers.py` — see [Scheduler testing](scheduler-testing.md).

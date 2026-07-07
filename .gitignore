@@ -61,9 +61,9 @@ checkpoints/
 # Logs and outputs
 *.log
 logs/
-wandb/
+/wandb/
 outputs/
-trace_outputs/
+trace_outputs/₹
 html/
 png/
 output*.txt
