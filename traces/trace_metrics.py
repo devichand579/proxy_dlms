@@ -76,9 +76,21 @@ def lm_eval_task_name(task: str) -> str:
 
 
 def eval_num_fewshot(task_name: str) -> int:
-    from cst.eval_data.compose import eval_num_fewshot as _fn
-
-    return _fn(task_name)
+    
+    t = str(task_name).strip().lower()
+    if "humaneval" in t:
+        return 0
+    if "gsm8k" in t:
+        return 4
+    if "math500" in t or "minerva_math500" in t:
+        return 4
+    if "mbpp3" in t:
+        return 3
+    if "mbpp" in t:
+        return 3
+    if "arc_challenge_chat" in t:
+        return 5
+    return 0
 
 
 def decode_generation_from_trace(
