@@ -96,7 +96,7 @@ Resumable via CSV; skips files that already have NPZ on Hub (use `--force` to re
 
 ---
 
-## Smoke test (hooks)
+## Testing (hooks)
 
 Quick check that tracing hooks work for all schedulers, with batched boolean-transfer schedulers at `batch_size=2`:
 
