@@ -428,7 +428,6 @@ def generate_fhs_predictor_corrector(
 
 
 @torch.no_grad()
-@trace_scheduler()  # tracing decorator
 def generate_fhs(
     model,
     prompt,
