@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from load_model import LLADA_DEFAULT_MASK_ID
 from traces.trace_generator import TracingContext, InterventionHook
-from traces.utils import is_negative_inf, was_position_masked, was_positions_masked, extract_tensor_value, get_value_item, value_matches_x0, build_transfer_index, build_x0_for_trace, ensure_2d_shape, shapes_match, get_x0_trace, _is_tensor_like
+from traces.utils import is_negative_inf, was_position_masked, was_positions_masked, extract_tensor_value, get_value_item, value_matches_x0, build_transfer_index, build_x0_for_trace, ensure_2d_shape, shapes_match, same_2d_batch_shape, get_x0_trace, _is_tensor_like
 
 # When set by eval.py, sample traces are appended here and written as one file per task. No per-sample save/upload.
 _task_trace_list_ctx: contextvars.ContextVar[Optional[List]] = contextvars.ContextVar("task_trace_list", default=None)
@@ -322,7 +322,7 @@ class ModelTracer:
             self._in_intervention = False
     
     def _handle_boolean_tensor_transfer(self, tensor_self, key, value):
-        """Handle x[transfer_index] = x0[transfer_index]."""
+        """Handle x[transfer_index] = x0[transfer_index] (batched or single-sample)."""
         # Use duck typing to avoid isinstance recursion
         if not (_is_tensor_like(key) and hasattr(key, 'dtype') and key.dtype == torch.bool and 
                 _is_tensor_like(value)):
@@ -336,8 +336,22 @@ class ModelTracer:
             x = ensure_2d_shape(tensor_self.clone())
             x0_trace = ensure_2d_shape(self._last_x0.clone())
             
-            if not shapes_match([transfer_index, x0_trace, x]):
+            if not same_2d_batch_shape([transfer_index, x0_trace, x]):
                 return False
+
+            batch_size = transfer_index.shape[0]
+            if batch_size == 1 and not shapes_match([transfer_index, x0_trace, x]):
+                return False
+
+            if batch_size > 1:
+                if self._batch_contexts is None or len(self._batch_contexts) != batch_size:
+                    if not self._in_intervention:
+                        warnings.warn(
+                            "Batched boolean transfer (x[transfer_index] = x0[transfer_index]) "
+                            f"with batch_size={batch_size} but no per-sample tracing contexts; "
+                            "selected_positions will not be recorded."
+                        )
+                    return False
             
             return self._process_transfer(tensor_self, key, transfer_index, x0_trace, x)
         except Exception as e:
@@ -475,13 +489,21 @@ class ModelTracer:
         prompt = args[1] if len(args) > 1 else kwargs.get('prompt')
         block_length = kwargs.get('block_length', None)
         gen_length_kw = kwargs.get('gen_length')
+        task_trace_list = _task_trace_list_ctx.get()
         if prompt is not None:
             prompt_len = int(prompt.shape[1])
             if gen_length_kw is not None:
                 gen_len = int(gen_length_kw)
                 self.tracing_context.set_generation_bounds(prompt_len, gen_len)
             batch_size = prompt.shape[0]
-            if batch_size > 1 and self.tracing_context.trace_name is not None:
+            use_batch_contexts = (
+                batch_size > 1
+                and (
+                    self.tracing_context.trace_name is not None
+                    or task_trace_list is not None
+                )
+            )
+            if use_batch_contexts:
                 base_name = self.tracing_context.trace_name
                 self._batch_size = batch_size
                 self._batch_contexts = []
