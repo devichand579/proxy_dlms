@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
+# Schedulers bind @trace_scheduler at import time only when TRACING_ENABLED is true.
+os.environ.setdefault("TRACING_ENABLED", "true")
+
 import argparse
 import json
 import logging
@@ -59,65 +64,107 @@ def _run_scheduler(
     token = _task_trace_list_ctx.set(traces)
     trace_name = f"tracing_{name}_b{batch_size}"
 
-    kwargs: dict = {
-        "steps": STEPS,
-        "gen_length": GEN_LENGTH,
+    trace_kwargs: dict = {
         "trace_name": trace_name,
         "mask_id": mask_id,
         "eos_id": eos_id,
         "eot_id": eot_id,
         "use_eos_harness": True,
+        "upload_to_wandb": False,
+        "logits_eos_inf": eos_unmask_b44,
+        "confidence_eos_eot_inf": eos_unmask_b44,
     }
 
-    if name == "pure_diffusion":
-        fn(
-            model,
-            input_ids,
-            attention_mask,
-            block_length=GEN_LENGTH,
-            temperature=0.0,
-            remasking="confidence",
-            logits_eos_inf=eos_unmask_b44,
-            confidence_eos_eot_inf=eos_unmask_b44,
-            **kwargs,
-        )
-    elif name == "block_diffusion":
-        fn(
-            model,
-            input_ids,
-            attention_mask,
-            block_length=32,
-            temperature=0.0,
-            remasking="confidence",
-            logits_eos_inf=eos_unmask_b44,
-            confidence_eos_eot_inf=eos_unmask_b44,
-            **kwargs,
-        )
-    elif name in ("top_k_confidence", "top_k_margin"):
-        strategy = "confidence" if name == "top_k_confidence" else "margin"
-        fn(
-            model,
-            input_ids,
-            attention_mask,
-            block_length=GEN_LENGTH,
-            top_k=1,
-            strategy=strategy,
-            logits_eos_inf=eos_unmask_b44,
-            confidence_eos_eot_inf=eos_unmask_b44,
-            **kwargs,
-        )
-    elif name == "fhs":
-        fn(model, input_ids, attention_mask, block_length=32, temperature=1.0, **kwargs)
-    elif name == "eb_sampler":
-        fn(model, input_ids, attention_mask, block_length=GEN_LENGTH, **kwargs)
-    elif name == "dus":
-        fn(model, input_ids, attention_mask, block_length=16, **kwargs)
-    elif name == "fdm":
-        fn(model, input_ids, attention_mask, block_length=64, **kwargs)
-    else:
-        raise ValueError(name)
+    try:
+        if name == "pure_diffusion":
+            fn(
+                model,
+                input_ids,
+                attention_mask,
+                steps=STEPS,
+                gen_length=GEN_LENGTH,
+                block_length=GEN_LENGTH,
+                temperature=0.0,
+                remasking="confidence",
+                **trace_kwargs,
+            )
+        elif name == "block_diffusion":
+            fn(
+                model,
+                input_ids,
+                attention_mask,
+                steps=STEPS,
+                gen_length=GEN_LENGTH,
+                block_length=32,
+                temperature=0.0,
+                remasking="confidence",
+                **trace_kwargs,
+            )
+        elif name in ("top_k_confidence", "top_k_margin"):
+            metric = "confidence" if name == "top_k_confidence" else "top_margin"
+            fn(
+                model,
+                input_ids,
+                attention_mask,
+                steps=STEPS,
+                gen_length=GEN_LENGTH,
+                block_length=GEN_LENGTH,
+                top_k=1,
+                metric=metric,
+                temperature=0.0,
+                **trace_kwargs,
+            )
+        elif name == "fhs":
+            fn(
+                model,
+                input_ids,
+                attention_mask,
+                steps=STEPS,
+                gen_length=GEN_LENGTH,
+                temperature=1.0,
+                pass_time_to_model=True,
+                **trace_kwargs,
+            )
+        elif name == "eb_sampler":
+            fn(
+                model,
+                input_ids,
+                attention_mask,
+                steps=STEPS,
+                gen_length=GEN_LENGTH,
+                block_length=GEN_LENGTH,
+                gamma=0.1,
+                E="confidence",
+                temperature=0.0,
+                **trace_kwargs,
+            )
+        elif name == "dus":
+            fn(
+                model,
+                input_ids,
+                attention_mask,
+                gen_length=GEN_LENGTH,
+                block_length=16,
+                temperature=0.0,
+                remasking="confidence",
+                scheduler="dilated",
+                **trace_kwargs,
+            )
+        elif name == "fdm":
+            fn(
+                model,
+                input_ids,
+                attention_mask,
+                steps=STEPS,
+                gen_length=GEN_LENGTH,
+                block_length=64,
+                **trace_kwargs,
+            )
+        else:
+            raise ValueError(name)
+    finally:
+        _task_trace_list_ctx.reset(token)
 
-    _task_trace_list_ctx.reset(token)
     return traces
 
 
@@ -247,7 +294,7 @@ def main(
                 })
 
         del model, tokenizer
-        if device == "cuda":
+        if device != "cpu" and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     return results
