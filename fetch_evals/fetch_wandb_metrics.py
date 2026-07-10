@@ -228,7 +228,7 @@ def _nfe_from_history(run: Any) -> tuple[Any, str]:
 
 
 def _sanitize_wandb_url(url: Optional[str]) -> Optional[str]:
-    """Drop the W&B entity from run URLs (``wandb.ai/{entity}/{project}/...`` → ``wandb.ai/{project}/...``)."""
+    """Drop the W&B entity from run URLs (``wandb.ai/{entity}/{project}/...`` -> ``wandb.ai/{project}/...``)."""
     if not url:
         return url
     return re.sub(r"https://wandb\.ai/[^/]+/", "https://wandb.ai/", url)

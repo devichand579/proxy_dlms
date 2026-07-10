@@ -215,8 +215,14 @@ def _apply_bucket_trends(
 
 
 def _iter_traces(path: Union[str, Path]):
-    """Yield one trace dict per sample from JSONL or JSON."""
+    """Yield one trace dict per sample from JSONL, JSON, or NPZ."""
     path = Path(path)
+    if path.suffix.lower() == ".npz":
+        from traces.trace_npz import iter_npz_traces
+
+        yield from iter_npz_traces(path)
+        return
+
     with open(path, "r", encoding="utf-8") as f:
         content = f.read().strip()
 

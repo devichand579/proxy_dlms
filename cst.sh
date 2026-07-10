@@ -50,7 +50,7 @@ CST launcher — runs `python run_cst.py` with Hydra (config: config/cst.yaml).
 Options:
   --mode store|train|eval
                         store  — collect/upload hiddens to Hub (no CST fit)
-                        train  — download Hub slices → train CST → delete local
+                        train  — download Hub slices -> train CST -> delete local
                         eval   — score CST checkpoint on saved hiddens
   --scope train|eval    store only: sets store.scope=train|eval
   --hidden_dir DIR      mode=eval only: local folder of .pt to score (not used for store)

@@ -27,7 +27,7 @@ Interventions (drop/swap) modify which tokens get unmasked during generation. Ho
 
 **Example:**
 ```
-block_length = 256, gen_length = 256 → num_blocks = 1
+block_length = 256, gen_length = 256 -> num_blocks = 1
 
 Step 0: Drop pos 0 -> remains masked 
 Step 1: mask_index includes pos 0 -> can select again 
@@ -44,7 +44,7 @@ Step 2: Still can select pos 0 -> can select again
 
 **Example:**
 ```
-block_length = 32, gen_length = 256 → num_blocks = 8
+block_length = 32, gen_length = 256 -> num_blocks = 8
 
 Block 0: [M M M ... M]  (32 tokens)
 Step 31 (last step): Drop pos 0

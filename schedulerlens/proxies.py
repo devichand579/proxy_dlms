@@ -217,7 +217,7 @@ def compute_sample_proxies(trace_dict: dict) -> SampleProxies:
                     continue
                 # Approximate p_θ(x̂_i | context_t):
                 # If model still predicts committed token, use current confidence.
-                # Otherwise probability is below current argmax confidence → approx 0.
+                # Otherwise probability is below current argmax confidence -> approx 0.
                 if pred_t[pos] == tok:
                     prob_committed = float(conf_t[pos])
                 else:

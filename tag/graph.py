@@ -146,7 +146,7 @@ def build_tag_graph(
                 val = float(a[0, i, f].item())
                 add_node(TAGNode(nid, "feat", i, t, f, label=f"a({i},{t},{f})={val:.3g}", meta={"a": val}))
 
-    # --- Edges: input → (i, 1, f) ---
+    # --- Edges: input -> (i, 1, f) ---
     if n_t >= 1:
         a1 = activations[0]
         for i in resp:
@@ -159,7 +159,7 @@ def build_tag_graph(
                 w = float(a1[0, i, f].item())
                 add_edge(TAGEdge(_nid_in(i), dst, w, {"type": "input_to_feat", "t": 1}))
 
-    # --- Cross-step feature → feature: (i,t,f) → (j, t+δ, g) ---
+    # --- Cross-step feature -> feature: (i,t,f) -> (j, t+δ, g) ---
     w_eff = int(w_cst)
     for s in range(n_t):
         t = s + 1
@@ -214,7 +214,7 @@ def build_tag_graph(
                                 )
                             )
 
-    # --- Optional error nodes; err → feature if ``residual_d`` [A, L, d] (ε replaces a^t in V) ---
+    # --- Optional error nodes; err -> feature if ``residual_d`` [A, L, d] (ε replaces a^t in V) ---
     if residual_d is not None and residual_d.numel() > 0:
         a_rows, a_pos = int(residual_d.shape[0]), int(residual_d.shape[1])
     elif residual_l2 is not None and residual_l2.numel() > 0:
@@ -264,7 +264,7 @@ def build_tag_graph(
                     dev = w_m.device
                     dty = w_m.dtype
                     eps_d = eps.to(device=dev, dtype=dty)
-                    # b_f = ε^T W^dec_{:,f}  →  [k]
+                    # b_f = ε^T W^dec_{:,f}  ->  [k]
                     b = torch.matmul(eps_d, w_m)  # [d] @ [d, k] -> [k]
                     b = b.float().cpu()
                     fi = torch.nonzero(
@@ -342,7 +342,7 @@ def build_tag_graph(
                     break
             out_ids = out_ids[: max_output_tokens]
             out_probs = out_probs[: len(out_ids)]
-            # For influence pruning: same mass cutoff as feat→out token list
+            # For influence pruning: same mass cutoff as feat->out token list
             k_logit = 0
             cum_sink = 0.0
             logit_p_tokens: List[Dict[str, object]] = []

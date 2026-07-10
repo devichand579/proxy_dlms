@@ -7,7 +7,7 @@ model_path: ./models/llada
 cst_checkpoint: null
 cst_config: null
 
-# Full run: prompt + model_path → tag_trace.pt, tag_graph.json, tag_view.html
+# Full run: prompt + model_path -> tag_trace.pt, tag_graph.json, tag_view.html
 # Chunk run: set hidden_pt to skip generation
 prompt: null
 hidden_pt: null

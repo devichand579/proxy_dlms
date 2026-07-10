@@ -11,7 +11,7 @@ from .jump_relu import JumpReLU
 
 
 class CST(nn.Module):
-    """Encoder maps hidden ``d→k``; decoder ``offset`` (1…w) maps ``k→d`` for that lookahead step."""
+    """Encoder maps hidden ``d->k``; decoder ``offset`` (1…w) maps ``k->d`` for that lookahead step."""
 
     def __init__(
         self,

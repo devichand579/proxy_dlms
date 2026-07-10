@@ -673,7 +673,7 @@ class LLaDAEvalHarness(LM):
         total_blocks_processed = 0
         total_gen_time = 0.0
         computed_samples_this_call = 0
-        nfe_mass_this_call = 0  # sum of (steps_taken * batch_n) across chunks → sample-weighted NFE
+        nfe_mass_this_call = 0  # sum of (steps_taken * batch_n) across chunks -> sample-weighted NFE
 
         try:
             for chunk_index, chunk_indices in enumerate(chunks):

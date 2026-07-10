@@ -30,7 +30,7 @@ def virtual_weight_matrix(
     cst_t2 = bank.get(t2)
     w_dec = cst_t.W_dec[delta - 1].weight.to(device=device, dtype=dtype)
     w_enc = cst_t2.W_enc.weight.to(device=device, dtype=dtype)
-    # w_dec: [d, k], w_enc: [k, d] → [k, k] = w_dec.T @ w_enc.T
+    # w_dec: [d, k], w_enc: [k, d] -> [k, k] = w_dec.T @ w_enc.T
     v = w_dec.T @ w_enc.T
     return v
 

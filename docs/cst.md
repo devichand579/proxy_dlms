@@ -4,17 +4,17 @@
 
 ## Two entry points
 
-Collection and training are **separate**. Run **`mode=store`** once (LM inference → Hub), then **`mode=train`** (download from Hub → fit CST, no LM).
+Collection and training are **separate**. Run **`mode=store`** once (LM inference -> Hub), then **`mode=train`** (download from Hub -> fit CST, no LM).
 
 Everything goes through **`run_cst.py`** / **`./cst.sh`** with `mode=store`, `mode=train`, or `mode=eval`.
 
 | | **`mode=store`** | **`mode=train`** / **`mode=eval`** |
 |---|---|---|
-| **Purpose** | Run LM+scheduler on prompts → **Hugging Face** (train mix or eval task) | **Train** or **score** CST from stored hiddens |
+| **Purpose** | Run LM+scheduler on prompts -> **Hugging Face** (train mix or eval task) | **Train** or **score** CST from stored hiddens |
 | **Needs GPU + model** | Yes (collect + scheduler for both train and eval store) | **No** for train (Hub download only); eval scoring only |
 | **Output** | Chunks on `{namespace}/hiddens-train` or `{namespace}/hiddens-eval` | CST checkpoints under `outputs/cst_ckpt/` or eval metrics |
 
-`train.hf_hiddens_org` is your **HF username** if you have no org (e.g. `devichand` → [devichand/hiddens-train](https://huggingface.co/datasets/devichand/hiddens-train)), or an org slug otherwise.
+`train.hf_hiddens_org` is your **HF username** if you have no org (e.g. `devichand` -> [devichand/hiddens-train](https://huggingface.co/datasets/devichand/hiddens-train)), or an org slug otherwise.
 
 ```bash
 # 1) Store (once per model / scheduler / task)
@@ -62,7 +62,7 @@ Pattern: `{name_token}_seg{segment:03d}_{batch_idx:06d}.pt`
 
 ### Train hiddens (`store.scope=train`)
 
-Runs the full collect loop (sample prompts → LM + scheduler → `.pt` until `target_staging_gb` per segment) and **uploads each segment to Hub**. Does **not** train CST.
+Runs the full collect loop (sample prompts -> LM + scheduler -> `.pt` until `target_staging_gb` per segment) and **uploads each segment to Hub**. Does **not** train CST.
 
 ```bash
 huggingface-cli login

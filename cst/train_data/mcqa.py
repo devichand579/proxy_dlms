@@ -38,7 +38,7 @@ def _mcqa_answer_letter(row: Dict[str, Any]) -> str:
         # ARC 4-way: answerKey is usually 1–4 (1-based).
         if n == 4 and 1 <= i <= 4:
             return "ABCD"[i - 1]
-        # CommonsenseQA and others: 0-based index 0 … n-1 (e.g. answerKey "0" → A).
+        # CommonsenseQA and others: 0-based index 0 … n-1 (e.g. answerKey "0" -> A).
         if 0 <= i < n:
             if i < len(labels):
                 lab = str(labels[i]).strip()

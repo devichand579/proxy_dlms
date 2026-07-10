@@ -254,7 +254,7 @@ def merge_eval_file_into_agg(agg: Dict[str, List[float]], m: Dict[str, Any]) -> 
 
 
 def eval_summary_from_agg(agg: Dict[str, List[float]]) -> Dict[str, float]:
-    """Mean of each list → ``summary`` dict."""
+    """Mean of each list -> ``summary`` dict."""
     summary: Dict[str, float] = {
         "nmse": sum(agg["nmse"]) / max(len(agg["nmse"]), 1),
         "l0": sum(agg["l0"]) / max(len(agg["l0"]), 1),
