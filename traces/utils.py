@@ -92,6 +92,14 @@ def shapes_match(tensors):
     return (all(t.shape == shape for t in tensors) and 
             len(shape) == 2 and shape[0] == 1)
 
+
+def same_2d_batch_shape(tensors):
+    """Check if all tensors share the same [B, L] shape (any batch size)."""
+    if not tensors:
+        return False
+    shape = tensors[0].shape
+    return len(shape) == 2 and all(t.shape == shape for t in tensors)
+
 def was_position_masked(x, pos, mask_id):
     """Check if a single position was masked."""
     try:
