@@ -10,7 +10,7 @@ defaults:
 hydra:
   launcher:
     submitit_folder: job_outputs/%j
-    partition: dgx2
+    partition: dgx_all
     qos: gpu2
     timeout_min: 4320   # 72h
     mem_gb: 128

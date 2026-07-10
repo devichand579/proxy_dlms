@@ -443,7 +443,7 @@ class LLaDAEvalHarness(LM):
 
         valid_ids: set[int] = set()
         try:
-            valid_ids.update(getattr(self.tokenizer, "decoder", {}).keys())
+            valid_ids.update(self.tokenizer.get_vocab().values())
         except Exception:
             pass
         try:
