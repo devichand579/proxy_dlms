@@ -234,6 +234,7 @@ def _sanitize_wandb_url(url: Optional[str]) -> Optional[str]:
     return re.sub(r"https://wandb\.ai/[^/]+/", "https://wandb.ai/", url)
 
 
+def fetch_metrics(
     project: str,
     include_unfinished: bool = False,
 ) -> pd.DataFrame:
