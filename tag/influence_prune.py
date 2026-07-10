@@ -194,7 +194,7 @@ def prune_tag_influence(
     es: List[Tuple[str, str, float]] = []
     for e in e2:
         si, di = id2[e.src], id2[e.dst]
-        a_ts = a2[di, si]  # s→t: column si, row di
+        a_ts = a2[di, si]  # s->t: column si, row di
         es.append((e.src, e.dst, float(scores2[di] * a_ts)))
 
     es_aug = [(s, d, max(0.0, wsc)) for s, d, wsc in es]

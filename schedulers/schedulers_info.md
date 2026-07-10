@@ -80,7 +80,7 @@ The **LLaDA (Large Language Diffusion model)** scheduler implements the diffusio
    e. Apply block masking: x0_p[:, block_end:] = -inf
    f. Select top-k: k = num_transfer_tokens[j, i]  (variable k)
    g. Transfer tokens: x[selected_positions] = x0[selected_positions]
-   h. Check early stopping: if EOS decoded → return
+   h. Check early stopping: if EOS decoded -> return
    ```
 
 ### Linear Noise Schedule
@@ -150,7 +150,7 @@ The **Top-K scheduler** is a simple diffusion method that transfers exactly `top
    e. Apply block masking: x0_p[:, block_end:] = -inf
    f. Select top-k: k = min(top_k, remaining_masks_in_block)
    g. Transfer tokens: x[selected_positions] = x0[selected_positions]
-   h. Check early stopping: if EOS decoded → return
+   h. Check early stopping: if EOS decoded -> return
    ```
 
 ### Ranking Metrics
@@ -212,7 +212,7 @@ Step 2:   [prompt | T1 T2 T3 T4 T5 T6 T7 T8]  (top_k=4, done)
    c. Forward pass: logits = model(x, attention_mask, t=current_step)
    d. Sample tokens: x0 = sample_categorical(logits, temperature)
    e. Update x: x[decoded_positions] = x0[decoded_positions]
-   f. Check early stopping: if EOS decoded → return
+   f. Check early stopping: if EOS decoded -> return
    ```
 
 ### First-Hitting Times (τ)
@@ -239,12 +239,12 @@ Initial:  [prompt | M M M M M M M M]
          tau:     [0.8, 0.3, 0.6, 0.2, 0.9, 0.1, 0.5, 0.7]
 
 Chunk 1 (positions 0-3):
-  Position 3 (tau=0.2) decoded → [prompt | M M M T4 M M M M]
-  Position 1 (tau=0.3) decoded → [prompt | M T2 M T4 M M M M]
+  Position 3 (tau=0.2) decoded -> [prompt | M M M T4 M M M M]
+  Position 1 (tau=0.3) decoded -> [prompt | M T2 M T4 M M M M]
   ...
 
 Chunk 2 (positions 4-7):
-  Position 5 (tau=0.1) decoded → [prompt | M T2 M T4 M T6 M M]
+  Position 5 (tau=0.1) decoded -> [prompt | M T2 M T4 M T6 M M]
   ...
 ```
 
@@ -290,11 +290,11 @@ The **Entropy-Based (EB) sampler** uses an entropy-based selection rule with a *
       - For each position in sorted order:
         - Add its entropy to cumulative sum: H.append(h[pos])
         - If sum(H) - max(H) <= gamma:
-            → Select this position
+            -> Select this position
         - Else:
-            → Stop (entropy constraint violated)
+            -> Stop (entropy constraint violated)
    h. Transfer selected tokens: x[selected] = x0[selected]
-   i. Check early stopping: if EOS decoded → return
+   i. Check early stopping: if EOS decoded -> return
    ```
 
 ### Entropy Constraint
@@ -316,11 +316,11 @@ Step t:
   Sorted by ranking: [0, 4, 2, 1, 3]
   
   Selection:
-    Position 0: H=[0.1], sum-max=0.0 <= 0.5 ✓ → Select
-    Position 4: H=[0.1, 0.15], sum-max=0.05 <= 0.5 ✓ → Select
-    Position 2: H=[0.1, 0.15, 0.2], sum-max=0.15 <= 0.5 ✓ → Select
-    Position 1: H=[0.1, 0.15, 0.2, 0.3], sum-max=0.35 <= 0.5 ✓ → Select
-    Position 3: H=[0.1, 0.15, 0.2, 0.3, 0.4], sum-max=0.6 > 0.5 ✗ → Stop
+    Position 0: H=[0.1], sum-max=0.0 <= 0.5 ✓ -> Select
+    Position 4: H=[0.1, 0.15], sum-max=0.05 <= 0.5 ✓ -> Select
+    Position 2: H=[0.1, 0.15, 0.2], sum-max=0.15 <= 0.5 ✓ -> Select
+    Position 1: H=[0.1, 0.15, 0.2, 0.3], sum-max=0.35 <= 0.5 ✓ -> Select
+    Position 3: H=[0.1, 0.15, 0.2, 0.3, 0.4], sum-max=0.6 > 0.5 ✗ -> Stop
 ```
 
 ### Parameters
@@ -370,8 +370,8 @@ The **Dilated Unmasking Scheduler (DUS)** uses **predefined hierarchical schedul
       - If remasking enabled:
         - Compute confidence/entropy for unmasked positions
         - If confidence < threshold (or entropy > threshold):
-            → Remask that position (set back to MASK)
-   g. Check early stopping: if EOS decoded → return
+            -> Remask that position (set back to MASK)
+   g. Check early stopping: if EOS decoded -> return
    ```
 
 ### Schedule Types
@@ -462,11 +462,11 @@ The **Foreseeing Decoding Method (FDM)** uses a **"foreseeing" mechanism** that 
       - Borderline: eta2 < confidence <= eta1
       - Low: confidence <= eta2
    f. Select mode based on distribution:
-      - Case A (Exploration): No high-confidence → FDM1
-      - Case B (Balance): Some borderline → FDM2
-      - Case C (Acceleration): Many high-confidence → Pure local
+      - Case A (Exploration): No high-confidence -> FDM1
+      - Case B (Balance): Some borderline -> FDM2
+      - Case C (Acceleration): Many high-confidence -> Pure local
    g. Execute selected mode (see below)
-   h. Check early stopping: if EOS decoded → return
+   h. Check early stopping: if EOS decoded -> return
    ```
 
 3. **Mode Execution:**
@@ -503,7 +503,7 @@ The global confidence estimator evaluates how well a hypothesis fits the overall
 
 ```
 For each hypothesis:
-  1. Get model logits → log_softmax → probabilities p
+  1. Get model logits -> log_softmax -> probabilities p
   2. Compute expected log-prob: e_lp = sum_v (p_v * log p_v) per position
   3. Average e_lp over masked positions
   4. Return: average expected log-prob (higher = better hypothesis)
@@ -519,12 +519,12 @@ Positions: [0, 1, 2, 3, 4, 5, 6, 7]
 Confidence: [0.5, 0.6, 0.75, 0.85, 0.9, 0.65, 0.55, 0.5]
 
 Analysis:
-  High (>0.8): [0.85, 0.9] → 2 tokens
-  Borderline (0.7-0.8): [0.75] → 1 token
-  Low (<0.7): [0.5, 0.6, 0.65, 0.55, 0.5] → 5 tokens
+  High (>0.8): [0.85, 0.9] -> 2 tokens
+  Borderline (0.7-0.8): [0.75] -> 1 token
+  Low (<0.7): [0.5, 0.6, 0.65, 0.55, 0.5] -> 5 tokens
 
 Decision: Case C (Acceleration)
-  → Decode top-4 by local confidence: [0.9, 0.85, 0.75, 0.65]
+  -> Decode top-4 by local confidence: [0.9, 0.85, 0.75, 0.65]
 ```
 
 **Step with no high-confidence:**
@@ -533,16 +533,16 @@ Positions: [0, 1, 2, 3]
 Confidence: [0.5, 0.6, 0.65, 0.55]
 
 Analysis:
-  High (>0.8): [] → 0 tokens
-  Borderline (0.7-0.8): [] → 0 tokens
-  Low (<0.7): [0.5, 0.6, 0.65, 0.55] → 4 tokens
+  High (>0.8): [] -> 0 tokens
+  Borderline (0.7-0.8): [] -> 0 tokens
+  Low (<0.7): [0.5, 0.6, 0.65, 0.55] -> 4 tokens
 
 Decision: Case A (Exploration - FDM1)
-  → Prune candidates (log_prob > log(0.2))
-  → Select top-K1=4 candidates
-  → Build 4 hypotheses
-  → Evaluate global confidence
-  → Select best 1 token
+  -> Prune candidates (log_prob > log(0.2))
+  -> Select top-K1=4 candidates
+  -> Build 4 hypotheses
+  -> Evaluate global confidence
+  -> Select best 1 token
 ```
 
 ### Parameters

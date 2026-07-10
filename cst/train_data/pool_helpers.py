@@ -1,4 +1,4 @@
-"""Dataset → pool rows ``{id, source, text, meta}``."""
+"""Dataset -> pool rows ``{id, source, text, meta}``."""
 
 from __future__ import annotations
 

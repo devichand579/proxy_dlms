@@ -1,4 +1,4 @@
-"""BAAI/TACO train → prompt rows for the ``taco`` pool."""
+"""BAAI/TACO train -> prompt rows for the ``taco`` pool."""
 
 from __future__ import annotations
 

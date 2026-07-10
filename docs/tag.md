@@ -68,13 +68,13 @@ Positions `i < prompt_len` are excluded from response-region nodes and cross-pos
 
 ### Edge types and weights
 
-**1. Input → feature (step 1)**
+**1. Input -> feature (step 1)**
 
 ```
 in_i  -->  (i, 1, f)     weight w = a^1[i,f]
 ```
 
-**2. Cross-step feature → feature**
+**2. Cross-step feature -> feature**
 
 For `delta` in `1 .. w` and `t + delta <= T_eff`:
 
@@ -90,7 +90,7 @@ Virtual coupling (only a small block is built in memory, not full `k x k`):
 V[f,g] = dot( W^dec_{t,delta}[:,f],  W^enc_{t+delta}[g,:] )
 ```
 
-**3. Feature → output (readout)**
+**3. Feature -> output (readout)**
 
 When `model_path` and unembedding `W_U` (`lm_head` or tied `wte`) are available: for each high-probability token `v` at position `i`, each step `t` from `T_eff - w + 1` to `T_eff`, and decoder offset `delta = T_eff - t + 1`:
 
@@ -102,7 +102,7 @@ w = a^t[i,f] * dot( W^dec_{t,delta}[:,f],  W_U[v,:] )
 
 If unembedding is unavailable, a fallback links **last-step** features to `out_i` with `w = a^{T_eff}[i,f]` only.
 
-**4. Error → feature (optional)**
+**4. Error -> feature (optional)**
 
 With `with_residual=true`, at each anchor:
 
@@ -163,7 +163,7 @@ Prune metadata in the run JSON includes `source` (`out` or `in`), node/edge coun
 
 | Stage       | Module                   | Role                                                          |
 | ----------- | ------------------------ | ------------------------------------------------------------- |
-| Capture     | `tag/capture.py`         | One prompt → `tag_trace.pt` via `collect_hidden_batch_loaded` |
+| Capture     | `tag/capture.py`         | One prompt -> `tag_trace.pt` via `collect_hidden_batch_loaded` |
 | Activations | `tag/activations.py`     | `a^t` from `H[t-1]`; optional residuals                       |
 | Graph       | `tag/graph.py`           | Nodes, edges, virtual submatrices                             |
 | Prune       | `tag/influence_prune.py` | Influence propagation + mass cuts                             |
@@ -218,7 +218,7 @@ Set `**prompt`** (full) or `**hidden_pt**` (chunk), not neither.
 
 | Key             | Default | Meaning                                                              |
 | --------------- | ------- | -------------------------------------------------------------------- |
-| `with_residual` | `false` | Add `err` nodes and err→feat edges from CST reconstruction residual. |
+| `with_residual` | `false` | Add `err` nodes and err->feat edges from CST reconstruction residual. |
 | `write_html`    | `true`  | Write `tag_view.html`.                                               |
 
 
@@ -229,7 +229,7 @@ Set `**prompt`** (full) or `**hidden_pt**` (chunk), not neither.
 | -------------------- | ---------- | ------------------------------------------------------------------ |
 | `no_logits`          | `false`    | Chunk-only: skip LM load; no `out` nodes; prune from `in` sources. |
 | `top_output_mass`    | `0.95`     | Softmax mass cutoff for top tokens per position.                   |
-| `max_output_tokens`  | `10`       | Max tokens per position for sinks and feat→out.                    |
+| `max_output_tokens`  | `10`       | Max tokens per position for sinks and feat->out.                    |
 | `output_exclude_eos` | `false`    | Mask EOS to negative infinity before softmax on readout rows.      |
 | `eos_id`             | (optional) | Override EOS id; else inferred from `model_path`.                  |
 
@@ -301,7 +301,7 @@ Slurm: `sbatch tag.sh --slurm --cst_checkpoint ... --model_path ... --prompt "..
 | `tag_view.html`  | `write_html=true` | Static vis-network viewer (CDN on first open) |
 
 
-Node `meta` examples: feat `a`, out `p_sink` / `logit_p_tokens`, err `l2`. Edge `meta`: `type`, `delta`, `f`, `g`, `v` (token id for feat→out).
+Node `meta` examples: feat `a`, out `p_sink` / `logit_p_tokens`, err `l2`. Edge `meta`: `type`, `delta`, `f`, `g`, `v` (token id for feat->out).
 
 ---
 

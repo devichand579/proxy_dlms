@@ -41,7 +41,7 @@ B.4 **intentionally** sets EOS / EoT logits to \(-\infty\) in the paths used for
 2. **Softmax** over rows that are dominated by \(-\infty\) or otherwise ill-conditioned can yield **NaNs**, **all zeros**, or **tiny garbage** — not a clean probability vector on the simplex.
 3. **`torch.multinomial`** requires **finite, non‑negative** probabilities that **sum to a positive value**. Invalid rows can **assert on CUDA** instead of returning a sample.
 
-So the failure mode is: **B.4 makes logits pathological in the EOS/EoT dimensions** → **sometimes** the whole row’s softmax / categorical draw is **ill-conditioned** → **`multinomial` is unsafe** without extra stabilization. This shows up in schedulers that **sample** from those logits (e.g. **FHS** with `temperature > 0`), not because B.4 is wrong, but because **sampling code** must tolerate those rows.
+So the failure mode is: **B.4 makes logits pathological in the EOS/EoT dimensions** -> **sometimes** the whole row’s softmax / categorical draw is **ill-conditioned** -> **`multinomial` is unsafe** without extra stabilization. This shows up in schedulers that **sample** from those logits (e.g. **FHS** with `temperature > 0`), not because B.4 is wrong, but because **sampling code** must tolerate those rows.
 
 ## What `sample_categorical` in FHS is doing
 
@@ -69,4 +69,4 @@ In other words: **B.4 addresses EOS collapse; FHS `sample_categorical` addresses
 - `load_model.py`: `infer_b44_eos_unmask_safety`
 - `schedulers/generate.py`: applies B.4 when `model_path` is set and inference returns true
 - `eval.py`: passes `model_path` into `generate` so eval matches smoke tests
-- `schedulers/fhs.py`: `sample_categorical` (stabilize → softmax/renorm → `multinomial`, rare `argmax` fallback); FHS extrapolation guards (`EXTRAPOL_EPS`, safe `k` indexing)
+- `schedulers/fhs.py`: `sample_categorical` (stabilize -> softmax/renorm -> `multinomial`, rare `argmax` fallback); FHS extrapolation guards (`EXTRAPOL_EPS`, safe `k` indexing)

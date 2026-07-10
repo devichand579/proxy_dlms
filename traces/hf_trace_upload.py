@@ -8,7 +8,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +70,6 @@ def normalize_dataset_repo_id(repo: str, namespace: Optional[str] = None) -> str
     return f"{ns}/{repo}"
 
 
-def path_in_repo_for_trace(local_path: str | Path) -> str:
-    return Path(local_path).name
-
-
 def _hf_api(token: bool | str | None = True):
     from huggingface_hub import HfApi
 
@@ -124,67 +120,160 @@ def upload_file_to_dataset(
     return path_in_repo
 
 
-def download_file_from_dataset(
-    repo_id: str,
-    path_in_repo: str,
-    local_path: str | Path,
-    *,
-    revision: str = "main",
-    token: bool | str | None = True,
-) -> Path:
-    from huggingface_hub import hf_hub_download
-
-    local_path = Path(local_path)
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-    cached = hf_hub_download(
-        repo_id=repo_id,
-        filename=path_in_repo,
-        repo_type="dataset",
-        revision=revision,
-        token=token,
-    )
-    src = Path(cached)
-    if src.resolve() != local_path.resolve():
-        local_path.write_bytes(src.read_bytes())
-    return local_path
+def resolve_repo(
+    repo_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+) -> str:
+    return normalize_dataset_repo_id(repo_id or trace_hf_dataset_repo(), namespace)
 
 
-def upload_trace_file_to_hf_dataset(
-    local_path: str | Path,
+def list_repo_files(
     *,
     repo_id: Optional[str] = None,
-    path_in_repo: Optional[str] = None,
     namespace: Optional[str] = None,
     revision: Optional[str] = None,
-    private: Optional[bool] = None,
+    token: bool | str | None = True,
+) -> list[str]:
+    full_repo = resolve_repo(repo_id, namespace)
+    rev = revision if revision is not None else trace_hf_revision()
+    api = _hf_api(token)
+    return list(api.list_repo_files(repo_id=full_repo, repo_type="dataset", revision=rev))
+
+
+def file_sizes(
+    filenames: list[str],
+    *,
+    repo_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    revision: Optional[str] = None,
+    token: bool | str | None = True,
+) -> dict[str, int]:
+    if not filenames:
+        return {}
+    full_repo = resolve_repo(repo_id, namespace)
+    rev = revision if revision is not None else trace_hf_revision()
+    api = _hf_api(token)
+    sizes: dict[str, int] = {}
+    for i in range(0, len(filenames), 50):
+        infos = api.get_paths_info(
+            full_repo, filenames[i : i + 50], repo_type="dataset", revision=rev
+        )
+        for info in infos:
+            sizes[info.path] = int(info.size or 0)
+    return sizes
+
+
+def download_file(
+    filename: str,
+    *,
+    dest: str | Path | None = None,
+    repo_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    revision: Optional[str] = None,
+    token: bool | str | None = True,
+) -> Path:
+    """Download a hub trace file.
+
+    Without ``dest``, returns the HF cache path (audit/convert pipelines).
+    With ``dest``, copies there and returns that path (CLI downloads).
+    """
+    from huggingface_hub import hf_hub_download
+
+    hub_path = Path(filename).name
+    full_repo = resolve_repo(repo_id, namespace)
+    rev = revision if revision is not None else trace_hf_revision()
+    cached = Path(
+        hf_hub_download(
+            full_repo,
+            hub_path,
+            repo_type="dataset",
+            revision=rev,
+            token=token,
+        )
+    )
+    if dest is None:
+        return cached
+
+    dest_path = Path(dest)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    if cached.resolve() != dest_path.resolve():
+        dest_path.write_bytes(cached.read_bytes())
+    logger.info(
+        "Downloaded trace from https://huggingface.co/datasets/%s/tree/%s/%s -> %s",
+        full_repo,
+        rev,
+        hub_path,
+        dest_path,
+    )
+    return dest_path
+
+
+def cleanup_cache(
+    repo_id: str,
+    filename: str,
+    *,
+    revision: Optional[str] = None,
+) -> None:
+    from huggingface_hub import try_to_load_from_cache
+
+    rev = revision or trace_hf_revision()
+    cached = try_to_load_from_cache(repo_id, filename, repo_type="dataset", revision=rev)
+    if cached is None:
+        return
+    p = Path(cached)
+    if p.is_file():
+        p.unlink()
+    for parent in [p.parent, p.parent.parent, p.parent.parent.parent]:
+        try:
+            if parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            pass
+
+
+def upload_file(
+    local_path: str | Path,
+    path_in_repo: str,
+    *,
+    repo_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    revision: Optional[str] = None,
     token: bool | str | None = True,
     commit_message: Optional[str] = None,
-    create_repo: bool = True,
 ) -> str:
-    """Upload a trace file; returns hub path."""
-    local_path = Path(local_path)
-    if not local_path.is_file():
-        raise FileNotFoundError(local_path)
-
-    full_repo = normalize_dataset_repo_id(repo_id or trace_hf_dataset_repo(), namespace)
-    hub_path = path_in_repo or path_in_repo_for_trace(local_path)
+    full_repo = resolve_repo(repo_id, namespace)
     rev = revision if revision is not None else trace_hf_revision()
-    priv = private if private is not None else trace_hf_dataset_private()
-
-    if create_repo:
-        ensure_dataset_repo(full_repo, token=token, private=priv)
-
-    msg = commit_message or f"eval trace {hub_path} ({local_path.stat().st_size} bytes)"
-    upload_file_to_dataset(
+    return upload_file_to_dataset(
         full_repo,
         local_path,
-        hub_path,
+        path_in_repo,
         revision=rev,
         token=token,
-        commit_message=msg,
+        commit_message=commit_message,
     )
-    logger.info("Uploaded trace to https://huggingface.co/datasets/%s/tree/%s/%s", full_repo, rev, hub_path)
-    return hub_path
+
+
+def delete_file(
+    path_in_repo: str,
+    *,
+    repo_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    revision: Optional[str] = None,
+    token: bool | str | None = True,
+    commit_message: Optional[str] = None,
+) -> None:
+    full_repo = resolve_repo(repo_id, namespace)
+    rev = revision if revision is not None else trace_hf_revision()
+    api = _hf_api(token)
+    api.delete_file(
+        path_in_repo=path_in_repo,
+        repo_id=full_repo,
+        repo_type="dataset",
+        revision=rev,
+        commit_message=commit_message or f"remove {path_in_repo}",
+        token=token,
+    )
+    logger.info("Deleted %s from %s@%s", path_in_repo, full_repo, rev)
 
 
 def iter_local_upload_targets(
@@ -202,6 +291,54 @@ def iter_local_upload_targets(
             return [(f, str(f.relative_to(root))) for f in files]
         return [(f, f.name) for f in sorted(root.iterdir()) if f.is_file()]
     raise FileNotFoundError(root)
+
+
+def _upload_targets_to_hf_dataset(
+    targets: list[tuple[Path, str]],
+    *,
+    repo_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    revision: Optional[str] = None,
+    private: Optional[bool] = None,
+    token: bool | str | None = True,
+    create_repo: bool = True,
+    dry_run: bool = False,
+    commit_message: Optional[str] = None,
+) -> list[str]:
+    if not targets:
+        raise ValueError("no files to upload")
+
+    full_repo = resolve_repo(repo_id, namespace)
+    rev = revision if revision is not None else trace_hf_revision()
+    priv = private if private is not None else trace_hf_dataset_private()
+
+    if create_repo and not dry_run:
+        ensure_dataset_repo(full_repo, token=token, private=priv)
+
+    hub_paths: list[str] = []
+    for local_path, hub_path in targets:
+        if dry_run:
+            logger.info("[dry-run] would upload %s -> %s (revision=%s)", local_path, hub_path, rev)
+            hub_paths.append(hub_path)
+            continue
+        msg = commit_message or f"eval trace {hub_path} ({local_path.stat().st_size} bytes)"
+        upload_file_to_dataset(
+            full_repo,
+            local_path,
+            hub_path,
+            revision=rev,
+            token=token,
+            commit_message=msg,
+        )
+        logger.info(
+            "Uploaded %s -> https://huggingface.co/datasets/%s/tree/%s/%s",
+            local_path,
+            full_repo,
+            rev,
+            hub_path,
+        )
+        hub_paths.append(hub_path)
+    return hub_paths
 
 
 def upload_paths_to_hf_dataset(
@@ -222,69 +359,45 @@ def upload_paths_to_hf_dataset(
         targets.extend(iter_local_upload_targets(path, recursive=recursive))
     if not targets:
         raise ValueError("no files to upload (paths must be files or non-empty directories)")
-
-    full_repo = normalize_dataset_repo_id(repo_id or trace_hf_dataset_repo(), namespace)
-    rev = revision if revision is not None else trace_hf_revision()
-    priv = private if private is not None else trace_hf_dataset_private()
-
-    if create_repo and not dry_run:
-        ensure_dataset_repo(full_repo, token=token, private=priv)
-
-    hub_paths: list[str] = []
-    for local_path, hub_path in targets:
-        if dry_run:
-            logger.info("[dry-run] would upload %s -> %s (revision=%s)", local_path, hub_path, rev)
-            hub_paths.append(hub_path)
-            continue
-        upload_file_to_dataset(
-            full_repo,
-            local_path,
-            hub_path,
-            revision=rev,
-            token=token,
-            commit_message=f"eval trace {hub_path} ({local_path.stat().st_size} bytes)",
-        )
-        logger.info(
-            "Uploaded %s -> https://huggingface.co/datasets/%s/tree/%s/%s",
-            local_path,
-            full_repo,
-            rev,
-            hub_path,
-        )
-        hub_paths.append(hub_path)
-    return hub_paths
+    return _upload_targets_to_hf_dataset(
+        targets,
+        repo_id=repo_id,
+        namespace=namespace,
+        revision=revision,
+        private=private,
+        token=token,
+        create_repo=create_repo,
+        dry_run=dry_run,
+    )
 
 
-def download_trace_file_from_hf_dataset(
-    path_in_repo: str,
-    local_path: str | Path | None = None,
+def upload_trace_file_to_hf_dataset(
+    local_path: str | Path,
     *,
     repo_id: Optional[str] = None,
+    path_in_repo: Optional[str] = None,
     namespace: Optional[str] = None,
     revision: Optional[str] = None,
+    private: Optional[bool] = None,
     token: bool | str | None = True,
-) -> Path:
-    """Download a trace by hub filename; writes to ``local_path`` or cwd."""
-    hub_path = Path(path_in_repo).name
-    dest = Path(local_path) if local_path is not None else Path(hub_path)
-    full_repo = normalize_dataset_repo_id(repo_id or trace_hf_dataset_repo(), namespace)
-    rev = revision if revision is not None else trace_hf_revision()
-
-    download_file_from_dataset(
-        full_repo,
-        hub_path,
-        dest,
-        revision=rev,
+    commit_message: Optional[str] = None,
+    create_repo: bool = True,
+) -> str:
+    """Upload a single trace file; returns hub path."""
+    local_path = Path(local_path)
+    if not local_path.is_file():
+        raise FileNotFoundError(local_path)
+    hub_paths = _upload_targets_to_hf_dataset(
+        [(local_path, path_in_repo or local_path.name)],
+        repo_id=repo_id,
+        namespace=namespace,
+        revision=revision,
+        private=private,
         token=token,
+        create_repo=create_repo,
+        commit_message=commit_message,
     )
-    logger.info(
-        "Downloaded trace from https://huggingface.co/datasets/%s/tree/%s/%s -> %s",
-        full_repo,
-        rev,
-        hub_path,
-        dest,
-    )
-    return dest
+    return hub_paths[0]
 
 
 def maybe_upload_eval_trace_file(
@@ -307,7 +420,7 @@ def maybe_upload_eval_trace_file(
             local_path,
             commit_message=msg,
         )
-        full_repo = normalize_dataset_repo_id(trace_hf_dataset_repo())
+        full_repo = resolve_repo()
         log.info(
             "Pushed trace to HF dataset %s (%s, %d samples)",
             full_repo,
@@ -318,6 +431,41 @@ def maybe_upload_eval_trace_file(
     except Exception as e:
         log.warning("Failed to upload trace to HF dataset: %s", e)
         return None
+
+
+def convert_paths_to_npz(
+    paths: Iterable[str | Path],
+    *,
+    output_dir: str | Path | None = None,
+    delete_jsonl: bool = False,
+) -> list[Path]:
+    from traces.trace_npz import compression_ratio, convert_jsonl_to_npz
+
+    outputs: list[Path] = []
+    for path in paths:
+        src = Path(path)
+        if not src.is_file():
+            raise FileNotFoundError(src)
+        if src.suffix.lower() not in (".jsonl", ".json"):
+            raise ValueError(f"expected .jsonl or .json, got {src}")
+        if output_dir is not None:
+            dst = Path(output_dir) / f"{src.stem}.npz"
+        else:
+            dst = src.with_suffix(".npz")
+        out = convert_jsonl_to_npz(src, dst)
+        ratio = compression_ratio(src, out)
+        logger.info(
+            "Converted %s -> %s (%.2fx smaller, %d -> %d bytes)",
+            src,
+            out,
+            ratio,
+            src.stat().st_size,
+            out.stat().st_size,
+        )
+        outputs.append(out)
+        if delete_jsonl:
+            src.unlink()
+    return outputs
 
 
 def _add_repo_args(p: argparse.ArgumentParser) -> None:
@@ -352,6 +500,10 @@ Examples:
   python traces/hf_trace_upload.py upload trace_outputs/ --recursive
   python traces/hf_trace_upload.py upload trace_outputs/*.jsonl --repo org/schedulerlens
   python traces/hf_trace_upload.py download llada_gsm8k_pd_s512.jsonl -o trace_outputs/llada_gsm8k_pd_s512.jsonl
+  python traces/trace_audit.py inventory
+  python traces/trace_audit.py run-all
+  python traces/hf_trace_upload.py convert trace_outputs/foo.jsonl
+  python traces/hf_trace_upload.py convert trace_outputs/*.jsonl --output-dir trace_outputs_npz
 """.strip(),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -410,6 +562,24 @@ Examples:
     _add_repo_args(p_dl)
     p_dl.set_defaults(func=cmd_download)
 
+    p_conv = sub.add_parser(
+        "convert",
+        help="Convert JSONL/JSON trace files to compressed NPZ",
+    )
+    p_conv.add_argument("paths", nargs="+", help="Trace file(s) to convert")
+    p_conv.add_argument(
+        "-o",
+        "--output-dir",
+        default=None,
+        help="Write .npz files here (default: next to each input file)",
+    )
+    p_conv.add_argument(
+        "--delete-jsonl",
+        action="store_true",
+        help="Delete source JSONL/JSON after successful conversion",
+    )
+    p_conv.set_defaults(func=cmd_convert)
+
     return parser
 
 
@@ -424,7 +594,7 @@ def cmd_upload(args: argparse.Namespace) -> int:
         recursive=args.recursive,
         dry_run=args.dry_run,
     )
-    repo = normalize_dataset_repo_id(args.repo_id or trace_hf_dataset_repo(), args.namespace)
+    repo = resolve_repo(args.repo_id, args.namespace)
     rev = args.revision or trace_hf_revision()
     print(f"repo: https://huggingface.co/datasets/{repo}/tree/{rev}")
     print(f"uploaded: {len(hub_paths)}")
@@ -433,10 +603,22 @@ def cmd_upload(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_convert(args: argparse.Namespace) -> int:
+    outputs = convert_paths_to_npz(
+        args.paths,
+        output_dir=args.output_dir,
+        delete_jsonl=args.delete_jsonl,
+    )
+    print(f"converted: {len(outputs)}")
+    for path in outputs:
+        print(f"  {path}")
+    return 0
+
+
 def cmd_download(args: argparse.Namespace) -> int:
-    dest = download_trace_file_from_hf_dataset(
+    dest = download_file(
         args.path_in_repo,
-        local_path=args.output,
+        dest=args.output or Path(args.path_in_repo).name,
         repo_id=args.repo_id,
         namespace=args.namespace,
         revision=args.revision,

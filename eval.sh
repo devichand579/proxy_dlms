@@ -42,7 +42,7 @@
 # --model: basename of a folder under ./models/ (must match lm-eval registration). Examples: llada, llada1_5, dream.
 #          Weights/tokenizer load from ./models/<model>/; mask/EOS/EoT ids come from that folder's config when not overridden.
 # --slurm: run the eval command under srun (use when script is submitted via sbatch so the job uses the allocated GPU).
-# Multi-GPU: use --parallel_config <YAML> → launch_eval.py parallel_runs_file= (see config/parallel_eval_runs.yaml).
+# Multi-GPU: use --parallel_config <YAML> -> launch_eval.py parallel_runs_file= (see config/parallel_eval_runs.yaml).
 # Local GPU: run without --slurm; use --device 0|1|cuda:0 or export CUDA_VISIBLE_DEVICES before running.
 # Offline (cached datasets + local W&B): add --offline (run download_datasets.sh first).
 
@@ -346,7 +346,7 @@ else
     export TRACING_ENABLED=FALSE
 fi
 
-# HF dataset upload for final trace file (default: on when tracing is on → repo schedulerlens)
+# HF dataset upload for final trace file (default: on when tracing is on -> repo schedulerlens)
 if [[ -n "$TRACE_HF_UPLOAD_ARG" ]]; then
     if [[ "${TRACE_HF_UPLOAD_ARG,,}" == "true" ]]; then
         export TRACE_HF_UPLOAD=TRUE

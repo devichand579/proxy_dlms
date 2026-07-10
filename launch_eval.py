@@ -333,7 +333,7 @@ def load_parallel_slot_specs(path: str | Path) -> list[dict[str, Any]]:
 
 
 def _parallel_slot_specs_from_file(cfg: DictConfig) -> Optional[list[dict[str, Any]]]:
-    """YAML list (or ``{\"runs\": [...]}``) merged per GPU; ``None`` if unset → single eval."""
+    """YAML list (or ``{\"runs\": [...]}``) merged per GPU; ``None`` if unset -> single eval."""
     raw_file = cfg.get("parallel_runs_file")
     if raw_file is None:
         return None
@@ -470,7 +470,7 @@ def _parallel_slurm_worker(repo_root: str, overrides: list[str], setup_cmds: lis
 
 
 def _build_submitit_slurm_params(hlaunch: dict[str, Any], slot_count: int) -> dict[str, Any]:
-    """Map launcher YAML → submitit ``SlurmExecutor`` parameter names."""
+    """Map launcher YAML -> submitit ``SlurmExecutor`` parameter names."""
     mem_gb = float(hlaunch.get("mem_gb", 64))
     params: dict[str, Any] = {
         "partition": hlaunch.get("partition"),
@@ -595,7 +595,7 @@ def run(cfg: DictConfig) -> int:
 
 
 def _normalize_hydra_cli(argv: list[str]) -> list[str]:
-    """Put Hydra flags (``--multirun``, etc.) before ``key=value`` overrides; map ``hydra.launcher=X`` → ``launcher=X`` if valid."""
+    """Put Hydra flags (``--multirun``, etc.) before ``key=value`` overrides; map ``hydra.launcher=X`` -> ``launcher=X`` if valid."""
     if len(argv) <= 1:
         return argv
 

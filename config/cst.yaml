@@ -78,7 +78,7 @@ train:
   # Train only: how many passes over the same stored hiddens (store ignores this).
   num_epochs: 1
   # Collection stops when total written chunk size reaches this (decimal GB, 1e9 bytes per GB).
-  # Same cap used at train time for each Hub download slice (download → train → delete → next).
+  # Same cap used at train time for each Hub download slice (download -> train -> delete -> next).
   target_staging_gb: 1.0
   inference_batch_size: 2
   scheduler_mode: pd
@@ -110,7 +110,7 @@ train:
   # Train mode always downloads from Hub; collect via mode=store store.scope=train.
   # store / eval Hub paths also use these keys (no default org in code).
   hidden_source: hf_hub
-  # Required: HF username or org slug → {org}/hiddens-train and {org}/hiddens-eval
+  # Required: HF username or org slug -> {org}/hiddens-train and {org}/hiddens-eval
   hf_hiddens_org: devichand
   hf_hiddens_train_repo: null   # override full repo id, e.g. ${hf_hiddens_org}/hiddens-train
   hf_hiddens_eval_repo: null    # override full repo id, e.g. ${hf_hiddens_org}/hiddens-eval

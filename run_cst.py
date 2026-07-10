@@ -137,7 +137,7 @@ def _store_hiddens_segments(
 
     nbat = len(row_batches)
     logger.info(
-        "store %s hiddens → %s (%s): %d row batches, %.3f GB per segment",
+        "store %s hiddens -> %s (%s): %d row batches, %.3f GB per segment",
         scope,
         repo_id,
         name_token,
