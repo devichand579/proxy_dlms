@@ -1,10 +1,8 @@
-#!/usr/bin/env python3
 """Export Strace eval metrics from Weights & Biases to CSV. See docs/evaluation.md."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 from pathlib import Path
@@ -16,7 +14,7 @@ import wandb
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = SCRIPT_DIR / "strace_metrics.csv"
 
-DEFAULT_PROJECT = "devichand579-iit-kharagpur/strace"
+DEFAULT_PROJECT = os.environ.get("STRACE_WANDB_PROJECT", "strace")
 NFE_KEYS = (
     "global/avg_nfe_per_sample",
     "avg_nfe_per_sample",
@@ -169,7 +167,6 @@ def _parse_run_name(name: str) -> dict[str, Optional[str]]:
     mode_part = after_task
     if steps_match:
         mode_part = after_task[: steps_match.start() - len(after_task) + len(after_task)]
-        # mode_part is prefix of after_task before _s{steps}
         s_idx = after_task.rfind(f"_s{steps_match.group(1)}")
         if s_idx >= 0:
             mode_part = after_task[:s_idx]
@@ -230,74 +227,15 @@ def _nfe_from_history(run: Any) -> tuple[Any, str]:
     return None, "missing"
 
 
-def _load_local_diffusion_nfe(repo_root: Path, run_name: str) -> tuple[Any, str]:
-    path = repo_root / "outputs" / run_name / ".eval_diffusion_metrics.json"
-    if not path.is_file():
-        return None, "missing"
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        computed = float(data.get("total_computed_samples_global", 0) or 0)
-        nfe_mass = float(data.get("total_nfe_mass_global", 0) or 0)
-        if computed > 0:
-            return nfe_mass / computed, "local_diffusion"
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        pass
-    return None, "missing"
+def _sanitize_wandb_url(url: Optional[str]) -> Optional[str]:
+    """Drop the W&B entity from run URLs (``wandb.ai/{entity}/{project}/...`` → ``wandb.ai/{project}/...``)."""
+    if not url:
+        return url
+    return re.sub(r"https://wandb\.ai/[^/]+/", "https://wandb.ai/", url)
 
 
-def _load_local_results_metric(repo_root: Path, run_name: str, task: str) -> tuple[Any, Optional[str]]:
-    path = repo_root / "outputs" / run_name / "results.json"
-    if not path.is_file() or not task:
-        return None, None
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None, None
-
-    results = data.get("results", data)
-    if not isinstance(results, dict):
-        return None, None
-
-    task_block = results.get(task)
-    if not isinstance(task_block, dict):
-        for key, block in results.items():
-            if task in key and isinstance(block, dict):
-                task_block = block
-                break
-
-    if not isinstance(task_block, dict):
-        return None, None
-
-    flat = _flatten_summary(task_block)
-    value, key = _first_present(flat, TASK_SCORE_KEYS.get(task, ()))
-    if value is not None:
-        return value, key
-    return _fuzzy_metric(flat, task)
-
-
-def _load_schedulerlens(repo_root: Path, run_name: str) -> dict[str, Any]:
-    path = repo_root / "outputs" / "schedulerlens" / run_name / "metrics.json"
-    if not path.is_file():
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        return {
-            k: data[k]
-            for k in ("M_hat", "J_hat", "M_hat_uniform", "J_hat_uniform")
-            if k in data
-        }
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def fetch_metrics(
     project: str,
-    repo_root: Path,
     include_unfinished: bool = False,
-    merge_local: bool = True,
 ) -> pd.DataFrame:
     api = wandb.Api()
     runs = api.runs(project)
@@ -317,40 +255,32 @@ def fetch_metrics(
         nfe, nfe_source = _nfe_from_summary(flat_summary)
         if nfe is None:
             nfe, nfe_source = _nfe_from_history(run)
-        if nfe is None and merge_local:
-            nfe, nfe_source = _load_local_diffusion_nfe(repo_root, name)
 
-        if metric is None and merge_local and task:
-            local_metric, local_key = _load_local_results_metric(repo_root, name, task)
-            if local_metric is not None:
-                metric, metric_key, metric_source = local_metric, local_key, "local_results"
-
-        row: dict[str, Any] = {
-            "name": name,
-            "run_id": run.id,
-            "state": run.state,
-            "model": parsed.get("model"),
-            "task": task or parsed.get("task"),
-            "mode": parsed.get("mode"),
-            "steps": parsed.get("steps"),
-            "avg_nfe_per_sample": nfe,
-            "avg_nfe_source": nfe_source,
-            "metric": metric,
-            "metric_key": metric_key,
-            "metric_source": metric_source,
-            "url": run.url,
-        }
-
-        if merge_local:
-            row.update(_load_schedulerlens(repo_root, name))
-
-        rows.append(row)
+        rows.append(
+            {
+                "name": name,
+                "run_id": run.id,
+                "state": run.state,
+                "model": parsed.get("model"),
+                "task": task or parsed.get("task"),
+                "mode": parsed.get("mode"),
+                "steps": parsed.get("steps"),
+                "avg_nfe_per_sample": nfe,
+                "avg_nfe_source": nfe_source,
+                "metric": metric,
+                "metric_key": metric_key,
+                "metric_source": metric_source,
+                "url": _sanitize_wandb_url(run.url),
+            }
+        )
 
     return pd.DataFrame(rows)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export Strace W&B eval metrics to CSV.")
+    parser = argparse.ArgumentParser(
+        description="Export Strace eval metrics from W&B to CSV."
+    )
     parser.add_argument(
         "--project",
         default=os.environ.get("WANDB_PROJECT", DEFAULT_PROJECT),
@@ -364,20 +294,9 @@ def main() -> None:
         help="Output CSV path (default: fetch_evals/strace_metrics.csv)",
     )
     parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=Path(__file__).resolve().parents[1],
-        help="Strace repo root for local outputs/ merge (default: repo root)",
-    )
-    parser.add_argument(
         "--include-unfinished",
         action="store_true",
         help="Include crashed/running runs, not just finished",
-    )
-    parser.add_argument(
-        "--no-merge-local",
-        action="store_true",
-        help="Do not merge outputs/{run}/results.json or .eval_diffusion_metrics.json",
     )
     args = parser.parse_args()
 
@@ -388,9 +307,7 @@ def main() -> None:
 
     df = fetch_metrics(
         project=args.project,
-        repo_root=args.repo_root,
         include_unfinished=args.include_unfinished,
-        merge_local=not args.no_merge_local,
     )
     output_path = args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
