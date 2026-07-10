@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -44,6 +45,10 @@ class TraceCheck:
     samples_with_all_selected: int
     samples_missing_required: int
     size_bytes: int
+    unique_prompts: int = 0
+    duplicate_traces: int = 0
+    removable_duplicates: int = 0
+    ambiguous_duplicate_prompts: int = 0
     issues: list[str] = field(default_factory=list)
     sample_checks: list[SampleCheck] = field(default_factory=list)
     repairs_applied: list[str] = field(default_factory=list)
@@ -87,6 +92,66 @@ def count_inferred_unmasks(steps: list[dict]) -> int:
         a1 = np.asarray(m1[0], dtype=bool)
         total += int(np.sum(a0 & ~a1))
     return total
+
+
+def prompt_key(sample: dict) -> Optional[tuple[int, ...]]:
+    """Stable key for matching duplicate traces (same eval instance)."""
+    prompt = sample.get("prompt")
+    if prompt is None:
+        return None
+    ids = prompt[0] if isinstance(prompt[0], list) else prompt
+    return tuple(int(t) for t in ids)
+
+
+def _step_field_equal(a, b, *, field: str) -> bool:
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    aa = np.asarray(a[0] if isinstance(a, list) else a)
+    bb = np.asarray(b[0] if isinstance(b, list) else b)
+    if field in ("confidences", "entropies"):
+        return bool(np.allclose(aa, bb, rtol=1e-5, atol=1e-5, equal_nan=True))
+    return bool(np.array_equal(aa, bb))
+
+
+def duplicate_prompt_stats(samples: list[dict]) -> dict[str, int]:
+    """Count duplicate traces: extra lines sharing the same prompt token ids."""
+    counts = Counter(key for key in (prompt_key(s) for s in samples) if key is not None)
+    unique = len(counts)
+    same_prompt_extra = sum(c - 1 for c in counts.values() if c > 1)
+    return {
+        "unique_prompts": unique,
+        "duplicate_traces": max(0, len(samples) - unique),
+        "same_prompt_extra": same_prompt_extra,
+        "removable_duplicates": same_prompt_extra,
+        "ambiguous_duplicate_prompts": 0,
+        "max_copies": max(counts.values()) if counts else 0,
+    }
+
+
+def deduplicate_prompt_traces(samples: list[dict]) -> tuple[list[dict], list[str]]:
+    """Drop duplicate traces with the same prompt (keep first occurrence)."""
+    repairs: list[str] = []
+    if not samples:
+        return [], repairs
+
+    seen: set[tuple[int, ...]] = set()
+    kept: list[dict] = []
+    removed = 0
+    for sample in samples:
+        key = prompt_key(sample)
+        if key is not None and key in seen:
+            removed += 1
+            continue
+        if key is not None:
+            seen.add(key)
+        kept.append(sample)
+
+    if removed:
+        repairs.append(f"removed {removed} duplicate trace(s) by prompt ({len(kept)} kept)")
+        return kept, repairs
+    return list(samples), repairs
 
 
 def infer_unmasking_order(steps: list[dict], *, gen_length: int) -> dict[int, int]:
@@ -248,6 +313,12 @@ def check_trace_file(
         if s.n_steps > 0 and s.steps_with_selected == s.n_steps
     )
     missing_req = sum(1 for s in sample_checks if s.steps_missing_required > 0)
+    dup = duplicate_prompt_stats(samples)
+    if dup["removable_duplicates"] > 0:
+        issues.append(
+            f"duplicate prompts: {dup['removable_duplicates']} removable "
+            f"({n} lines, {dup['unique_prompts']} unique prompts)"
+        )
 
     return TraceCheck(
         path=str(path.resolve()),
@@ -261,6 +332,10 @@ def check_trace_file(
         samples_with_all_selected=all_sel,
         samples_missing_required=missing_req,
         size_bytes=path.stat().st_size,
+        unique_prompts=dup["unique_prompts"],
+        duplicate_traces=dup["duplicate_traces"],
+        removable_duplicates=dup["removable_duplicates"],
+        ambiguous_duplicate_prompts=dup["ambiguous_duplicate_prompts"],
         issues=issues,
         sample_checks=sample_checks,
     )
@@ -302,8 +377,9 @@ def repair_sample_from_mask_diff(sample: dict) -> tuple[dict, list[str]]:
 
 
 def repair_samples(samples: list[dict]) -> tuple[list[dict], list[str]]:
+    samples, dedup_reps = deduplicate_prompt_traces(samples)
+    all_repairs: list[str] = list(dedup_reps)
     repaired: list[dict] = []
-    all_repairs: list[str] = []
     for i, sample in enumerate(samples):
         fixed, reps = repair_sample_from_mask_diff(sample)
         repaired.append(fixed)
@@ -313,15 +389,7 @@ def repair_samples(samples: list[dict]) -> tuple[list[dict], list[str]]:
 
 
 def _arrays_close(a, b, *, field: str) -> bool:
-    if a is None and b is None:
-        return True
-    if a is None or b is None:
-        return False
-    aa = np.asarray(a[0] if isinstance(a, list) else a)
-    bb = np.asarray(b[0] if isinstance(b, list) else b)
-    if field in ("confidences", "entropies"):
-        return np.allclose(aa, bb, rtol=1e-5, atol=1e-5, equal_nan=True)
-    return np.array_equal(aa, bb)
+    return _step_field_equal(a, b, field=field)
 
 
 def validate_npz_roundtrip(
@@ -375,6 +443,10 @@ def check_to_row(check: TraceCheck, *, extra: Optional[dict[str, Any]] = None) -
         "samples_with_any_selected": check.samples_with_any_selected,
         "samples_with_all_selected": check.samples_with_all_selected,
         "samples_missing_required": check.samples_missing_required,
+        "unique_prompts": check.unique_prompts,
+        "duplicate_traces": check.duplicate_traces,
+        "removable_duplicates": check.removable_duplicates,
+        "ambiguous_duplicate_prompts": check.ambiguous_duplicate_prompts,
         "size_bytes": check.size_bytes,
         "issues": "; ".join(check.issues) if check.issues else "",
     }
