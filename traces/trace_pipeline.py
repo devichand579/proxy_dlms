@@ -23,6 +23,7 @@ from traces.trace_checks import (
     TraceCheck,
     check_to_row,
     check_trace_file,
+    deduplicate_prompt_traces,
     repair_samples,
     validate_npz_roundtrip,
 )
@@ -124,6 +125,10 @@ AUDIT_CSV_FIELDS = [
     "samples_with_any_selected",
     "samples_with_all_selected",
     "samples_missing_required",
+    "unique_prompts",
+    "duplicate_traces",
+    "removable_duplicates",
+    "ambiguous_duplicate_prompts",
     "metric_wandb",
     "metric_key_wandb",
     "metric_trace",
@@ -176,9 +181,12 @@ def audit_one_hub_file(
     try:
         check = check_trace_file(path, max_samples=max_samples)
         _, samples = load_trace_samples(path)
+        samples_for_metrics = samples
+        if check.removable_duplicates > 0:
+            samples_for_metrics, _ = deduplicate_prompt_traces(samples)
         metrics_cmp = compare_with_metrics_row(
             run_name=name,
-            samples=samples,
+            samples=samples_for_metrics,
             metrics_lookup=load_metrics_lookup(metrics_csv),
             task=meta.get("task", ""),
             model=meta.get("model", ""),
@@ -283,7 +291,8 @@ def convert_one_hub_file(
         needs_order_repair = any(
             sample.get("step_traces") and not sample.get("unmasking_order") for sample in samples
         )
-        if repair and (needs_hook_repair or needs_order_repair):
+        needs_dedup = check.removable_duplicates > 0
+        if repair and (needs_hook_repair or needs_order_repair or needs_dedup):
             samples, repairs = repair_samples(samples)
             if repairs:
                 repaired = True

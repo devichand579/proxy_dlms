@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional
 
 from load_model import infer_diffusion_token_ids, is_dream_model_dir, load_tokenizer, prepend_bos_for_dream
+from traces.trace_doc_match import build_doc_index, match_trace_to_instance
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +91,7 @@ def eval_num_fewshot(task_name: str) -> int:
     if "mbpp" in t:
         return 3
     if "arc_challenge_chat" in t:
-        return 5
+        return 0
     return 0
 
 
@@ -255,11 +257,16 @@ def compute_trace_accuracy(
 ) -> dict[str, Any]:
     """
     Score trace generations with lm-eval task metrics (pass@1, exact_match, strict-match, …).
-    Matches samples to eval instances by prompt token ids.
+    Matches samples to eval instances by decoded prompt doc keys (few-shot safe),
+    with token-id fallback.
     """
     root = repo_root or Path(__file__).resolve().parent.parent
     model_dir = model_dir_for_name(model_name, root)
     flags: list[str] = []
+
+    t_lower = str(task_name).strip().lower()
+    if "mbpp" in t_lower or "humaneval" in t_lower:
+        os.environ.setdefault("HF_ALLOW_CODE_EVAL", "1")
 
     if not model_dir.is_dir():
         return {
@@ -296,20 +303,33 @@ def compute_trace_accuracy(
         }
 
     stop_tokens = _task_stop_tokens(task)
-    prompt_index: dict[tuple[int, ...], Any] = {}
+    doc_index = build_doc_index(task, task_name)
+    token_index: dict[tuple[int, ...], Any] = {}
     for inst in task.instances:
         key = _instance_prompt_key(inst, tokenizer, model_dir)
-        prompt_index.setdefault(key, inst)
+        token_index.setdefault(key, inst)
 
     per_doc_metrics: list[dict[str, float]] = []
     n_unmatched = 0
     n_no_final = 0
+    n_matched_doc = 0
+    n_matched_token = 0
 
     for sample in samples:
-        key = _trace_prompt_key(sample, tokenizer)
-        if key is None or key not in prompt_index:
+        inst, method = match_trace_to_instance(
+            sample,
+            task_name=task_name,
+            tokenizer=tokenizer,
+            doc_index=doc_index,
+            token_index=token_index,
+        )
+        if inst is None:
             n_unmatched += 1
             continue
+        if method == "doc_key":
+            n_matched_doc += 1
+        elif method == "token_key":
+            n_matched_token += 1
         gen_text = decode_generation_from_trace(
             sample,
             tokenizer,
@@ -320,12 +340,15 @@ def compute_trace_accuracy(
         if gen_text is None:
             n_no_final += 1
             continue
-        inst = prompt_index[key]
         try:
             per_doc_metrics.append(_score_instance(task, inst, gen_text))
         except Exception as e:
             flags.append(f"score failed doc {getattr(inst, 'doc_id', '?')}: {e}")
 
+    if n_matched_doc:
+        flags.append(f"matched by doc_key: {n_matched_doc}")
+    if n_matched_token:
+        flags.append(f"matched by token_key: {n_matched_token}")
     if n_unmatched:
         flags.append(f"unmatched samples: {n_unmatched}")
     if n_no_final:
