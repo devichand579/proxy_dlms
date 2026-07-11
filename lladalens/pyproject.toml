@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pcfg"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "datasets>=2.14",
+]
+
+[project.optional-dependencies]
+train = ["torch"]
+hub = ["huggingface_hub"]
+
+[tool.maturin]
+manifest-path = "pcfg_engine_rs/Cargo.toml"
+module-name = "pcfg_engine_rs"
