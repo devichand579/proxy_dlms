@@ -68,3 +68,23 @@ def load_pcfg_llada(
 
 def count_parameters(model) -> int:
     return sum(p.numel() for p in model.parameters())
+
+
+def load_pcfg_llada_checkpoint(
+    path: str | Path,
+    *,
+    device: Optional[str] = None,
+):
+    """Load a trained PCFG LLaDA checkpoint (local dir or HF snapshot path)."""
+    from pathlib import Path
+
+    ckpt = Path(path)
+    if not ckpt.is_dir():
+        raise FileNotFoundError(f"checkpoint directory not found: {ckpt}")
+
+    vocab = pcfg_vocab()
+    config = LLaDAConfig.from_pretrained(str(ckpt))
+    model = LLaDAModelLM.from_pretrained(str(ckpt))
+    if device is not None:
+        model = model.to(device)
+    return model, config, vocab

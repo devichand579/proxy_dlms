@@ -58,6 +58,31 @@ def expected_trace_names(metrics_csv: str | Path | None = None) -> set[str]:
     return set(load_metrics_lookup(metrics_csv).keys())
 
 
+def is_pcfg_trace(run_name: str, samples: list[dict]) -> bool:
+    """PCFG lladalens traces are not in strace_metrics.csv / lm-eval tasks."""
+    if str(run_name).startswith("pcfg_"):
+        return True
+    if samples and (samples[0].get("metadata") or {}).get("task") == "pcfg_full":
+        return True
+    return False
+
+
+def pcfg_metrics_skip(*, n_samples: int) -> dict[str, Any]:
+    """Audit row fragment: hook checks only, no W&B / lm-eval scoring."""
+    return {
+        "metric_wandb": None,
+        "metric_key_wandb": "",
+        "metric_trace": None,
+        "metric_key_trace": "",
+        "metric_delta": None,
+        "n_scored": 0,
+        "n_unmatched": 0,
+        "n_samples_expected": None,
+        "sample_count_delta": None,
+        "metrics_flags": f"pcfg trace ({n_samples} samples): skipped lm-eval / wandb metrics",
+    }
+
+
 def _safe_float(val: Any) -> Optional[float]:
     if val is None or val == "":
         return None

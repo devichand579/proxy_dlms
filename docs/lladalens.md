@@ -252,7 +252,6 @@ python train_pcfg_llada.py --variant 100m --hf-dataset pcfg-code --steps 200
 
 ```bash
 python train_pcfg_llada.py --variant 100m --train-tokens 500000 --steps 200
-python train_pcfg_llada.py --variant 100m --n-examples 2048 --steps 50   # legacy count API
 ```
 
 ### Training flags
@@ -264,13 +263,120 @@ python train_pcfg_llada.py --variant 100m --n-examples 2048 --steps 50   # legac
 | `--hf-dataset` | Hub dataset (short name or `org/repo`) |
 | `--hf-namespace` | Org override for short `--hf-dataset` |
 | `--train-tokens` | Sample corpus by token budget |
-| `--n-examples` | Legacy: exact string count |
-| `--batch-size` | Default 16 |
+| `--batch-size` | Per-GPU batch size (default 16) |
+| `--grad-accum` | Gradient accumulation steps (default 1) |
+| `--num-workers` | DataLoader workers per rank (default 2) |
 | `--peak-lr`, `--mid-lr`, `--min-lr` | WSD schedule (paper defaults) |
-| `--steps` | Cap optimizer steps |
+| `--warmup-steps` | Explicit warmup (overrides fraction) |
+| `--warmup-fraction` | Auto warmup = fraction of total steps (default 0.02) |
+| `--warmup-max` | Cap auto warmup (default 5000) |
+| `--steps` | Total optimizer steps |
+| `--epochs` | Epochs if `--steps` omitted |
+| `--log-every` | Print/log every N steps (default 10) |
+| `--save-every` | Checkpoint every N steps (default 5000) |
+| `--resume` | Resume from checkpoint directory |
+| `--wandb` / `--no-wandb` | W&B logging (default on) |
+| `--wandb-project` | W&B project (default `WANDB_PROJECT` / `strace`) |
+| `--wandb-run-name` | W&B run name (default auto from variant + hparams) |
+| `--wandb-id` | Explicit W&B run id for deterministic resume |
 | `--out-dir` | Checkpoint output (default `checkpoints/llada-<variant>-pcfg`) |
+| `--val-fraction` | Random train fraction for validation (default 0.05) |
+| `--val-every` | Validation every N steps (default 2000; 0=off) |
+| `--push-model` | Push `checkpoint-best_val` to HF Hub after training |
+| `--hf-model` | HF model repo (default `llada-<variant>-pcfg`) |
+| `--hf-model-namespace` | Org override for `--hf-model` |
+| `--hf-model-private` | Create private model repo |
+| `--amp` / `--no-amp` | Mixed precision on CUDA (default on) |
+| `--amp-dtype` | `bfloat16` or `float16` |
+
+### Multi-GPU (DDP)
+
+```bash
+torchrun --nproc_per_node=2 train_pcfg_llada.py \
+  --variant 100m --corpus data/pcfg --steps 5000 --batch-size 16
+```
+
+Effective batch size = `batch_size × num_gpus × grad_accum`.
+
+For ~1M samples at batch size 128, one epoch is ~7.8k optimizer steps. Defaults (`--val-every 2000`, `--save-every 5000`) give a few validation passes and roughly one rolling checkpoint per epoch without excessive I/O. Warmup defaults to 2% of total steps (capped at 5000).
+
+```bash
+torchrun --nproc_per_node=4 train_pcfg_llada.py \
+  --variant 100m --hf-dataset pcfg-code --batch-size 128 --epochs 3
+```
+
+### W&B
+
+Uses repo defaults (`WANDB_API_KEY`, `WANDB_PROJECT` from `.env` / `repo_env_defaults`).
+
+Logged per step: `train/loss`, `train/ppl`, `train/lr`, `val/loss`, `val/ppl` (when validation enabled).
+
+Default run name encodes ablation-relevant hparams, e.g. `pcfg-100m-bs128-s50000-lr4e-4-pcfg-code` (variant, batch, steps/epochs, LR, data source). Override with `--wandb-run-name`.
+
+Checkpoints: only `checkpoint-latest/` (replaced each save) and `checkpoint-best_val/` (replaced when val improves), plus `train_state.json` and RNG states for deterministic resume. Previous `latest` / `best_val` dirs are deleted before writing new ones.
+
+### HF model push
+
+```bash
+python train_pcfg_llada.py --variant 100m --hf-dataset pcfg-code --steps 5000 \
+  --push-model --hf-model llada-100m-pcfg
+```
+
+Pushes `checkpoint-best_val` to `https://huggingface.co/<namespace>/llada-100m-pcfg` (requires `HF_TOKEN` and `pip install -e ".[train]"`).
 
 Checkpoints include model weights, config, tokenizer, and `pcfg_vocab.txt`.
+
+---
+
+## Evaluation metrics
+
+| Phase | Metric | Meaning |
+| ----- | ------ | ------- |
+| Train / val | `masked_ce_loss`, `masked_ppl` | LLaDA Eq. (3) on independently masked tokens |
+| Generation | `exact_match` | Full content+eos matches reference |
+| Generation | `structural_accuracy` | Syntax token match rate (keywords, delimiters, operators; excludes `id`/`fld`/`num`/`flt`) |
+| Oracle | `oracle_nll`, `oracle_ppl` | −log q(xᵢ \| committed) from PCFG engine |
+| Oracle | `Mt`, `Jt` | KL(model ‖ q) and joint entropy per unmask step |
+| Traces | `M_hat`, `J_hat` | SchedulerLens proxies from confidences / order |
+
+Validation holds out a **random 5%** of the train corpus (`--val-fraction`, default 0.05) with deterministic masking per example index. Validation is **masked CE loss only** — schedulers are not run during training. Best checkpoint by validation loss: `checkpoint-best_val/`.
+
+---
+
+## Scheduler eval (8 schedulers + tracing)
+
+After training, evaluate on the test split with all eight Strace schedulers (`pd`, `bd`, `top_k_c`, `top_k_m`, `fhs`, `eb`, `fdm`, `dus`):
+
+```bash
+cd lladalens
+TRACING_ENABLED=true TRACE_HF_UPLOAD=true python pcfg_eval.py \
+  --model-path checkpoints/llada-100m-pcfg/checkpoint-best_val \
+  --corpus data/pcfg --schedulers all --max-samples 64 --steps 128
+```
+
+Load from HuggingFace Hub:
+
+```bash
+TRACING_ENABLED=true python pcfg_eval.py \
+  --hf-model username/llada-100m-pcfg \
+  --hf-dataset pcfg-code --schedulers pd,bd,eb
+```
+
+Outputs:
+- `eval_outputs/pcfg/pcfg_eval_<variant>.json` — per-scheduler metrics
+- `eval_outputs/pcfg/trace_outputs/pcfg_<variant>_<scheduler>_s<steps>.jsonl` — traces for SchedulerLens
+
+Analyze traces (proxies + perplexity + oracle Mt/Jt):
+
+```bash
+python -m schedulerlens.run \
+  eval_outputs/pcfg/trace_outputs/pcfg_100m_pd_s128.jsonl \
+  -o outputs/schedulerlens/pcfg_pd --replay-oracle
+```
+
+`perplexity.json` includes `model_commit_ppl` (from trace confidences) and `oracle_ppl` (exact PCFG marginals). With `--replay-oracle`, exact `Mt`/`Jt` are computed by re-forwarding the model at each trace step.
+
+PCFG metrics are computed by `pcfg_eval.py` and `schedulerlens` — not the lm-eval trace audit pipeline. PCFG traces (`pcfg_*.jsonl`) still get hook/structure checks in `trace_audit.py`, but **W&B / lm-eval scoring is skipped** automatically.
 
 ---
 

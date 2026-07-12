@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -15,6 +16,65 @@ from repo_env_defaults import apply_repo_env_defaults
 from traces.hf_trace_upload import ensure_dataset_repo, normalize_dataset_repo_id
 
 DEFAULT_PCFG_DATASET = "pcfg-code"
+DEFAULT_PCFG_MODEL_PREFIX = "llada"
+
+
+def default_pcfg_model_repo(variant: str) -> str:
+    """Default short model repo name, e.g. ``llada-100m-pcfg``."""
+    key = str(variant).lower().replace("llada-", "").replace("-", "")
+    return f"{DEFAULT_PCFG_MODEL_PREFIX}-{key}-pcfg"
+
+
+def resolve_pcfg_model_repo(
+    repo_id: Optional[str] = None,
+    *,
+    model: Optional[str] = None,
+    variant: Optional[str] = None,
+    namespace: Optional[str] = None,
+) -> str:
+    """Return full ``org/repo`` for a PCFG LLaDA checkpoint on the Hub."""
+    name = (repo_id or model or (default_pcfg_model_repo(variant) if variant else "")).strip()
+    if not name:
+        raise ValueError("PCFG Hub model name is empty")
+    return normalize_dataset_repo_id(name, pcfg_namespace(namespace))
+
+
+def push_pcfg_model(
+    ckpt_dir: Path | str,
+    *,
+    repo_id: Optional[str] = None,
+    model: Optional[str] = None,
+    variant: Optional[str] = None,
+    namespace: Optional[str] = None,
+    private: bool = False,
+    token: Optional[str] = None,
+    commit_message: Optional[str] = None,
+) -> str:
+    """Upload a checkpoint folder (best-val) to the HuggingFace Hub as a model repo."""
+    from huggingface_hub import HfApi
+
+    ckpt_dir = Path(ckpt_dir)
+    if not ckpt_dir.is_dir():
+        raise FileNotFoundError(f"checkpoint directory not found: {ckpt_dir}")
+
+    full_repo = resolve_pcfg_model_repo(
+        repo_id, model=model, variant=variant, namespace=namespace,
+    )
+    tok = resolve_hf_token(token)
+    api = HfApi(token=tok)
+    try:
+        api.create_repo(full_repo, repo_type="model", private=private, exist_ok=True)
+    except Exception as e:
+        raise RuntimeError(f"create_repo({full_repo}) failed: {e}") from e
+
+    msg = commit_message or f"PCFG LLaDA checkpoint from {ckpt_dir.name}"
+    api.upload_folder(
+        folder_path=str(ckpt_dir),
+        repo_id=full_repo,
+        repo_type="model",
+        commit_message=msg,
+    )
+    return full_repo
 
 
 def pcfg_dataset_repo() -> str:

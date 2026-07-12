@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-train = ["torch"]
+train = ["torch", "wandb", "huggingface_hub"]
 hub = ["huggingface_hub"]
 
 [tool.maturin]

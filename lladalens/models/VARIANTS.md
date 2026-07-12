@@ -24,5 +24,5 @@ tokenizer = load_pcfg_tokenizer()
 ## Train
 
 ```bash
-python train_pcfg_llada.py --variant 100m --n-examples 2048 --steps 50
+python train_pcfg_llada.py --variant 100m --hf-dataset pcfg-code --steps 50
 ```
