@@ -30,7 +30,9 @@ from traces.trace_checks import (
 from traces.trace_metrics import (
     compare_with_metrics_row,
     expected_trace_names,
+    is_pcfg_trace,
     load_metrics_lookup,
+    pcfg_metrics_skip,
 )
 from traces.trace_npz import compression_ratio, convert_jsonl_to_npz, load_trace_samples
 
@@ -174,7 +176,11 @@ def audit_one_hub_file(
     full_repo = resolve_repo(repo_id, namespace)
     rev = revision if revision is not None else trace_hf_revision()
     name = _stem(filename)
-    meta = load_metrics_lookup(metrics_csv).get(name, {})
+    meta: dict[str, str] = {}
+    try:
+        meta = load_metrics_lookup(metrics_csv).get(name, {})
+    except FileNotFoundError:
+        pass
     sizes = file_sizes([filename], repo_id=full_repo, revision=rev, token=token)
 
     path = download_file(filename, repo_id=full_repo, revision=rev, token=token)
@@ -184,14 +190,39 @@ def audit_one_hub_file(
         samples_for_metrics = samples
         if check.removable_duplicates > 0:
             samples_for_metrics, _ = deduplicate_prompt_traces(samples)
-        metrics_cmp = compare_with_metrics_row(
-            run_name=name,
-            samples=samples_for_metrics,
-            metrics_lookup=load_metrics_lookup(metrics_csv),
-            task=meta.get("task", ""),
-            model=meta.get("model", ""),
-            compute_accuracy=compute_accuracy,
-        )
+
+        if is_pcfg_trace(name, samples_for_metrics):
+            if samples_for_metrics:
+                m = samples_for_metrics[0].get("metadata") or {}
+                meta = {
+                    "model": str(m.get("variant", "pcfg")),
+                    "task": "pcfg",
+                    "mode": str(m.get("scheduler", "")),
+                    "steps": "",
+                }
+            metrics_cmp = pcfg_metrics_skip(n_samples=len(samples_for_metrics))
+        elif compute_accuracy:
+            metrics_cmp = compare_with_metrics_row(
+                run_name=name,
+                samples=samples_for_metrics,
+                metrics_lookup=load_metrics_lookup(metrics_csv),
+                task=meta.get("task", ""),
+                model=meta.get("model", ""),
+                compute_accuracy=True,
+            )
+        else:
+            metrics_cmp = {
+                "metric_wandb": None,
+                "metric_key_wandb": "",
+                "metric_trace": None,
+                "metric_key_trace": "",
+                "metric_delta": None,
+                "n_scored": 0,
+                "n_unmatched": 0,
+                "n_samples_expected": None,
+                "sample_count_delta": None,
+                "metrics_flags": "accuracy skipped",
+            }
     finally:
         cleanup_cache(full_repo, filename, revision=rev)
 
