@@ -305,6 +305,35 @@ torchrun --nproc_per_node=4 train_pcfg_llada.py \
   --variant 100m --hf-dataset pcfg-code --batch-size 128 --epochs 3
 ```
 
+### Hydra launcher and Slurm (`lladalens.sh`)
+
+Config defaults live in **`config/lladalens.yaml`**. The shell script exposes flags that **override** config only when set; omitted flags keep YAML defaults.
+
+```bash
+# Train — only override what you need; rest from config (batch_size=128, val_every=2000, ...)
+./lladalens.sh --mode train --variant 100m --hf_dataset pcfg-code --epochs 3
+
+# Eval
+./lladalens.sh --mode eval --model_path checkpoints/llada-100m-pcfg/checkpoint-best_val --schedulers all
+
+# Slurm
+sbatch lladalens.sh --mode train --hf_dataset pcfg-code --nproc 4 --slurm
+
+# Hydra multirun ablations (login node → one SLURM job per combo)
+python run_lladalens.py mode=train train.variant=100m,200m train.peak_lr=4e-4,1e-4 \
+  --multirun launcher=slurm_h100
+```
+
+Run `./lladalens.sh --help` for the full flag list (train hparams, eval schedulers, W&B, tracing, etc.). Advanced overrides can still be appended as `key=value`, e.g. `train.mid_lr=2e-4`.
+
+| Layer | Role |
+| ----- | ---- |
+| `config/lladalens.yaml` | Default hyperparameters for train and eval |
+| `lladalens.sh --flag` | Override specific keys without repeating the full config |
+| `run_lladalens.py` | Hydra entry; maps YAML → `train_pcfg_llada.py` / `pcfg_eval.py` |
+
+Edit `#SBATCH` headers in `lladalens.sh` for partition, memory, and GPU count (same pattern as `eval.sh` / `cst.sh`).
+
 ### W&B
 
 Uses repo defaults (`WANDB_API_KEY`, `WANDB_PROJECT` from `.env` / `repo_env_defaults`).
@@ -348,6 +377,10 @@ Validation holds out a **random 5%** of the train corpus (`--val-fraction`, defa
 After training, evaluate on the test split with all eight Strace schedulers (`pd`, `bd`, `top_k_c`, `top_k_m`, `fhs`, `eb`, `fdm`, `dus`):
 
 ```bash
+# Via Hydra launcher (repo root)
+./lladalens.sh --mode eval eval.hf_model=username/llada-100m-pcfg eval.schedulers=all
+
+# Direct script (cd lladalens)
 cd lladalens
 TRACING_ENABLED=true TRACE_HF_UPLOAD=true python pcfg_eval.py \
   --model-path checkpoints/llada-100m-pcfg/checkpoint-best_val \
