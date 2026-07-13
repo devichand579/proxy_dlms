@@ -10,7 +10,7 @@ from load_model import BASE_DIR, infer_diffusion_token_ids, load_tokenizer
 
 logger = logging.getLogger(__name__)
 
-KNOWN_MODELS: Sequence[str] = ("llada1_5", "llada", "dream")
+KNOWN_MODELS: Sequence[str] = ("llada1_5", "llada", "dream", "pcfg")
 
 
 def infer_model_name(trace_path: Union[str, Path]) -> Optional[str]:
