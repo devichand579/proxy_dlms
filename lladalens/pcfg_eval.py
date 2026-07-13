@@ -35,7 +35,7 @@ os.environ.setdefault("TRACING_ENABLED", "true")
 import torch
 from hf_hub import apply_pcfg_hf_env, resolve_hf_token
 from models.pcfg_models import load_pcfg_llada_checkpoint, load_pcfg_tokenizer
-from pcfg_data import ARCH_LEN, build_stack, load_corpus_from_disk, load_corpus_from_hub
+from pcfg_data import ARCH_LEN, build_stack, fit_corpus_for_arch, load_corpus_from_disk, load_corpus_from_hub
 from pcfg_metrics import (
     build_full_mask_inputs,
     exact_match,
@@ -108,6 +108,12 @@ def load_test_corpus(args) -> list[list[str]]:
         raise ValueError("pass --corpus or --hf-dataset for test split")
     if not test:
         raise ValueError("corpus has no test split; regenerate with pcfg_generate holdout")
+    test, n_clipped = fit_corpus_for_arch(test, arch_len=ARCH_LEN)
+    if n_clipped > 0:
+        print(
+            f"clipped {n_clipped} test strings to max content {ARCH_LEN - 1}",
+            flush=True,
+        )
     return test
 
 

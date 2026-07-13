@@ -29,8 +29,23 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 from hf_hub import apply_pcfg_hf_env, push_pcfg_model, resolve_hf_token
-from models.pcfg_models import count_parameters, list_variants, load_pcfg_llada, load_pcfg_tokenizer
-from pcfg_data import ARCH_LEN, LABEL_IGNORE, load_corpus_from_disk, load_corpus_from_hub, make_train_example
+from models.pcfg_models import (
+    count_parameters,
+    list_variants,
+    load_pcfg_llada,
+    load_pcfg_llada_checkpoint,
+    load_pcfg_tokenizer,
+)
+from pcfg_data import (
+    ARCH_LEN,
+    LABEL_IGNORE,
+    corpus_length_stats,
+    fit_corpus_for_arch,
+    load_corpus_from_disk,
+    load_corpus_from_hub,
+    make_train_example,
+    MAX_CONTENT_LEN,
+)
 from pcfg_metrics import make_val_example, masked_perplexity
 
 TRAIN_STATE_JSON = "train_state.json"
@@ -619,8 +634,15 @@ def main():
 
     out_dir = args.out_dir or Path("checkpoints") / f"llada-{args.variant}-pcfg"
     resume_dir = args.resume or out_dir
+    latest_ckpt = resume_dir / CKPT_LATEST
+    do_resume = args.resume is not None and (resume_dir / TRAIN_STATE_JSON).exists()
 
-    model, config, vocab = load_pcfg_llada(args.variant, device=str(device))
+    if do_resume and latest_ckpt.is_dir():
+        model, config, vocab = load_pcfg_llada_checkpoint(latest_ckpt, device=str(device))
+        if is_main(rank):
+            print(f"loaded weights from {latest_ckpt}", flush=True)
+    else:
+        model, config, vocab = load_pcfg_llada(args.variant, device=str(device))
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
@@ -665,6 +687,22 @@ def main():
             )
     else:
         p.error("one of --corpus, --hf-dataset, or --train-tokens is required")
+
+    if is_main(rank):
+        lo, hi, n_over = corpus_length_stats(token_seqs)
+        print(
+            f"corpus lengths (raw): min={lo} max={hi} "
+            f"n_over_{MAX_CONTENT_LEN}={n_over} "
+            f"(training uses max {MAX_CONTENT_LEN} content + <eos> in arch {ARCH_LEN})",
+            flush=True,
+        )
+
+    token_seqs, n_clipped = fit_corpus_for_arch(token_seqs, arch_len=ARCH_LEN)
+    if is_main(rank) and n_clipped > 0:
+        print(
+            f"clipped {n_clipped} strings that exceeded max content {MAX_CONTENT_LEN}",
+            flush=True,
+        )
 
     train_seqs, val_seqs = split_train_val(
         token_seqs, val_fraction=args.val_fraction, seed=args.seed,

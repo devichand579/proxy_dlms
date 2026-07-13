@@ -328,7 +328,7 @@ class Sampler:
 def sample_one(
     grammar: Grammar | None = None,
     min_len: int = 64,
-    max_len: int = 128,
+    max_len: int = 127,
     *,
     max_depth: int = 350,
     seed: int = 0,
