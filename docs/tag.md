@@ -170,7 +170,7 @@ Prune metadata in the run JSON includes `source` (`out` or `in`), node/edge coun
 | Export      | `tag/viz.py`             | JSON + vis-network HTML                                       |
 
 
-Entry points: `run_tag.py`, `./tag.sh`, `python -m tag`.
+Entry points: `hydra_runners/run_tag.py`, `./scripts/tag.sh`, `python -m tag`.
 
 ---
 
@@ -241,7 +241,7 @@ Set `**prompt`** (full) or `**hidden_pt**` (chunk), not neither.
 ### Full run (generate + TAG + JSON + HTML)
 
 ```bash
-./tag.sh \
+./scripts/tag.sh \
   --cst_checkpoint outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt \
   --model_path ./models/llada \
   --out_dir outputs/tag_demo \
@@ -251,7 +251,7 @@ Set `**prompt`** (full) or `**hidden_pt**` (chunk), not neither.
 Hydra:
 
 ```bash
-python run_tag.py \
+python hydra_runners/run_tag.py \
   model_path=./models/llada \
   cst_checkpoint=outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt \
   prompt="Your question here" \
@@ -261,7 +261,7 @@ python run_tag.py \
 ### Chunk-only (existing hidden `.pt`)
 
 ```bash
-python run_tag.py \
+python hydra_runners/run_tag.py \
   cst_checkpoint=path/to/cst_..._train_best.pt \
   hidden_pt=path/to/file.pt \
   model_path=./models/llada \
@@ -272,22 +272,22 @@ python run_tag.py \
 
 ```bash
 # Reference-style decode (no EOS harness)
-python run_tag.py ... use_eos_harness=false
+python hydra_runners/run_tag.py ... use_eos_harness=false
 
 # Lexical readout (hide EOS mass)
-python run_tag.py ... output_exclude_eos=true
+python hydra_runners/run_tag.py ... output_exclude_eos=true
 
 # Residual error nodes
-python run_tag.py ... with_residual=true
+python hydra_runners/run_tag.py ... with_residual=true
 
 # Faster chunk run without readout
-python run_tag.py ... hidden_pt=... no_logits=true
+python hydra_runners/run_tag.py ... hidden_pt=... no_logits=true
 
 # Tighter graph
-python run_tag.py ... influence_node_mass=0.7 influence_edge_mass=0.95
+python hydra_runners/run_tag.py ... influence_node_mass=0.7 influence_edge_mass=0.95
 ```
 
-Slurm: `sbatch tag.sh --slurm --cst_checkpoint ... --model_path ... --prompt "..."`
+Slurm: `sbatch scripts/tag.sh --slurm --cst_checkpoint ... --model_path ... --prompt "..."`
 
 ---
 

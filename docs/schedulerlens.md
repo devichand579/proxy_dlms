@@ -174,7 +174,7 @@ python -m schedulerlens.pos_run trace_outputs/llada_humaneval_pure_diffusion_s25
 | `--model-path DIR` | Override tokenizer model dir (default: infer `llada` / `llada1_5` / `dream` from trace filename stem) |
 | `--models-root DIR` | Root containing model subdirs (default `./models`) |
 
-**Tokenizer:** Trace basenames follow `{model}_{task}_{mode}_s{steps}` from `launch_eval.py`. The CLI loads `AutoTokenizer` from `./models/{model}` via `load_model.load_tokenizer`.
+**Tokenizer:** Trace basenames follow `{model}_{task}_{mode}_s{steps}` from `hydra_runners/launch_eval.py`. The CLI loads `AutoTokenizer` from `./models/{model}` via `load_model.load_tokenizer`.
 
 **Unmask events:** Uses `selected_positions` / `selected_tokens` when present; otherwise reconstructs from consecutive `mask_index` diffs (same idea as `visualization_json.track_unmasking_order`).
 

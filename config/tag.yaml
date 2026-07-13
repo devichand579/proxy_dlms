@@ -1,4 +1,4 @@
-# Hydra: TAG (Temporal Attribution Graph) — entry point: run_tag.py / ./tag.sh
+# Hydra: TAG (Temporal Attribution Graph) — entry point: hydra_runners/run_tag.py / ./scripts/tag.sh
 defaults:
   - _self_
 

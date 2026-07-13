@@ -47,8 +47,8 @@ python -c "import torch; print('cuda available:', torch.cuda.is_available()); pr
 3. Run with `device=cuda` as usual — there is no separate `rocm` device string in this repo:
 
 ```bash
-python test_tracing.py --device cuda
-./eval.sh --device cuda ...
+python tests/test_tracing.py --device cuda
+./scripts/eval.sh --device cuda ...
 ```
 
 If you see `Found no NVIDIA driver on your system`, PyTorch is still the **CUDA** build or ROCm is not set up; reinstall PyTorch for ROCm or use CPU (`--device cpu`) for a slow sanity check.
@@ -56,5 +56,5 @@ If you see `Found no NVIDIA driver on your system`, PyTorch is still the **CUDA*
 **Notes:**
 
 - LLaDA configs include ROCm-related workarounds (`amd_compatible` LayerNorm); Dream/LLaDA-1.5 on ROCm are less tested here.
-- `torch.compile` (on by default in eval) can be unstable on ROCm; use `compile_model=false` in Hydra/`eval.sh` if you hit compile errors.
+- `torch.compile` (on by default in eval) can be unstable on ROCm; use `compile_model=false` in Hydra/`scripts/eval.sh` if you hit compile errors.
 - Hub trace audit/convert pipelines are CPU-only and work without a GPU.

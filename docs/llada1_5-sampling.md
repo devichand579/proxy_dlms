@@ -27,7 +27,7 @@ The helper **`load_model.infer_b44_eos_unmask_safety(model_dir)`** returns **tru
 
 When **true**, **`schedulers.generate.generate`** (and code paths that pass `model_path` into it, including **lm-eval** and **CST collect**) set **both** B.4 flags on for that run. **`./models/llada`**, **Dream**, and other directory names are **unchanged** (still `false`).
 
-There is **no** separate switch in `config/lmeval.yaml`, `eval.sh`, or `cst.yaml` — you only need the **model path** to resolve to `llada1_5` (or use the config key above).
+There is **no** separate switch in `config/lmeval.yaml`, `scripts/eval.sh`, or `cst.yaml` — you only need the **model path** to resolve to `llada1_5` (or use the config key above).
 
 **`use_eos_harness` on `llada1_5`:** B.4 prevents EOS from being unmasked, so the harness stop condition (EOS present with no masks before it) **never triggers**. Generation always uses the **full step budget**; `use_eos_harness` has no effect in practice.
 
@@ -62,7 +62,7 @@ In other words: **B.4 addresses EOS collapse; FHS `sample_categorical` addresses
 ## Related docs
 
 - [Evaluation](evaluation.md) — model path and harness settings.
-- [Scheduler smoke tests](scheduler-testing.md) — `test_schedulers.py`, `--show-original-tokens`, `--no-eos-harness`.
+- [Scheduler smoke tests](scheduler-testing.md) — `tests/test_schedulers.py`, `--show-original-tokens`, `--no-eos-harness`.
 
 ## Code references
 

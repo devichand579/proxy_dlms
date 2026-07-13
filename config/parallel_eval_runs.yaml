@@ -1,5 +1,5 @@
-# Used with: python launch_eval.py parallel_runs_file=config/parallel_eval_runs.yaml
-# or: ./eval.sh --parallel_config config/parallel_eval_runs.yaml
+# Used with: python hydra_runners/launch_eval.py parallel_runs_file=config/parallel_eval_runs.yaml
+# or: ./scripts/eval.sh --parallel_config config/parallel_eval_runs.yaml
 #
 # Each list entry = one GPU slot (2 entries -> 2 GPUs). Slot i = CUDA_VISIBLE_DEVICES=i.
 # Omit keys in a slot to inherit from the base config.

@@ -1,11 +1,11 @@
 # CST: store hiddens (Hub) | train CST | eval CST
 #
-#   python run_cst.py mode=store store.scope=train
-#   python run_cst.py mode=store store.scope=eval store.task_name=gsm8k
-#   python run_cst.py mode=train
-#   python run_cst.py mode=eval eval.checkpoint=... eval.hidden_dir=...
+#   python hydra_runners/run_cst.py mode=store store.scope=train
+#   python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k
+#   python hydra_runners/run_cst.py mode=train
+#   python hydra_runners/run_cst.py mode=eval eval.checkpoint=... eval.hidden_dir=...
 #
-# Shell: ./cst.sh --mode store|train|eval [hydra overrides...]
+# Shell: ./scripts/cst.sh --mode store|train|eval [hydra overrides...]
 
 defaults:
   - launcher: local

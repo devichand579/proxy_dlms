@@ -1,0 +1,93 @@
+# LLaDA-PCFG PCFG training and scheduler eval (Hydra entry: hydra_runners/run_llada-pcfg.py)
+#
+#   python hydra_runners/run_llada-pcfg.py mode=train train.hf_dataset=pcfg-code train.batch_size=128
+#   python hydra_runners/run_llada-pcfg.py mode=eval eval.hf_model=username/llada-100m-pcfg
+#
+# Multirun ablations (one SLURM job per combo):
+#   python hydra_runners/run_llada-pcfg.py mode=train train.variant=100m,200m train.peak_lr=4e-4,1e-4 \
+#       --multirun launcher=slurm_h100
+#
+# Shell (interactive or sbatch): ./scripts/llada-pcfg.sh --mode train [hydra overrides...]
+#
+# Launchers: launcher=local | launcher=slurm_h100 | launcher=slurm_l40 | launcher=slurm_a40 |
+#            launcher=slurm_a100 | launcher=slurm_dgx
+
+defaults:
+  - launcher: local
+  - _self_
+
+mode: train  # train | eval
+
+wandb_project: strace
+offline: false
+
+train:
+  variant: 100m
+  # Exactly one data source required: corpus | hf_dataset | train_tokens
+  corpus: null
+  hf_dataset: pcfg-code
+  hf_namespace: null
+  train_tokens: null
+
+  batch_size: 128
+  grad_accum: 1
+  num_workers: 2
+  nproc_per_node: 1  # >1 launches torchrun DDP (match #SBATCH --gres=gpu:N)
+
+  peak_lr: 4.0e-4
+  mid_lr: 1.0e-4
+  min_lr: 1.0e-5
+  warmup_steps: null
+  warmup_fraction: 0.02
+  warmup_max: 5000
+  epochs: 1
+  steps: null
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  seed: 0
+  device: null
+  out_dir: null  # default checkpoints/llada-<variant>-pcfg at repo root
+  resume: null
+  log_every: 10
+  save_every: 2000
+  val_fraction: 0.05
+  val_every: 2000
+
+  push_model: false
+  hf_model: null
+  hf_model_namespace: null
+  hf_model_private: false
+
+  amp: true
+  amp_dtype: bfloat16
+  wandb: true
+  wandb_run_name: null
+  wandb_id: null
+
+eval:
+  model_path: null
+  hf_model: null
+  variant: 100m
+  corpus: null
+  hf_dataset: pcfg-code
+  hf_namespace: null
+  schedulers: all
+  max_samples: null
+  steps: 128
+  batch_size: 4
+  device: null
+  out_dir: null  # default eval_outputs/pcfg at repo root
+
+  upload_traces: true
+  replay_oracle: true
+  tracing_enabled: true
+  trace_hf_upload: true
+  trace_hf_dataset_repo: schedulerlens
+  trace_hf_namespace: null
+
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.override_dirname}

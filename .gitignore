@@ -23,32 +23,41 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Virtual Environments
+# Virtual environments
 venv/
 env/
 ENV/
 env.bak/
 venv.bak/
 .venv/
-.hydra/
 
-# PyTorch
+# Test / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# PyTorch / training artifacts
 *.pth
 *.pt
 *.ckpt
+checkpoints/
 
-# Model files (large files - uncomment if you want to ignore downloaded models)
+# Model weights (downloaded checkpoints)
 *.safetensors
 *.bin
 *.h5
 *.onnx
-checkpoints/
 *.safetensors.index.json
 
-# HuggingFace cache
+# Hugging Face cache
 .cache/
 .huggingface/
 
+# Rust / maturin (llada-pcfg/pcfg_engine_rs)
+**/target/
+# Keep Cargo.lock committed for reproducible maturin builds.
 
 # IDE
 .vscode/
@@ -57,19 +66,25 @@ checkpoints/
 *.swo
 *~
 .DS_Store
+Thumbs.db
 
-# Logs and outputs
+# Logs and run outputs
 *.log
 logs/
-/wandb/
+wandb/
 outputs/
-trace_outputs/₹
+trace_outputs/
+eval_outputs/
 html/
 png/
 output*.txt
 
+# Hydra / Submitit sweeps & job logs
+.hydra/
+multirun/
+job_outputs/
 
-# Data files
+# Data (generated or downloaded locally)
 data/
 datasets/
 *.pkl
@@ -89,12 +104,3 @@ visualization/*.jpeg
 # Environment variables
 .env
 .env.local
-
-# System files
-Thumbs.db
-.DS_Store
-
-
-# Hydra/Submitit sweeps & job logs
-multirun/
-job_outputs/

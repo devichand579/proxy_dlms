@@ -6,7 +6,7 @@
 
 Collection and training are **separate**. Run **`mode=store`** once (LM inference -> Hub), then **`mode=train`** (download from Hub -> fit CST, no LM).
 
-Everything goes through **`run_cst.py`** / **`./cst.sh`** with `mode=store`, `mode=train`, or `mode=eval`.
+Everything goes through **`hydra_runners/run_cst.py`** / **`./scripts/cst.sh`** with `mode=store`, `mode=train`, or `mode=eval`.
 
 | | **`mode=store`** | **`mode=train`** / **`mode=eval`** |
 |---|---|---|
@@ -18,19 +18,19 @@ Everything goes through **`run_cst.py`** / **`./cst.sh`** with `mode=store`, `mo
 
 ```bash
 # 1) Store (once per model / scheduler / task)
-python run_cst.py mode=store store.scope=train
-python run_cst.py mode=store store.scope=eval store.task_name=gsm8k
+python hydra_runners/run_cst.py mode=store store.scope=train
+python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k
 
 # 2) Train CST from Hub (no inference)
-python run_cst.py mode=train
+python hydra_runners/run_cst.py mode=train
 
 # 3) Eval CST from Hub or local folder
-python run_cst.py mode=eval eval.hidden_source=hf_hub eval.task_name=gsm8k \
+python hydra_runners/run_cst.py mode=eval eval.hidden_source=hf_hub eval.task_name=gsm8k \
   eval.checkpoint=outputs/cst_ckpt/cst_..._train_best.pt
-python run_cst.py mode=eval eval.hidden_dir=/path/to/hiddens eval.checkpoint=...
+python hydra_runners/run_cst.py mode=eval eval.hidden_dir=/path/to/hiddens eval.checkpoint=...
 ```
 
-**lm-eval + CST metrics during benchmarks:** `launch_eval.py` with `cst_checkpoint=...` (separate from the table above).
+**lm-eval + CST metrics during benchmarks:** `hydra_runners/launch_eval.py` with `cst_checkpoint=...` (separate from the table above).
 
 **Config:** `config/cst.yaml` — `store.*`, `train.*`, `cst.*`. **Code:** `cst/`, `cst/hf_hiddens/`, `hidden_hf_worker.py`.
 
@@ -66,7 +66,7 @@ Runs the full collect loop (sample prompts -> LM + scheduler -> `.pt` until `tar
 
 ```bash
 huggingface-cli login
-python run_cst.py mode=store store.scope=train
+python hydra_runners/run_cst.py mode=store store.scope=train
 ```
 
 Uses `train.target_staging_gb`, `train.scheduler_mode`, `train.samples_per_epoch`, etc.
@@ -78,9 +78,9 @@ Default repo: **`{hf_hiddens_org}/hiddens-train`**.
 Runs the **full lm-eval task** through the model + scheduler (same collect loop as train), writing segments to `train.staging_dir` and uploading each slice to Hub. Optional `store.samples` caps how many eval instances to capture (default: all task documents).
 
 ```bash
-python run_cst.py mode=store store.scope=eval store.task_name=gsm8k
+python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k
 # Optional: cap instances or segment size
-python run_cst.py mode=store store.scope=eval store.task_name=gsm8k store.samples=128
+python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k store.samples=128
 ```
 
 Default repo: **`{hf_hiddens_org}/hiddens-eval`**. Requires `store.task_name` (or `store.name_token` override).
@@ -126,7 +126,7 @@ On a login machine: `python hidden_hf_worker.py poll --queue-dir outputs/hf_work
 **Requires** hiddens on Hub from `mode=store store.scope=train` first.
 
 ```bash
-python run_cst.py mode=train
+python hydra_runners/run_cst.py mode=train
 ```
 
 Training never downloads the full subfolder at once. Each step:
@@ -155,12 +155,12 @@ Score a CST checkpoint against saved hiddens (no lm-eval loop):
 
 ```bash
 # Local folder
-python run_cst.py mode=eval \
+python hydra_runners/run_cst.py mode=eval \
   eval.hidden_dir=outputs/eval_hidden \
   eval.checkpoint=outputs/cst_ckpt/cst_..._train_best.pt
 
 # From Hub
-python run_cst.py mode=eval eval.hidden_source=hf_hub eval.task_name=gsm8k \
+python hydra_runners/run_cst.py mode=eval eval.hidden_source=hf_hub eval.task_name=gsm8k \
   eval.checkpoint=outputs/cst_ckpt/cst_..._train_best.pt
 ```
 
@@ -190,7 +190,7 @@ Hyperparam segment: `k4096_w4_ls0.001` — from `cst.k`, `cst.w`, and `train.lam
 ## lm-eval with CST
 
 ```bash
-python launch_eval.py task_name=gsm8k \
+python hydra_runners/launch_eval.py task_name=gsm8k \
   cst_checkpoint=outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_ls0.001_train_best.pt
 ```
 
@@ -208,9 +208,9 @@ Mixed prompt pools for **train store** only: GSM8K, Minerva, ARC, CSQA, TACO. Se
 
 | File | Role |
 |------|------|
-| `run_cst.py` | **`mode=store`** / **`train`** / **`eval`** (single entry point) |
+| `hydra_runners/run_cst.py` | **`mode=store`** / **`train`** / **`eval`** (single entry point) |
 | `hidden_hf_worker.py` | Hub I/O worker + queue |
 | `config/cst.yaml` | All modes |
-| `cst.sh` | Shell / Slurm wrapper |
+| `scripts/cst.sh` | Shell / Slurm wrapper |
 
 See also: [Setup](setup.md), [Evaluation](evaluation.md).

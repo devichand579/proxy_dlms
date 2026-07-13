@@ -18,7 +18,7 @@ Enable tracing in eval: `--tracing_enabled True` (see [evaluation.md](evaluation
 | `traces/trace_audit.py` | CLI (`inventory`, `audit`, `audit-all`, `convert`, `convert-all`) |
 | `traces/trace_npz.py` | JSONL -> NPZ v2 |
 | `traces/hf_trace_upload.py` | Hub upload/download/delete, cache cleanup, NPZ convert CLI |
-| `test_tracing.py` | 3 models × 8 schedulers tracing smoke test with audit |
+| `tests/test_tracing.py` | 3 models × 8 schedulers tracing smoke test with audit |
 
 ---
 
@@ -116,9 +116,9 @@ Resumable via CSV; skips files that already have NPZ on Hub (use `--force` to re
 Quick check that tracing hooks work for all schedulers, with batched boolean-transfer schedulers at `batch_size=2`:
 
 ```bash
-python test_tracing.py
-python test_tracing.py --model-path ./models/llada --scheduler pure_diffusion
-python test_tracing.py --batch-size 1
+python tests/test_tracing.py
+python tests/test_tracing.py --model-path ./models/llada --scheduler pure_diffusion
+python tests/test_tracing.py --batch-size 1
 ```
 
 Sets `TRACING_ENABLED=true` before importing schedulers (required for `@trace_scheduler` to attach). Default: `llada`, `llada1_5`, `dream` × 8 schedulers at `batch_size=2`. Reports `transfer_status` and `hooks_ok` per combo; FHS expects exactly `batch_size` traces per call (no double-wrap).

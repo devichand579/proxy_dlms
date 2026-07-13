@@ -15,9 +15,9 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_LADALENS = _REPO_ROOT / "lladalens"
-if str(_LADALENS) not in sys.path:
-    sys.path.insert(0, str(_LADALENS))
+_LLADA_PCFG_DIR = _REPO_ROOT / "llada-pcfg"
+if str(_LLADA_PCFG_DIR) not in sys.path:
+    sys.path.insert(0, str(_LLADA_PCFG_DIR))
 
 
 @dataclass

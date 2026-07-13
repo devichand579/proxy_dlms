@@ -44,7 +44,7 @@ Examples:
   python traces/trace_audit.py audit-all
   python traces/trace_audit.py convert foo.jsonl --delete-jsonl-on-hub
   python traces/trace_audit.py convert-all --delete-jsonl-on-hub
-  python test_tracing.py
+  python tests/test_tracing.py
 """.strip(),
     )
     sub = parser.add_subparsers(dest="command", required=True)

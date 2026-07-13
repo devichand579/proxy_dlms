@@ -1,8 +1,87 @@
 """
-Utility functions for tracing.
+Utility functions for tracing and repo-relative path helpers.
 """
-import torch
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any
+
 import numpy as np
+import torch
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+TRACE_OUTPUTS_DIRNAME = "trace_outputs"
+OUTPUTS_DIRNAME = "outputs"
+FETCH_EVALS_DIRNAME = "fetch_evals"
+
+
+def repo_root() -> Path:
+    return _REPO_ROOT
+
+
+def trace_outputs_dir(*parts: str) -> Path:
+    path = _REPO_ROOT / TRACE_OUTPUTS_DIRNAME
+    for part in parts:
+        path = path / part
+    return path
+
+
+def outputs_dir(*parts: str) -> Path:
+    path = _REPO_ROOT / OUTPUTS_DIRNAME
+    for part in parts:
+        path = path / part
+    return path
+
+
+def fetch_evals_dir(*parts: str) -> Path:
+    path = _REPO_ROOT / FETCH_EVALS_DIRNAME
+    for part in parts:
+        path = path / part
+    return path
+
+
+def resolve_repo_path(path: str | Path | None, *, base: Path | None = None) -> Path | None:
+    if path is None:
+        return None
+    text = str(path).strip()
+    if not text or text.lower() in ("null", "none"):
+        return None
+    resolved = Path(text).expanduser()
+    if not resolved.is_absolute():
+        resolved = (base or _REPO_ROOT) / resolved
+    return resolved.resolve()
+
+
+def ensure_dir(path: str | Path) -> Path:
+    target = Path(path)
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def read_json(path: str | Path) -> Any:
+    return json.loads(Path(path).read_text())
+
+
+def write_json(path: str | Path, payload: Any, *, indent: int = 2) -> Path:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=indent) + "\n")
+    return target
+
+
+def slugify(text: str, *, max_len: int = 80) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(text).strip()).strip("-")
+    return slug[:max_len] if max_len else slug
+
+
+def trace_run_stem(model: str, task: str, scheduler: str, *, steps: int | None = None) -> str:
+    parts = [slugify(model), slugify(task), slugify(scheduler)]
+    if steps is not None:
+        parts.append(f"s{int(steps)}")
+    return "_".join(p for p in parts if p)
 
 
 def _is_tensor_like(obj):

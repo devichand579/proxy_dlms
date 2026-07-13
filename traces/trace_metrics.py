@@ -62,7 +62,7 @@ def expected_trace_names(metrics_csv: str | Path | None = None) -> set[str]:
 
 
 def is_pcfg_trace(run_name: str, samples: list[dict]) -> bool:
-    """PCFG lladalens traces are not in strace_metrics.csv / lm-eval tasks."""
+    """PCFG llada-pcfg traces are not in strace_metrics.csv / lm-eval tasks."""
     if str(run_name).startswith("pcfg_"):
         return True
     if samples and (samples[0].get("metadata") or {}).get("task") == "pcfg_full":
