@@ -12,7 +12,7 @@ Enable tracing in eval: `--tracing_enabled True` (see [evaluation.md](evaluation
 | ------ | ---- |
 | `traces/trace_generator.py` | `StepTrace`, `GenerationTrace`, `record_transfer` |
 | `traces/trace_wrapper.py` | `@trace_scheduler`, hook implementation |
-| `traces/trace_checks.py` | Field validation, mask-diff repair, NPZ round-trip |
+| `traces/trace_checks.py` | Field validation, duplicate-prompt dedup, mask-diff repair, NPZ round-trip |
 | `traces/trace_metrics.py` | Compare trace aggregates vs `strace_metrics.csv` |
 | `traces/trace_pipeline.py` | One-file audit and convert orchestration |
 | `traces/trace_audit.py` | CLI (`inventory`, `audit`, `audit-all`, `convert`, `convert-all`) |
@@ -71,13 +71,17 @@ Output CSV includes `audit_flags` and `is_bad` columns. Resume (`audit-all` defa
 
 Humaneval/mbpp rows with no `metric_trace` are flagged `MISSING_CODE_METRIC` (pass@1 could not be recomputed from the trace).
 
-Accuracy uses lm-eval task definitions with the same few-shot counts as eval. Samples are matched to eval instances by prompt token ids; generations are decoded from `final_sequence`.
+Accuracy uses lm-eval task definitions. Samples are matched to eval instances by **decoded prompt doc keys** (few-shot safe; e.g. MBPP problem text after the last `here is your task:`), with token-id fallback. Generations are decoded from `final_sequence`.
 
 Audit checks:
 - Required step fields present, correct lengths
 - Null `selected_positions` / transfer hook status (`explicit_all`, `inferrable`, `missing_transfer`, …)
+- **Duplicate prompts** — same `prompt` token ids; column `removable_duplicates` (= `n_samples - unique_prompts`)
+- Missing `unmasking_order` when inferrable from hooks or mask diffs
 - `metric_trace` vs `metric_wandb` (pass@1, exact_match, strict-match per task)
 - Sample count vs expected task size (e.g. humaneval = 164)
+
+When duplicates are present, accuracy scoring **dedupes in memory** (one trace per prompt) so metrics are not skewed; the Hub JSONL is unchanged until convert.
 
 Use `--no-accuracy` to skip lm-eval scoring (faster; humaneval runs code execution).
 
@@ -91,12 +95,17 @@ python traces/trace_audit.py convert foo.jsonl --delete-jsonl-on-hub
 Per file:
 1. Download JSONL
 2. Audit content
-3. **Repair** missing `selected_positions` from mask diffs when inferrable
+3. **Repair** when needed:
+   - **Dedup** — drop duplicate prompts (keep first trace per prompt)
+   - **Hooks** — fill missing `selected_positions` / `selected_tokens` from `mask_index` diffs when inferrable
+   - **`unmasking_order`** — infer from `selected_positions` or mask diffs if missing
 4. Convert to NPZ
 5. Validate NPZ round-trip against source
 6. Upload NPZ to Hub
 7. Optionally delete JSONL from Hub (`--delete-jsonl-on-hub`) after validation
 8. Delete local cache
+
+Disable repair with `--no-repair` on convert commands.
 
 Resumable via CSV; skips files that already have NPZ on Hub (use `--force` to re-convert).
 
@@ -112,7 +121,7 @@ python test_tracing.py --model-path ./models/llada --scheduler pure_diffusion
 python test_tracing.py --batch-size 1
 ```
 
-Default: `llada`, `llada1_5`, `dream` × 8 schedulers. Reports `transfer_status` and `hooks_ok` per combo.
+Sets `TRACING_ENABLED=true` before importing schedulers (required for `@trace_scheduler` to attach). Default: `llada`, `llada1_5`, `dream` × 8 schedulers at `batch_size=2`. Reports `transfer_status` and `hooks_ok` per combo; FHS expects exactly `batch_size` traces per call (no double-wrap).
 
 ---
 

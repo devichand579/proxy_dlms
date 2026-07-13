@@ -61,6 +61,31 @@ def expected_trace_names(metrics_csv: str | Path | None = None) -> set[str]:
     return set(load_metrics_lookup(metrics_csv).keys())
 
 
+def is_pcfg_trace(run_name: str, samples: list[dict]) -> bool:
+    """PCFG lladalens traces are not in strace_metrics.csv / lm-eval tasks."""
+    if str(run_name).startswith("pcfg_"):
+        return True
+    if samples and (samples[0].get("metadata") or {}).get("task") == "pcfg_full":
+        return True
+    return False
+
+
+def pcfg_metrics_skip(*, n_samples: int) -> dict[str, Any]:
+    """Audit row fragment: hook checks only, no W&B / lm-eval scoring."""
+    return {
+        "metric_wandb": None,
+        "metric_key_wandb": "",
+        "metric_trace": None,
+        "metric_key_trace": "",
+        "metric_delta": None,
+        "n_scored": 0,
+        "n_unmatched": 0,
+        "n_samples_expected": None,
+        "sample_count_delta": None,
+        "metrics_flags": f"pcfg trace ({n_samples} samples): skipped lm-eval / wandb metrics",
+    }
+
+
 def _safe_float(val: Any) -> Optional[float]:
     if val is None or val == "":
         return None
@@ -81,7 +106,6 @@ def lm_eval_task_name(task: str) -> str:
 
 
 def eval_num_fewshot(task_name: str) -> int:
-    
     t = str(task_name).strip().lower()
     if "humaneval" in t:
         return 0
@@ -251,15 +275,13 @@ def _build_test_program(gen_text: str, doc: dict, task_name: str) -> Optional[st
     """Combine generated code with task test cases into a runnable program."""
     task = task_name.strip().lower()
     if task in ("humaneval", "openai_humaneval"):
-        # humaneval: model receives function signature+docstring as prompt and generates
-        # only the body (completion).  Prepend the prompt so the function is fully defined.
         prompt = doc.get("prompt", "")
         test_code = doc.get("test", "")
         entry_point = doc.get("entry_point", "")
         if not test_code:
             return None
         return f"{prompt}{gen_text}\n{test_code}\ncheck({entry_point})"
-    elif task == "mbpp":
+    if task == "mbpp":
         test_list = doc.get("test_list", [])
         setup = doc.get("test_setup_code", "")
         if not test_list:
@@ -290,7 +312,6 @@ def _score_code_instance(gen_text: str, inst, task_name: str, timeout: float = 5
     if program is None:
         return {}
     passed = _run_code_subprocess(program, timeout=timeout)
-    # Key format matches what _aggregate_metrics / _pick_primary_metric expect
     return {"pass@1,none": 1.0 if passed else 0.0}
 
 
@@ -387,6 +408,10 @@ def compute_trace_accuracy(
     model_dir = model_dir_for_name(model_name, root)
     flags: list[str] = []
 
+    t_lower = str(task_name).strip().lower()
+    if "mbpp" in t_lower or "humaneval" in t_lower:
+        os.environ.setdefault("HF_ALLOW_CODE_EVAL", "1")
+
     if not model_dir.is_dir():
         return {
             "metric_trace": None,
@@ -409,9 +434,9 @@ def compute_trace_accuracy(
 
     _, eos_id, _ = infer_diffusion_token_ids(model_dir)
 
-    # Always build the matching index with 0-shot.  Traces store the bare question or custom
-    # fewshot examples that may differ from lm-eval; suffix matching against 0-shot keys handles
-    # all observed trace formats without requiring knowledge of how many shots were used.
+    # Always build the matching index with 0-shot. Traces store the bare question or custom
+    # fewshot examples that may differ from lm-eval; suffix matching handles both cases.
+    # num_fewshot is ignored for matching; eval_num_fewshot() documents eval harness defaults.
     try:
         task = _load_scoring_task(task_name, 0)
     except Exception as e:
@@ -425,8 +450,6 @@ def compute_trace_accuracy(
 
     stop_tokens = _task_stop_tokens(task)
 
-    # Determine BOS token ID for Dream models.  prepend_bos_for_dream adds BOS to instance keys
-    # and traces also have BOS at position 0; strip it from both sides before suffix matching.
     bos_id: Optional[int] = None
     if is_dream_model_dir(model_dir):
         bt = getattr(tokenizer, "bos_token", None)
@@ -435,8 +458,6 @@ def compute_trace_accuracy(
             if enc:
                 bos_id = int(enc[0])
 
-    # Build suffix index grouped by inner-key length for O(1) lookup per length bucket.
-    # inner_key = 0-shot instance key with leading BOS stripped (for dream models).
     suffix_groups: dict[int, dict[tuple[int, ...], Any]] = defaultdict(dict)
     for inst in task.instances:
         k = _instance_prompt_key(inst, tokenizer, model_dir)
@@ -444,7 +465,6 @@ def compute_trace_accuracy(
         suffix_groups[len(inner)].setdefault(inner, inst)
 
     def _find_instance(trace_key: tuple[int, ...]) -> Optional[Any]:
-        """Return the lm-eval instance whose 0-shot prompt is a suffix of trace_key."""
         inner = (
             trace_key[1:]
             if (bos_id is not None and trace_key and trace_key[0] == bos_id)

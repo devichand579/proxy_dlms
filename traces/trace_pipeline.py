@@ -24,14 +24,17 @@ from traces.trace_checks import (
     TraceCheck,
     check_to_row,
     check_trace_file,
+    deduplicate_prompt_traces,
     repair_samples,
     validate_npz_roundtrip,
 )
 from traces.trace_metrics import (
     compare_with_metrics_row,
     expected_trace_names,
+    is_pcfg_trace,
     load_metrics_lookup,
     prewarm_scoring_tasks,
+    pcfg_metrics_skip,
 )
 from traces.trace_npz import compression_ratio, convert_jsonl_to_npz, load_trace_samples
 
@@ -231,6 +234,10 @@ AUDIT_CSV_FIELDS = [
     "samples_with_any_selected",
     "samples_with_all_selected",
     "samples_missing_required",
+    "unique_prompts",
+    "duplicate_traces",
+    "removable_duplicates",
+    "ambiguous_duplicate_prompts",
     "metric_wandb",
     "metric_key_wandb",
     "metric_trace",
@@ -278,7 +285,11 @@ def audit_one_hub_file(
     full_repo = resolve_repo(repo_id, namespace)
     rev = revision if revision is not None else trace_hf_revision()
     name = _stem(filename)
-    meta = load_metrics_lookup(metrics_csv).get(name, {})
+    meta: dict[str, str] = {}
+    try:
+        meta = load_metrics_lookup(metrics_csv).get(name, {})
+    except FileNotFoundError:
+        pass
     sizes = file_sizes([filename], repo_id=full_repo, revision=rev, token=token)
 
     temp_dir: Path | None = None
@@ -288,14 +299,42 @@ def audit_one_hub_file(
         )
         check = check_trace_file(path, max_samples=max_samples)
         _, samples = load_trace_samples(path)
-        metrics_cmp = compare_with_metrics_row(
-            run_name=name,
-            samples=samples,
-            metrics_lookup=load_metrics_lookup(metrics_csv),
-            task=meta.get("task", ""),
-            model=meta.get("model", ""),
-            compute_accuracy=compute_accuracy,
-        )
+        samples_for_metrics = samples
+        if check.removable_duplicates > 0:
+            samples_for_metrics, _ = deduplicate_prompt_traces(samples)
+
+        if is_pcfg_trace(name, samples_for_metrics):
+            if samples_for_metrics:
+                m = samples_for_metrics[0].get("metadata") or {}
+                meta = {
+                    "model": str(m.get("variant", "pcfg")),
+                    "task": "pcfg",
+                    "mode": str(m.get("scheduler", "")),
+                    "steps": "",
+                }
+            metrics_cmp = pcfg_metrics_skip(n_samples=len(samples_for_metrics))
+        elif compute_accuracy:
+            metrics_cmp = compare_with_metrics_row(
+                run_name=name,
+                samples=samples_for_metrics,
+                metrics_lookup=load_metrics_lookup(metrics_csv),
+                task=meta.get("task", ""),
+                model=meta.get("model", ""),
+                compute_accuracy=True,
+            )
+        else:
+            metrics_cmp = {
+                "metric_wandb": None,
+                "metric_key_wandb": "",
+                "metric_trace": None,
+                "metric_key_trace": "",
+                "metric_delta": None,
+                "n_scored": 0,
+                "n_unmatched": 0,
+                "n_samples_expected": None,
+                "sample_count_delta": None,
+                "metrics_flags": "accuracy skipped",
+            }
     finally:
         if temp_dir is not None:
             remove_temp_download(temp_dir)
@@ -428,7 +467,8 @@ def convert_one_hub_file(
         needs_order_repair = any(
             sample.get("step_traces") and not sample.get("unmasking_order") for sample in samples
         )
-        if repair and (needs_hook_repair or needs_order_repair):
+        needs_dedup = check.removable_duplicates > 0
+        if repair and (needs_hook_repair or needs_order_repair or needs_dedup):
             samples, repairs = repair_samples(samples)
             if repairs:
                 repaired = True

@@ -15,6 +15,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from schedulerlens.metrics import TaskMetrics, compute_task_metrics
+from schedulerlens.perplexity import compute_task_perplexity
 from schedulerlens.plots import save_bucket_plots, save_trend_plots
 
 logger = logging.getLogger("schedulerlens.run")
@@ -27,6 +28,8 @@ def run_schedulerlens(
     max_samples: Optional[int] = None,
     bucket_size: Optional[int] = None,
     verbose: bool = True,
+    compute_perplexity: bool = True,
+    replay_oracle: bool = False,
 ) -> Dict[str, Any]:
     """Compute metrics, write metrics.json and trend plots to output_dir."""
     trace_path = Path(trace_path)
@@ -61,6 +64,23 @@ def run_schedulerlens(
         "metrics_path": str(metrics_path.resolve()),
         "metrics": metrics,
     }
+
+    if compute_perplexity:
+        ppl = compute_task_perplexity(
+            trace_path,
+            replay_oracle=replay_oracle,
+            max_samples=max_samples,
+        )
+        ppl_path = output_dir / "perplexity.json"
+        with ppl_path.open("w", encoding="utf-8") as f:
+            json.dump(ppl.to_dict(), f, indent=2)
+        result["perplexity"] = ppl
+        result["perplexity_path"] = str(ppl_path.resolve())
+        with metrics_path.open("r", encoding="utf-8") as f:
+            merged = json.load(f)
+        merged["perplexity"] = ppl.to_dict()
+        with metrics_path.open("w", encoding="utf-8") as f:
+            json.dump(merged, f, indent=2)
 
     if metrics.n_steps > 0:
         prefix = trace_path.stem
@@ -123,6 +143,16 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Aggregate trends into buckets of N steps; writes bucket plots",
     )
     parser.add_argument(
+        "--no-perplexity",
+        action="store_true",
+        help="Skip commit NLL / oracle perplexity (PCFG traces)",
+    )
+    parser.add_argument(
+        "--replay-oracle",
+        action="store_true",
+        help="Re-forward model for exact Mt/Jt (slow; PCFG traces only)",
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -149,6 +179,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             max_samples=args.max_samples,
             bucket_size=args.bucket_size,
             verbose=not args.quiet,
+            compute_perplexity=not args.no_perplexity,
+            replay_oracle=args.replay_oracle,
         )
     except Exception as e:
         logger.error("SchedulerLens failed: %s", e)
@@ -156,8 +188,18 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     metrics: TaskMetrics = result["metrics"]
     print(metrics.summary())
+    if result.get("perplexity") is not None:
+        ppl = result["perplexity"]
+        print(
+            f"\nPerplexity ({ppl.n_samples} samples): "
+            f"model_commit_ppl={ppl.model_commit_ppl:.2f} "
+            f"oracle_ppl={ppl.oracle_ppl:.2f} "
+            f"Mt={ppl.Mt_total:.4f} Jt={ppl.Jt_total:.4f}"
+        )
     print(f"\nOutput dir: {args.output_dir.resolve()}")
     print(f"  metrics.json : {result['metrics_path']}")
+    if result.get("perplexity_path"):
+        print(f"  perplexity.json : {result['perplexity_path']}")
     if result["M_t_plot"]:
         print(f"  M trends     : {result['M_t_plot']}")
         print(f"  J trends     : {result['J_t_plot']}")
