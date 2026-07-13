@@ -1,7 +1,7 @@
 """
 Training corpus generation (no engine) and inference-time exact q via PCFGEngine.
 
-Raw grammar strings: pcfg_generate.py (L in [64, 128], HF export).
+Raw grammar strings: pcfg_generate.py (L in [64, 127], HF export; max content + <eos> fits ARCH_LEN).
 Training (LLaDA-style):
   - Per example: draw t ~ Uniform[0, 1], mask each content token independently
   - Loss weight 1/(t·L) is applied in the training loop (Eq. 3)
@@ -27,6 +27,7 @@ from pcfg_generate import (
 L_MIN = GEN_L_MIN
 L_MAX = GEN_L_MAX
 ARCH_LEN = 128
+MAX_CONTENT_LEN = ARCH_LEN - 1  # one slot reserved for <eos>
 PAD = "<pad>"
 MASK = "<mask>"
 EOS = "<eos>"
@@ -96,12 +97,47 @@ def _rightmost_split(n_content, mask_ratio):
     return n_visible, n_mask
 
 
+def corpus_length_stats(token_seqs: list[list]) -> tuple[int, int, int]:
+    """Return (min_len, max_len, n_over_max_content)."""
+    if not token_seqs:
+        return 0, 0, 0
+    lengths = [len(t) for t in token_seqs]
+    over = sum(1 for n in lengths if n > MAX_CONTENT_LEN)
+    return min(lengths), max(lengths), over
+
+
+def fit_tokens_for_arch(tokens, arch_len: int = ARCH_LEN) -> tuple[list, bool]:
+    """Truncate content to ``arch_len - 1`` so ``<eos>`` fits in the fixed window."""
+    max_content = arch_len - 1
+    n = len(tokens)
+    if n <= max_content:
+        return list(tokens), False
+    return list(tokens[:max_content]), True
+
+
+def fit_corpus_for_arch(
+    token_seqs: list[list],
+    arch_len: int = ARCH_LEN,
+) -> tuple[list[list], int]:
+    """Clip every sequence to fit ``ARCH_LEN`` (content + ``<eos>``). Returns (corpus, n_clipped)."""
+    out: list[list] = []
+    clipped = 0
+    for tokens in token_seqs:
+        fitted, was_clipped = fit_tokens_for_arch(tokens, arch_len=arch_len)
+        if was_clipped:
+            clipped += 1
+        if fitted:
+            out.append(fitted)
+    return out, clipped
+
+
 def make_train_example(tokens, vocab, arch_len=ARCH_LEN, mask_t=None, rng=None):
     """Build one padded training example using LLaDA independent masking."""
     rng = rng or random
+    tokens, _ = fit_tokens_for_arch(tokens, arch_len=arch_len)
     n = len(tokens)
-    if n >= arch_len:
-        raise ValueError(f"content length {n} must be < arch_len {arch_len} (room for <eos>)")
+    if n < 1:
+        raise ValueError("content length must be >= 1 after arch fit")
     t = sample_mask_t(rng) if mask_t is None else float(mask_t)
     masked_positions = _independent_mask_positions(n, t, rng=rng)
     masked_set = set(masked_positions)
@@ -242,11 +278,10 @@ def load_corpus_from_hub(
 
 def make_infer_input(tokens, n_visible, vocab, arch_len=ARCH_LEN):
     """Build padded inference input (visible prefix + MASK suffix + EOS). No engine yet."""
+    tokens, _ = fit_tokens_for_arch(tokens, arch_len=arch_len)
     n = len(tokens)
     if not (0 < n_visible < n):
         raise ValueError("require 0 < n_visible < n_content")
-    if n >= arch_len:
-        raise ValueError(f"content length {n} must be < arch_len {arch_len} (room for <eos>)")
     ids = vocab.encode(tokens)
     input_ids = np.full(arch_len, vocab.pad_id, dtype=np.int64)
     attention = np.zeros(arch_len, dtype=np.int64)

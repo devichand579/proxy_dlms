@@ -20,7 +20,7 @@ from hf_hub import apply_pcfg_hf_env, push_pcfg_dataset, resolve_hf_token, resol
 from pcfg_grammar import Sampler, code_grammar, default_workers, sample_one
 
 L_MIN = 64
-L_MAX = 128
+L_MAX = 127  # max content tokens; + <eos> fits ARCH_LEN=128
 DEFAULT_MAX_DEPTH = 350
 PROGRESS_INTERVAL = 250_000
 
