@@ -19,6 +19,11 @@ def apply_repo_env_defaults() -> None:
     os.environ.setdefault("WANDB_PROJECT", WANDB_PROJECT_DEFAULT)
 
 
+def is_offline_env(target: dict[str, str] | None = None) -> bool:
+    env = target if target is not None else os.environ
+    return env.get("HF_HUB_OFFLINE") == "1"
+
+
 def apply_offline_env(target: dict[str, str] | None = None) -> None:
     """Use cached HF datasets/models and local W&B (no Hub/network for eval telemetry)."""
     env = target if target is not None else os.environ

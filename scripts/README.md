@@ -9,7 +9,7 @@ Run from the **repo root**. Each script `cd`s to the repo root automatically.
 | `tag.sh` | Temporal attribution graph |
 | `llada-pcfg.sh` | PCFG LLaDA train / scheduler eval |
 | `test_schedulers.sh` | Quick scheduler smoke tests |
-| `download_datasets.sh` | Prefetch HF datasets for offline eval |
+| `download_datasets.sh` | Prefetch HF datasets for offline eval and PCFG training |
 
 ```bash
 ./scripts/eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada

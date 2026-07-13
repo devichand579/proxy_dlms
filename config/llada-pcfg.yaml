@@ -19,6 +19,7 @@ defaults:
 mode: train  # train | eval
 
 wandb_project: strace
+# offline=true: cached HF datasets + WANDB_MODE=offline (see scripts/download_datasets.sh)
 offline: false
 
 train:

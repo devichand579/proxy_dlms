@@ -12,7 +12,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from repo_env_defaults import apply_repo_env_defaults
+from repo_env_defaults import apply_offline_env, apply_repo_env_defaults, is_offline_env
 from traces.hf_trace_upload import ensure_dataset_repo, normalize_dataset_repo_id
 
 DEFAULT_PCFG_DATASET = "pcfg-code"
@@ -183,6 +183,8 @@ def load_pcfg_dataset(
     return load_dataset(full_repo, token=resolve_hf_token(token))
 
 
-def apply_pcfg_hf_env() -> None:
+def apply_pcfg_hf_env(*, offline: bool = False) -> None:
     """Apply repo-wide HF/W&B defaults (same as eval, CST, trace scripts)."""
     apply_repo_env_defaults()
+    if offline or is_offline_env():
+        apply_offline_env()

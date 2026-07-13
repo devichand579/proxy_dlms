@@ -6,6 +6,7 @@ probability t, and optimizes Eq. (3) with 1/(t·L) weighting on masked CE.
 
 Example (from repo root):
   python llada-pcfg/scripts/train_pcfg_llada.py --variant 100m --hf-dataset pcfg-code --steps 2000
+  python llada-pcfg/scripts/train_pcfg_llada.py --variant 100m --hf-dataset pcfg-code --offline
   torchrun --nproc_per_node=2 llada-pcfg/scripts/train_pcfg_llada.py --variant 100m --corpus data/pcfg --steps 5000
 """
 from __future__ import annotations
@@ -30,6 +31,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from hf_hub import apply_pcfg_hf_env, push_pcfg_model, resolve_hf_token
+from repo_env_defaults import is_offline_env
 from models.pcfg_models import (
     count_parameters,
     list_variants,
@@ -106,9 +108,15 @@ def main():
     p.add_argument("--no-wandb", dest="wandb", action="store_false")
     p.add_argument("--wandb-project", type=str, default=None)
     p.add_argument("--wandb-run-name", type=str, default=None)
+    p.add_argument(
+        "--offline",
+        action="store_true",
+        help="Use cached HF datasets/models and local W&B (no Hub/network).",
+    )
     args = p.parse_args()
 
-    apply_pcfg_hf_env()
+    offline = args.offline or is_offline_env()
+    apply_pcfg_hf_env(offline=offline)
     rank, local_rank, world_size = setup_distributed()
 
     seed = args.seed + rank
@@ -333,7 +341,9 @@ def main():
         latest_dir = ckpt_path(out_dir, "latest")
         print(f"checkpoints: {latest_dir} (latest), {best_val_dir} (best val)", flush=True)
 
-        if args.push_model:
+        if args.push_model and offline:
+            print("skip HF push: --offline (Hub upload disabled)", flush=True)
+        elif args.push_model:
             if not best_val_dir.is_dir():
                 print("skip HF push: no checkpoint-best_val (enable --val-every)", flush=True)
             else:

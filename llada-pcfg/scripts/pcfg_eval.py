@@ -42,7 +42,7 @@ from pcfg_metrics import (
     trace_model_commit_nll,
     trace_oracle_nll,
 )
-from repo_env_defaults import apply_repo_env_defaults
+from repo_env_defaults import apply_repo_env_defaults, is_offline_env
 from schedulers.generate import generate
 from traces.hf_trace_upload import maybe_upload_eval_trace_file
 from traces.trace_wrapper import _task_trace_list_ctx
@@ -276,10 +276,18 @@ def main():
     p.add_argument("--replay-oracle", action="store_true", default=True,
                    help="Re-forward model for exact Mt/Jt (slower)")
     p.add_argument("--no-replay-oracle", dest="replay_oracle", action="store_false")
+    p.add_argument(
+        "--offline",
+        action="store_true",
+        help="Use cached HF datasets/models and local W&B (no Hub/network).",
+    )
     args = p.parse_args()
 
+    offline = args.offline or is_offline_env()
     apply_repo_env_defaults()
-    apply_pcfg_hf_env()
+    apply_pcfg_hf_env(offline=offline)
+    if offline:
+        args.upload_traces = False
 
     args.out_dir = resolve_repo_path(args.out_dir) or eval_outputs_dir()
     if args.model_path is not None:

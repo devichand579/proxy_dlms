@@ -67,7 +67,7 @@ def _add_scalar(argv: list[str], block: dict[str, Any], key: str, flag: str) -> 
     argv.extend([flag, str(val)])
 
 
-def _build_train_argv(train: dict[str, Any]) -> list[str]:
+def _build_train_argv(train: dict[str, Any], *, offline: bool = False) -> list[str]:
     argv: list[str] = []
 
     path_keys = {
@@ -122,6 +122,8 @@ def _build_train_argv(train: dict[str, Any]) -> list[str]:
         argv.append("--push-model")
     if _to_bool(train.get("hf_model_private")):
         argv.append("--hf-model-private")
+    if offline:
+        argv.append("--offline")
 
     sources = sum(
         1
@@ -136,7 +138,7 @@ def _build_train_argv(train: dict[str, Any]) -> list[str]:
     return argv
 
 
-def _build_eval_argv(ev: dict[str, Any]) -> list[str]:
+def _build_eval_argv(ev: dict[str, Any], *, offline: bool = False) -> list[str]:
     argv: list[str] = []
 
     for key, flag in {
@@ -166,6 +168,8 @@ def _build_eval_argv(ev: dict[str, Any]) -> list[str]:
         argv.append("--no-upload-traces")
     if ev.get("replay_oracle") is False:
         argv.append("--no-replay-oracle")
+    if offline:
+        argv.append("--offline")
 
     has_model = (
         ev.get("model_path") is not None and str(ev.get("model_path")).strip() not in ("", "null", "None")
@@ -257,7 +261,7 @@ def run_train(cfg: DictConfig, *, use_slurm: bool = False) -> int:
     if nproc < 1:
         raise ValueError("train.nproc_per_node must be >= 1")
 
-    argv = _build_train_argv(train)
+    argv = _build_train_argv(train, offline=_to_bool(cfg.get("offline")))
     script = str(_SCRIPTS_DIR / "train_pcfg_llada.py")
     cmd = _wrap_slurm([*_train_launch_prefix(nproc), script, *argv], use_slurm=use_slurm)
 
@@ -276,7 +280,7 @@ def run_train(cfg: DictConfig, *, use_slurm: bool = False) -> int:
 
 def run_eval(cfg: DictConfig, *, use_slurm: bool = False) -> int:
     ev = _section_dict(cfg, "eval")
-    argv = _build_eval_argv(ev)
+    argv = _build_eval_argv(ev, offline=_to_bool(cfg.get("offline")))
     script = str(_SCRIPTS_DIR / "pcfg_eval.py")
     cmd = _wrap_slurm([sys.executable, script, *argv], use_slurm=use_slurm)
 

@@ -1,5 +1,6 @@
 #!/bin/bash
 # Script to download datasets for offline use on compute nodes
+# (lm-eval benchmarks + PCFG training corpora pcfg-code, pcfg-code-1B)
 
 # shellcheck source=_repo_root.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_repo_root.sh"
@@ -9,7 +10,7 @@ export HF_DATASETS_CACHE="$HOME/.cache/huggingface/datasets"
 export HF_HOME="$HOME/.cache/huggingface"
 
 # Set HuggingFace token for authentication (required for some datasets)
-export HF_TOKEN="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"
+export HF_TOKEN="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"  # NOTE: DON'T COMMIT THIS TOKEN
 
 echo "Downloading datasets to: $HF_DATASETS_CACHE"
 echo "================================================"
@@ -55,6 +56,30 @@ for full_name, short_name, config_name, display_name in datasets_to_download:
         except Exception as e:
             print(f"  Warning: could not cache as '{name}': {e}")
             continue
+
+print("\n" + "="*60)
+print("Downloading PCFG training corpora...")
+try:
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(os.getcwd())
+    sys.path.insert(0, str(repo_root / "llada-pcfg"))
+    from hf_hub import load_pcfg_dataset, resolve_pcfg_repo
+
+    pcfg_datasets = ["pcfg-code", "pcfg-code-1B"]
+    for dataset_name in pcfg_datasets:
+        print(f"\n  {dataset_name}...")
+        try:
+            full_repo = resolve_pcfg_repo(dataset=dataset_name)
+            pcfg_ds = load_pcfg_dataset(dataset=dataset_name, token=hf_token)
+            print(f"  Cached as '{full_repo}'")
+            for split_name in pcfg_ds.keys():
+                print(f"   - {split_name}: {len(pcfg_ds[split_name])} samples")
+        except Exception as e:
+            print(f"  Warning: could not cache '{dataset_name}': {e}")
+except Exception as e:
+    print(f"  Warning: could not load PCFG helpers: {e}")
 
 print("\n" + "="*60)
 print(f"All datasets downloaded to: {os.environ.get('HF_DATASETS_CACHE')}")
