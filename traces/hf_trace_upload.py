@@ -6,7 +6,9 @@ import argparse
 import logging
 import os
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -174,14 +176,40 @@ def download_file(
 ) -> Path:
     """Download a hub trace file.
 
-    Without ``dest``, returns the HF cache path (audit/convert pipelines).
-    With ``dest``, copies there and returns that path (CLI downloads).
+    Without ``dest``, returns the HF cache path (legacy; prefer ``download_file_to_temp``
+    for audit/convert pipelines).
+    With ``dest``, downloads directly there without leaving a blob in the shared HF cache.
     """
     from huggingface_hub import hf_hub_download
 
     hub_path = Path(filename).name
     full_repo = resolve_repo(repo_id, namespace)
     rev = revision if revision is not None else trace_hf_revision()
+    if dest is not None:
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path = Path(
+            hf_hub_download(
+                full_repo,
+                hub_path,
+                repo_type="dataset",
+                revision=rev,
+                token=token,
+                local_dir=dest_path.parent,
+            )
+        )
+        if local_path.resolve() != dest_path.resolve():
+            dest_path.write_bytes(local_path.read_bytes())
+            local_path.unlink(missing_ok=True)
+        logger.info(
+            "Downloaded trace from https://huggingface.co/datasets/%s/tree/%s/%s -> %s",
+            full_repo,
+            rev,
+            hub_path,
+            dest_path,
+        )
+        return dest_path
+
     cached = Path(
         hf_hub_download(
             full_repo,
@@ -191,21 +219,100 @@ def download_file(
             token=token,
         )
     )
-    if dest is None:
-        return cached
+    return cached
 
-    dest_path = Path(dest)
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    if cached.resolve() != dest_path.resolve():
-        dest_path.write_bytes(cached.read_bytes())
-    logger.info(
-        "Downloaded trace from https://huggingface.co/datasets/%s/tree/%s/%s -> %s",
-        full_repo,
-        rev,
-        hub_path,
-        dest_path,
-    )
-    return dest_path
+
+def download_file_to_temp(
+    filename: str,
+    *,
+    repo_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    revision: Optional[str] = None,
+    token: bool | str | None = True,
+) -> tuple[Path, Path]:
+    """Download one trace file into a fresh temp dir; caller must ``remove_temp_download``."""
+    from huggingface_hub import hf_hub_download
+
+    hub_path = Path(filename).name
+    full_repo = resolve_repo(repo_id, namespace)
+    rev = revision if revision is not None else trace_hf_revision()
+    temp_dir = Path(tempfile.mkdtemp(prefix="trace_dl_"))
+    try:
+        local_path = Path(
+            hf_hub_download(
+                full_repo,
+                hub_path,
+                repo_type="dataset",
+                revision=rev,
+                token=token,
+                local_dir=temp_dir,
+            )
+        )
+    except Exception:
+        remove_temp_download(temp_dir)
+        raise
+    return local_path, temp_dir
+
+
+def remove_temp_download(temp_dir: str | Path) -> None:
+    """Delete a temp download directory created by ``download_file_to_temp``."""
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _hub_cache_filename(filename: str) -> str:
+    return Path(filename).name
+
+
+def _blob_refcount(blob: Path) -> int:
+    """Count snapshot symlinks still referencing a blob file."""
+    blobs_dir = blob.parent
+    if blobs_dir.name != "blobs":
+        return 0
+    cache_root = blobs_dir.parent
+    try:
+        target = blob.resolve()
+    except OSError:
+        return 0
+    count = 0
+    snapshots = cache_root / "snapshots"
+    if not snapshots.is_dir():
+        return 0
+    for entry in snapshots.glob("*/*"):
+        if not entry.is_symlink():
+            continue
+        try:
+            if entry.resolve() == target:
+                count += 1
+        except OSError:
+            continue
+    return count
+
+
+def _unlink_hub_cache_path(path: Path) -> None:
+    """Remove one HF cache snapshot entry and its blob when unreferenced."""
+    if not path.exists() and not path.is_symlink():
+        return
+
+    blob: Optional[Path] = None
+    if path.is_symlink():
+        try:
+            blob = path.resolve()
+        except OSError:
+            blob = None
+
+    path.unlink(missing_ok=True)
+
+    if blob is not None and blob.is_file() and _blob_refcount(blob) == 0:
+        blob.unlink(missing_ok=True)
+        incomplete = Path(f"{blob}.incomplete")
+        incomplete.unlink(missing_ok=True)
+
+    for parent in (path.parent, path.parent.parent, path.parent.parent.parent):
+        try:
+            if parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            pass
 
 
 def cleanup_cache(
@@ -213,22 +320,62 @@ def cleanup_cache(
     filename: str,
     *,
     revision: Optional[str] = None,
+    cached_path: str | Path | None = None,
 ) -> None:
+    """Delete a cached hub file and its blob when no other snapshot links remain."""
     from huggingface_hub import try_to_load_from_cache
 
-    rev = revision or trace_hf_revision()
-    cached = try_to_load_from_cache(repo_id, filename, repo_type="dataset", revision=rev)
-    if cached is None:
+    hub_name = _hub_cache_filename(filename)
+    if cached_path is not None:
+        _unlink_hub_cache_path(Path(cached_path))
         return
-    p = Path(cached)
-    if p.is_file():
-        p.unlink()
-    for parent in [p.parent, p.parent.parent, p.parent.parent.parent]:
-        try:
-            if parent.exists() and not any(parent.iterdir()):
-                parent.rmdir()
-        except OSError:
-            pass
+
+    rev = revision or trace_hf_revision()
+    cached = try_to_load_from_cache(repo_id, hub_name, repo_type="dataset", revision=rev)
+    if cached is not None:
+        _unlink_hub_cache_path(Path(cached))
+
+
+def cleanup_repo_cache(
+    repo_id: str,
+    *,
+    revision: Optional[str] = None,
+) -> int:
+    """Delete cached revisions for one dataset repo; returns bytes freed."""
+    from huggingface_hub import scan_cache_dir
+
+    rev = revision or trace_hf_revision()
+    try:
+        cache_info = scan_cache_dir()
+    except Exception as exc:
+        logger.warning("scan_cache_dir failed: %s", exc)
+        return 0
+
+    revision_hashes: list[str] = []
+    for repo in cache_info.repos:
+        if repo.repo_id != repo_id or repo.repo_type != "dataset":
+            continue
+        for cached_rev in repo.revisions:
+            if revision is None or rev == "main" or cached_rev.commit_hash.startswith(rev):
+                revision_hashes.append(cached_rev.commit_hash)
+
+    if not revision_hashes:
+        return 0
+
+    try:
+        strategy = cache_info.delete_revisions(*revision_hashes)
+        freed = int(strategy.expected_freed_size)
+        strategy.execute()
+        logger.info(
+            "cleaned HF cache for %s (%d revisions, %s freed)",
+            repo_id,
+            len(revision_hashes),
+            strategy.expected_freed_size_str,
+        )
+        return freed
+    except Exception as exc:
+        logger.warning("cleanup_repo_cache failed for %s: %s", repo_id, exc)
+        return 0
 
 
 def upload_file(

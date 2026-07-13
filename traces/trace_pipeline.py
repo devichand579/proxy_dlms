@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from traces.hf_trace_upload import (
-    cleanup_cache,
+    cleanup_repo_cache,
     delete_file,
-    download_file,
+    download_file_to_temp,
     file_sizes,
     list_repo_files,
+    remove_temp_download,
     resolve_repo,
     trace_hf_revision,
     upload_file,
@@ -30,14 +31,19 @@ from traces.trace_metrics import (
     compare_with_metrics_row,
     expected_trace_names,
     load_metrics_lookup,
+    prewarm_scoring_tasks,
 )
 from traces.trace_npz import compression_ratio, convert_jsonl_to_npz, load_trace_samples
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_METRICS_CSV = Path(__file__).resolve().parent.parent / "fetch_evals/strace_metrics.csv"
-DEFAULT_AUDIT_CSV = Path(__file__).resolve().parent.parent / "fetch_evals/trace_audit.csv"
+DEFAULT_AUDIT_CSV = Path(__file__).resolve().parent.parent / "fetch_evals/trace_audit_flagged.csv"
 DEFAULT_CONVERT_CSV = Path(__file__).resolve().parent.parent / "fetch_evals/trace_convert.csv"
+
+_CODE_EVAL_TASKS = frozenset({"humaneval", "openai_humaneval", "mbpp"})
+_METRIC_DELTA_FLAG_THRESHOLD = 0.02
+_METRIC_DELTA_WITH_COUNT_MISMATCH_THRESHOLD = 0.01
 
 
 def hub_inventory(
@@ -89,6 +95,107 @@ def _load_done_names(csv_path: Path, name_field: str = "name") -> set[str]:
         return {row.get(name_field, "") for row in csv.DictReader(f) if row.get(name_field)}
 
 
+def _is_audit_error_row(row: dict[str, Any]) -> bool:
+    issues = str(row.get("issues") or "")
+    return issues.startswith("audit failed:")
+
+
+def _should_retry_audit_row(row: dict[str, Any]) -> bool:
+    if _is_audit_error_row(row):
+        return True
+    flags = str(row.get("audit_flags") or "")
+    return (
+        "AUDIT_FAILED" in flags
+        or "MISSING_TRACE_METRIC" in flags
+        or "MISSING_CODE_METRIC" in flags
+    )
+
+
+def _load_existing_audit_rows(
+    csv_path: Path,
+    *,
+    retry_errors: bool,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    if not csv_path.is_file():
+        return [], set()
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        rows = [annotate_audit_row(dict(row)) for row in csv.DictReader(f)]
+    done = {
+        row["name"]
+        for row in rows
+        if row.get("name") and not (retry_errors and _should_retry_audit_row(row))
+    }
+    return rows, done
+
+
+def _metric_delta_flag_value(row: dict[str, Any]) -> Optional[float]:
+    md = row.get("metric_delta")
+    if md in (None, ""):
+        return None
+    try:
+        return float(md)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sample_count_delta_value(row: dict[str, Any]) -> Optional[int]:
+    scd = row.get("sample_count_delta")
+    if scd in (None, ""):
+        return None
+    try:
+        return int(float(scd))
+    except (TypeError, ValueError):
+        return None
+
+
+def compute_audit_flags(row: dict[str, Any]) -> tuple[str, bool]:
+    """Derive audit_flags / is_bad from one audit CSV row."""
+    flags: list[str] = []
+    issues = str(row.get("issues") or "")
+    if issues.startswith("audit failed:"):
+        flags.append("AUDIT_FAILED")
+    if row.get("transfer_status") == "missing_transfer":
+        flags.append("MISSING_TRANSFER")
+
+    sample_delta = _sample_count_delta_value(row)
+    if sample_delta not in (None, 0):
+        flags.append(f"SAMPLE_COUNT_MISMATCH({sample_delta:+d})")
+
+    task = str(row.get("task") or "").strip().lower()
+    metric_wandb = row.get("metric_wandb")
+    metric_trace = row.get("metric_trace")
+    metrics_flags = str(row.get("metrics_flags") or "")
+    if metric_wandb and not metric_trace:
+        if task in _CODE_EVAL_TASKS:
+            flags.append("MISSING_CODE_METRIC")
+        elif "HF_ALLOW_CODE_EVAL" not in metrics_flags and (
+            "lm-eval task load failed" in metrics_flags
+            or "Input/output error" in metrics_flags
+            or "score failed" in metrics_flags
+        ):
+            flags.append("MISSING_TRACE_METRIC")
+
+    metric_delta = _metric_delta_flag_value(row)
+    if metric_delta is not None:
+        threshold = (
+            _METRIC_DELTA_WITH_COUNT_MISMATCH_THRESHOLD
+            if sample_delta not in (None, 0)
+            else _METRIC_DELTA_FLAG_THRESHOLD
+        )
+        if metric_delta > threshold:
+            flags.append(f"METRIC_DELTA({metric_delta:.4f})")
+
+    audit_flags = "|".join(flags)
+    return audit_flags, bool(flags)
+
+
+def annotate_audit_row(row: dict[str, Any]) -> dict[str, Any]:
+    audit_flags, is_bad = compute_audit_flags(row)
+    row["audit_flags"] = audit_flags
+    row["is_bad"] = is_bad
+    return row
+
+
 def _write_csv_rows(rows: list[dict[str, Any]], output_csv: Path, fields: list[str]) -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
@@ -135,6 +242,8 @@ AUDIT_CSV_FIELDS = [
     "sample_count_delta",
     "metrics_flags",
     "issues",
+    "audit_flags",
+    "is_bad",
 ]
 
 CONVERT_CSV_FIELDS = [
@@ -172,8 +281,11 @@ def audit_one_hub_file(
     meta = load_metrics_lookup(metrics_csv).get(name, {})
     sizes = file_sizes([filename], repo_id=full_repo, revision=rev, token=token)
 
-    path = download_file(filename, repo_id=full_repo, revision=rev, token=token)
+    temp_dir: Path | None = None
     try:
+        path, temp_dir = download_file_to_temp(
+            filename, repo_id=full_repo, revision=rev, token=token
+        )
         check = check_trace_file(path, max_samples=max_samples)
         _, samples = load_trace_samples(path)
         metrics_cmp = compare_with_metrics_row(
@@ -185,7 +297,8 @@ def audit_one_hub_file(
             compute_accuracy=compute_accuracy,
         )
     finally:
-        cleanup_cache(full_repo, filename, revision=rev)
+        if temp_dir is not None:
+            remove_temp_download(temp_dir)
 
     row = check_to_row(check, extra={
         "name": name,
@@ -198,7 +311,7 @@ def audit_one_hub_file(
         "steps_cfg": meta.get("steps", ""),
         **metrics_cmp,
     })
-    return row
+    return annotate_audit_row(row)
 
 
 def run_audit_all(
@@ -212,6 +325,7 @@ def run_audit_all(
     compute_accuracy: bool = True,
     limit: Optional[int] = None,
     resume: bool = True,
+    retry_errors: bool = True,
     token: bool | str | None = True,
 ) -> list[dict[str, Any]]:
     inv = hub_inventory(
@@ -221,31 +335,59 @@ def run_audit_all(
         metrics_csv=metrics_csv,
         token=token,
     )
+    cleanup_repo_cache(inv["repo"], revision=inv["revision"])
     filenames = inv["jsonl_files"]
     if limit is not None:
         filenames = filenames[:limit]
 
     output_csv = Path(output_csv or DEFAULT_AUDIT_CSV)
-    done = _load_done_names(output_csv) if resume else set()
-    rows: list[dict[str, Any]] = []
-    if resume and output_csv.exists():
-        with open(output_csv, newline="", encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
+    if compute_accuracy and metrics_csv:
+        lookup = load_metrics_lookup(metrics_csv)
+        tasks = {row.get("task", "") for row in lookup.values() if row.get("task")}
+        prewarm_errors = prewarm_scoring_tasks(tasks)
+        if prewarm_errors:
+            logger.warning(
+                "lm-eval prewarm incomplete (%d tasks failed): %s",
+                len(prewarm_errors),
+                ", ".join(sorted(prewarm_errors)),
+            )
+
+    if resume:
+        rows, done = _load_existing_audit_rows(output_csv, retry_errors=retry_errors)
+    else:
+        rows, done = [], set()
 
     for i, filename in enumerate(filenames):
         name = _stem(filename)
         if name in done:
             continue
+        if resume and retry_errors:
+            rows = [row for row in rows if row.get("name") != name]
         logger.info("[%d/%d] audit %s", i + 1, len(filenames), filename)
-        row = audit_one_hub_file(
-            filename,
-            repo_id=inv["repo"],
-            revision=inv["revision"],
-            metrics_csv=metrics_csv,
-            max_samples=max_samples,
-            compute_accuracy=compute_accuracy,
-            token=token,
-        )
+        try:
+            row = audit_one_hub_file(
+                filename,
+                repo_id=inv["repo"],
+                revision=inv["revision"],
+                metrics_csv=metrics_csv,
+                max_samples=max_samples,
+                compute_accuracy=compute_accuracy,
+                token=token,
+            )
+        except Exception as exc:
+            logger.error("[%d/%d] FAILED %s: %s", i + 1, len(filenames), filename, exc)
+            # Write a minimal error row so resume can retry transient failures later.
+            meta = load_metrics_lookup(metrics_csv).get(name, {})
+            row = annotate_audit_row({
+                "name": name,
+                "filename": filename,
+                "on_hub": True,
+                "model": meta.get("model", ""),
+                "task": meta.get("task", ""),
+                "mode": meta.get("mode", ""),
+                "steps_cfg": meta.get("steps", ""),
+                "issues": f"audit failed: {exc}",
+            })
         rows.append(row)
         _write_csv_rows(rows, output_csv, AUDIT_CSV_FIELDS)
     return rows
@@ -271,9 +413,12 @@ def convert_one_hub_file(
     npz_name = f"{name}.npz"
     issues: list[str] = []
 
-    path = download_file(filename, repo_id=full_repo, revision=rev, token=token)
-    jsonl_bytes = path.stat().st_size
+    temp_dir: Path | None = None
     try:
+        path, temp_dir = download_file_to_temp(
+            filename, repo_id=full_repo, revision=rev, token=token
+        )
+        jsonl_bytes = path.stat().st_size
         check = check_trace_file(path, max_samples=None)
         task_name, samples = load_trace_samples(path)
         repaired = False
@@ -367,8 +512,8 @@ def convert_one_hub_file(
             "issues": "; ".join(issues) if issues else "",
         }
     finally:
-        cleanup_cache(full_repo, filename, revision=rev)
-        cleanup_cache(full_repo, npz_name, revision=rev)
+        if temp_dir is not None:
+            remove_temp_download(temp_dir)
 
 
 def run_convert_all(
@@ -385,6 +530,7 @@ def run_convert_all(
     token: bool | str | None = True,
 ) -> list[dict[str, Any]]:
     inv = hub_inventory(repo_id=repo_id, namespace=namespace, revision=revision, token=token)
+    cleanup_repo_cache(inv["repo"], revision=inv["revision"])
     present_npz = {f"{_stem(f)}.npz" for f in inv["npz_files"]}
     filenames = inv["jsonl_files"]
     if limit is not None:

@@ -58,12 +58,18 @@ Compares Hub filenames against 360 expected runs in `fetch_evals/strace_metrics.
 ### 2. Audit -> CSV (one file at a time)
 
 ```bash
-python traces/trace_audit.py audit-all -o fetch_evals/trace_audit.csv
+python traces/trace_audit.py audit-all -o fetch_evals/trace_audit_flagged.csv
 python traces/trace_audit.py audit llada_humaneval_pure_diffusion_s256.jsonl
 python traces/trace_audit.py local trace_outputs/foo.jsonl --all-samples
 ```
 
-Per file: **download -> check hooks -> recompute task accuracy (pass@1 / exact_match / strict-match) -> compare vs W&B CSV -> delete cache**.
+Per file: **download -> check hooks -> recompute task accuracy (pass@1 / exact_match / strict-match) -> compare vs W&B CSV -> flag issues -> delete temp download**.
+
+Trace audit/convert downloads each JSONL into a **temporary directory** (not the shared HF hub cache) and deletes it after processing. `audit-all` / `convert-all` also purge any stale cached revisions for the trace dataset repo at startup.
+
+Output CSV includes `audit_flags` and `is_bad` columns. Resume (`audit-all` default) skips completed rows but **re-runs rows flagged `AUDIT_FAILED`, `MISSING_TRACE_METRIC`, or `MISSING_CODE_METRIC`** from a previous pass. Use `--no-retry-errors` to keep those skipped.
+
+Humaneval/mbpp rows with no `metric_trace` are flagged `MISSING_CODE_METRIC` (pass@1 could not be recomputed from the trace).
 
 Accuracy uses lm-eval task definitions with the same few-shot counts as eval. Samples are matched to eval instances by prompt token ids; generations are decoded from `final_sequence`.
 
