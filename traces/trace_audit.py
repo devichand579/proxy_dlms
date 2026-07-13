@@ -80,6 +80,11 @@ Examples:
     )
     p_audit_all.add_argument("--limit", type=int, default=None)
     p_audit_all.add_argument("--no-resume", action="store_true")
+    p_audit_all.add_argument(
+        "--no-retry-errors",
+        action="store_true",
+        help="Do not re-audit rows whose previous run failed with transient errors",
+    )
     _add_repo_args(p_audit_all)
     p_audit_all.set_defaults(func=cmd_audit_all)
 
@@ -146,9 +151,11 @@ def cmd_audit_all(args: argparse.Namespace) -> int:
         compute_accuracy=not args.no_accuracy,
         limit=args.limit,
         resume=not args.no_resume,
+        retry_errors=not args.no_retry_errors,
     )
     out = args.output or DEFAULT_AUDIT_CSV
-    print(f"wrote {len(rows)} rows to {out}")
+    bad = sum(1 for row in rows if row.get("is_bad"))
+    print(f"wrote {len(rows)} rows to {out} ({bad} flagged)")
     return 0
 
 

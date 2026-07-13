@@ -43,7 +43,7 @@ TASK_PRIMARY_PATTERNS: dict[str, tuple[str, ...]] = {
 
 MODEL_DIR_NAMES: dict[str, str] = {
     "llada": "llada",
-    "llada1": "llada1_5",  # hub filenames use 'llada1', model dir is 'llada1_5'
+    "llada1": "llada1_5",   # hub filenames use 'llada1', model dir is 'llada1_5'
     "llada1_5": "llada1_5",
     "dream": "dream",
 }
