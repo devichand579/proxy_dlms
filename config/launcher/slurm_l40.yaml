@@ -10,7 +10,7 @@ hydra:
   launcher:
     submitit_folder: job_outputs/%j
     partition: gpu_l40       
-    qos: null              # set if required
+    qos: limited             # set if required
     timeout_min: 2880       # 2 days
     mem_gb: 64
     gres: gpu:1

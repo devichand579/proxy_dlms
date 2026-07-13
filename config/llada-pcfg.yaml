@@ -47,7 +47,7 @@ train:
   max_grad_norm: 1.0
   seed: 0
   device: null
-  out_dir: null  # default checkpoints/llada-<variant>-pcfg at repo root
+  out_dir: null  # default checkpoints/llada-<variant>-pcfg, or checkpoints/<hf_model> when train.hf_model is set
   resume: null
   log_every: 10
   save_every: 2000

@@ -97,7 +97,8 @@ def main():
     p.add_argument("--val-every", type=int, default=2000,
                    help="Validation every N steps (default 2000; 0=disable).")
     p.add_argument("--push-model", action="store_true", help="Push best-val checkpoint to HF Hub at end.")
-    p.add_argument("--hf-model", type=str, default=None, help="Short or full HF model repo id.")
+    p.add_argument("--hf-model", type=str, default=None,
+                   help="Short or full HF model repo id (also default checkpoint dir when --out-dir unset).")
     p.add_argument("--hf-model-namespace", type=str, default=None)
     p.add_argument("--hf-model-private", action="store_true")
     p.add_argument("--amp", action="store_true", default=True, help="Mixed precision on CUDA.")
@@ -131,10 +132,15 @@ def main():
     else:
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    out_dir = resolve_repo_path(args.out_dir) or default_checkpoint_dir(args.variant)
+    out_dir = resolve_repo_path(args.out_dir) or default_checkpoint_dir(
+        args.variant, hf_model=args.hf_model,
+    )
     resume_dir = resolve_repo_path(args.resume) or out_dir
     latest_ckpt = resume_dir / CKPT_LATEST
     do_resume = args.resume is not None and (resume_dir / TRAIN_STATE_JSON).exists()
+
+    if is_main(rank):
+        print(f"checkpoints -> {out_dir}", flush=True)
 
     if do_resume and latest_ckpt.is_dir():
         model, config, vocab = load_pcfg_llada_checkpoint(latest_ckpt, device=str(device))
