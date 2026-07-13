@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
 LLaDA-PCFG training and scheduler eval via Hydra.
-
 Config: config/llada-pcfg.yaml
-
-Examples:
-  python hydra_runners/run_llada-pcfg.py mode=train train.hf_dataset=pcfg-code train.batch_size=128
-  python hydra_runners/run_llada-pcfg.py mode=eval eval.model_path=checkpoints/llada-100m-pcfg/checkpoint-best_val
-  python hydra_runners/run_llada-pcfg.py mode=train train.variant=100m,200m --multirun launcher=slurm_h100
-
 Shell: ./scripts/llada-pcfg.sh --mode train|eval [hydra overrides...]
 """
 
