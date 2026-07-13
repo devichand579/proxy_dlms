@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
+import subprocess
+import sys as _sys
+import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from load_model import infer_diffusion_token_ids, is_dream_model_dir, load_tokenizer, prepend_bos_for_dream
 
@@ -39,6 +43,7 @@ TASK_PRIMARY_PATTERNS: dict[str, tuple[str, ...]] = {
 
 MODEL_DIR_NAMES: dict[str, str] = {
     "llada": "llada",
+    "llada1": "llada1_5",   # hub filenames use 'llada1', model dir is 'llada1_5'
     "llada1_5": "llada1_5",
     "dream": "dream",
 }
@@ -143,8 +148,30 @@ def _trace_prompt_key(sample: dict, tokenizer) -> Optional[tuple[int, ...]]:
     return _prompt_token_key(list(ids), tokenizer.pad_token_id)
 
 
-def _load_scoring_task(task_name: str, num_fewshot: int):
+# Tasks whose metric requires executing generated code (code_eval / pass@k).
+# We bypass lm-eval's process_results for these and run code in a fresh
+# subprocess to avoid multiprocessing.Manager deadlocks after tokenizer forks.
+_CODE_TASKS: frozenset[str] = frozenset({"humaneval", "openai_humaneval", "mbpp"})
+
+
+def _is_code_task(task_name: str) -> bool:
+    return task_name.strip().lower() in _CODE_TASKS
+
+
+def _is_retriable_io_error(exc: BaseException) -> bool:
+    if isinstance(exc, OSError):
+        return True
+    msg = str(exc).lower()
+    return "input/output error" in msg or "errno 5" in msg
+
+
+def _load_scoring_task_once(task_name: str, num_fewshot: int):
     from lm_eval.tasks import TaskManager
+
+    if _is_code_task(task_name):
+        # Needed for lm-eval to build humaneval/mbpp requests. Actual code execution
+        # uses _score_code_instance() in a subprocess, not lm-eval's code_eval metric.
+        os.environ.setdefault("HF_ALLOW_CODE_EVAL", "1")
 
     lm_task = lm_eval_task_name(task_name)
     tm = TaskManager()
@@ -164,6 +191,53 @@ def _load_scoring_task(task_name: str, num_fewshot: int):
     return task
 
 
+def _load_scoring_task(
+    task_name: str,
+    num_fewshot: int,
+    *,
+    max_retries: int = 4,
+):
+    last_exc: Optional[BaseException] = None
+    for attempt in range(max_retries):
+        try:
+            return _load_scoring_task_once(task_name, num_fewshot)
+        except Exception as exc:
+            if not _is_retriable_io_error(exc) or attempt + 1 >= max_retries:
+                raise
+            last_exc = exc
+            delay = min(30, 2 ** attempt)
+            logger.warning(
+                "lm-eval task load failed for %s (attempt %d/%d): %s; retry in %ds",
+                task_name,
+                attempt + 1,
+                max_retries,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"failed to load lm-eval task {task_name!r}")
+
+
+def prewarm_scoring_tasks(task_names: Iterable[str]) -> dict[str, str]:
+    """Load each lm-eval task once before trace audit to warm HF datasets cache."""
+    errors: dict[str, str] = {}
+    seen: set[str] = set()
+    for raw in task_names:
+        task = str(raw).strip()
+        if not task or task in seen:
+            continue
+        seen.add(task)
+        try:
+            _load_scoring_task(task, 0)
+            logger.info("prewarmed lm-eval task %s", task)
+        except Exception as exc:
+            errors[task] = str(exc)
+            logger.warning("prewarm failed for %s: %s", task, exc)
+    return errors
+
+
 def _task_stop_tokens(task) -> list[str]:
     try:
         gen_kw = task.config.generation_kwargs or {}
@@ -171,6 +245,53 @@ def _task_stop_tokens(task) -> list[str]:
         return [str(u) for u in until]
     except Exception:
         return []
+
+
+def _build_test_program(gen_text: str, doc: dict, task_name: str) -> Optional[str]:
+    """Combine generated code with task test cases into a runnable program."""
+    task = task_name.strip().lower()
+    if task in ("humaneval", "openai_humaneval"):
+        # humaneval: model receives function signature+docstring as prompt and generates
+        # only the body (completion).  Prepend the prompt so the function is fully defined.
+        prompt = doc.get("prompt", "")
+        test_code = doc.get("test", "")
+        entry_point = doc.get("entry_point", "")
+        if not test_code:
+            return None
+        return f"{prompt}{gen_text}\n{test_code}\ncheck({entry_point})"
+    elif task == "mbpp":
+        test_list = doc.get("test_list", [])
+        setup = doc.get("test_setup_code", "")
+        if not test_list:
+            return None
+        tests = "\n".join(test_list)
+        return f"{setup}\n{gen_text}\n{tests}" if setup else f"{gen_text}\n{tests}"
+    return None
+
+
+def _run_code_subprocess(program: str, timeout: float = 5.0) -> bool:
+    """Execute program in a fresh Python subprocess; return True iff it exits 0."""
+    try:
+        result = subprocess.run(
+            [_sys.executable, "-c", program],
+            timeout=timeout,
+            capture_output=True,
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception:
+        return False
+
+
+def _score_code_instance(gen_text: str, inst, task_name: str, timeout: float = 5.0) -> dict[str, float]:
+    """Pass@1 via subprocess execution — avoids code_eval multiprocessing deadlocks."""
+    program = _build_test_program(gen_text, inst.doc, task_name)
+    if program is None:
+        return {}
+    passed = _run_code_subprocess(program, timeout=timeout)
+    # Key format matches what _aggregate_metrics / _pick_primary_metric expect
+    return {"pass@1,none": 1.0 if passed else 0.0}
 
 
 def _apply_filters(inst, task) -> None:
@@ -255,7 +376,12 @@ def compute_trace_accuracy(
 ) -> dict[str, Any]:
     """
     Score trace generations with lm-eval task metrics (pass@1, exact_match, strict-match, …).
-    Matches samples to eval instances by prompt token ids.
+    Matches samples to eval instances via suffix matching against 0-shot prompt keys.
+
+    Traces may store only the bare question (no fewshot, e.g. arc_challenge_chat) or the
+    question preceded by custom fewshot examples that differ from lm-eval defaults (e.g. gsm8k).
+    Building a 0-shot index and matching by the tail of the trace key is robust to both cases.
+    For Dream models, the leading BOS token is stripped from both sides before matching.
     """
     root = repo_root or Path(__file__).resolve().parent.parent
     model_dir = model_dir_for_name(model_name, root)
@@ -282,10 +408,12 @@ def compute_trace_accuracy(
         }
 
     _, eos_id, _ = infer_diffusion_token_ids(model_dir)
-    ns = int(num_fewshot) if num_fewshot is not None else eval_num_fewshot(task_name)
 
+    # Always build the matching index with 0-shot.  Traces store the bare question or custom
+    # fewshot examples that may differ from lm-eval; suffix matching against 0-shot keys handles
+    # all observed trace formats without requiring knowledge of how many shots were used.
     try:
-        task = _load_scoring_task(task_name, ns)
+        task = _load_scoring_task(task_name, 0)
     except Exception as e:
         return {
             "metric_trace": None,
@@ -296,18 +424,50 @@ def compute_trace_accuracy(
         }
 
     stop_tokens = _task_stop_tokens(task)
-    prompt_index: dict[tuple[int, ...], Any] = {}
+
+    # Determine BOS token ID for Dream models.  prepend_bos_for_dream adds BOS to instance keys
+    # and traces also have BOS at position 0; strip it from both sides before suffix matching.
+    bos_id: Optional[int] = None
+    if is_dream_model_dir(model_dir):
+        bt = getattr(tokenizer, "bos_token", None)
+        if bt:
+            enc = tokenizer.encode(bt, add_special_tokens=False)
+            if enc:
+                bos_id = int(enc[0])
+
+    # Build suffix index grouped by inner-key length for O(1) lookup per length bucket.
+    # inner_key = 0-shot instance key with leading BOS stripped (for dream models).
+    suffix_groups: dict[int, dict[tuple[int, ...], Any]] = defaultdict(dict)
     for inst in task.instances:
-        key = _instance_prompt_key(inst, tokenizer, model_dir)
-        prompt_index.setdefault(key, inst)
+        k = _instance_prompt_key(inst, tokenizer, model_dir)
+        inner = k[1:] if (bos_id is not None and k and k[0] == bos_id) else k
+        suffix_groups[len(inner)].setdefault(inner, inst)
+
+    def _find_instance(trace_key: tuple[int, ...]) -> Optional[Any]:
+        """Return the lm-eval instance whose 0-shot prompt is a suffix of trace_key."""
+        inner = (
+            trace_key[1:]
+            if (bos_id is not None and trace_key and trace_key[0] == bos_id)
+            else trace_key
+        )
+        for key_len, group in suffix_groups.items():
+            if key_len <= len(inner):
+                suffix = inner[-key_len:]
+                if suffix in group:
+                    return group[suffix]
+        return None
 
     per_doc_metrics: list[dict[str, float]] = []
     n_unmatched = 0
     n_no_final = 0
 
     for sample in samples:
-        key = _trace_prompt_key(sample, tokenizer)
-        if key is None or key not in prompt_index:
+        trace_key = _trace_prompt_key(sample, tokenizer)
+        if trace_key is None:
+            n_unmatched += 1
+            continue
+        inst = _find_instance(trace_key)
+        if inst is None:
             n_unmatched += 1
             continue
         gen_text = decode_generation_from_trace(
@@ -320,9 +480,11 @@ def compute_trace_accuracy(
         if gen_text is None:
             n_no_final += 1
             continue
-        inst = prompt_index[key]
         try:
-            per_doc_metrics.append(_score_instance(task, inst, gen_text))
+            if _is_code_task(task_name):
+                per_doc_metrics.append(_score_code_instance(gen_text, inst, task_name))
+            else:
+                per_doc_metrics.append(_score_instance(task, inst, gen_text))
         except Exception as e:
             flags.append(f"score failed doc {getattr(inst, 'doc_id', '?')}: {e}")
 
