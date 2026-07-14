@@ -75,16 +75,19 @@ eval:
   schedulers: all
   max_samples: null
   steps: 128
-  batch_size: 4
+  gen_length: 128  # fixed suffix generation window (lm-eval style)
+  seed: 0          # per-sample prompt split: Random(seed + sample_idx)
+  batch_size: 16
   device: null
   out_dir: null  # default eval_outputs/pcfg at repo root
 
-  upload_traces: true
-  replay_oracle: true
   tracing_enabled: true
   trace_hf_upload: true
-  trace_hf_dataset_repo: schedulerlens
+  trace_hf_dataset_repo: llada_pcfg_traces
   trace_hf_namespace: null
+  wandb: true
+  resumable: true
+  run_id: null  # override {model}-pcfg_{scheduler}_s{steps} stem for trace/W&B/checkpoint dir
 
 hydra:
   run:

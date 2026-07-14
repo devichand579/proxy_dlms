@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 LLaDA-PCFG training and scheduler eval via Hydra.
 Config: config/llada-pcfg.yaml
@@ -151,16 +150,29 @@ def _build_eval_argv(ev: dict[str, Any], *, offline: bool = False) -> list[str]:
         ("schedulers", "--schedulers"),
         ("max_samples", "--max-samples"),
         ("steps", "--steps"),
+        ("gen_length", "--gen-length"),
+        ("seed", "--seed"),
         ("batch_size", "--batch-size"),
         ("device", "--device"),
     ]
     for key, flag in scalar_keys:
         _add_scalar(argv, ev, key, flag)
 
-    if ev.get("upload_traces") is False:
-        argv.append("--no-upload-traces")
-    if ev.get("replay_oracle") is False:
-        argv.append("--no-replay-oracle")
+    if ev.get("wandb") is False:
+        argv.append("--no-wandb")
+    if ev.get("run_id") is not None and str(ev.get("run_id")).strip():
+        argv.extend(["--run-id", str(ev.get("run_id")).strip()])
+
+    if ev.get("resumable") is True:
+        argv.append("--resumable")
+    elif ev.get("resumable") is False:
+        argv.append("--no-resumable")
+
+    if ev.get("tracing_enabled") is False:
+        argv.append("--no-tracing-enabled")
+    elif ev.get("tracing_enabled") is True:
+        argv.append("--tracing-enabled")
+
     if offline:
         argv.append("--offline")
 

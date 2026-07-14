@@ -3,11 +3,6 @@ Train a small LLaDA variant on PCFG-sampled masked strings.
 
 Each step samples t ~ Uniform[0, 1], masks content tokens independently with
 probability t, and optimizes Eq. (3) with 1/(t·L) weighting on masked CE.
-
-Example (from repo root):
-  python llada-pcfg/scripts/train_pcfg_llada.py --variant 100m --hf-dataset pcfg-code --steps 2000
-  python llada-pcfg/scripts/train_pcfg_llada.py --variant 100m --hf-dataset pcfg-code --offline
-  torchrun --nproc_per_node=2 llada-pcfg/scripts/train_pcfg_llada.py --variant 100m --corpus data/pcfg --steps 5000
 """
 from __future__ import annotations
 

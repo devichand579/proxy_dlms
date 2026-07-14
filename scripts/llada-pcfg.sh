@@ -90,20 +90,20 @@ Train (maps to train.* in config):
 Eval (maps to eval.* in config):
   --model_path PATH       local checkpoint dir (repo-root-relative, default checkpoints/...)
   --hf_model REPO         HF model repo (alternative to --model_path)
-  --variant LABEL         trace/output label (default 100m in config)
+  --variant LABEL         model-name fallback when path/hf_model infer fails (default 100m)
   --corpus PATH           corpus with test split
   --hf_dataset NAME
   --hf_namespace ORG
   --schedulers LIST       all or comma list: pd,bd,eb,fdm,fhs,top_k_c,top_k_m,dus
   --max_samples N
-  --steps N --batch_size N
+  --steps N --gen_length N --seed N --batch_size N
   --out_dir PATH
   --tracing_enabled true|false
   --trace_hf_upload true|false
+  --resumable true|false  --run_id NAME  (default run: {model}-pcfg_{scheduler}_s{steps})
+  --wandb true|false
   --trace_hf_dataset_repo REPO
   --trace_hf_namespace ORG
-  --no_upload_traces
-  --no_replay_oracle
 
 Examples:
   ./scripts/llada-pcfg.sh --mode train --variant 100m --hf_dataset pcfg-code --batch_size 128 --epochs 3
@@ -169,14 +169,16 @@ EVAL_HF_NAMESPACE=""
 SCHEDULERS=""
 MAX_SAMPLES=""
 EVAL_STEPS=""
+EVAL_GEN_LENGTH=""
+EVAL_SEED=""
 EVAL_BATCH_SIZE=""
 EVAL_OUT_DIR=""
 TRACING_ENABLED=""
 TRACE_HF_UPLOAD=""
 TRACE_HF_DATASET_REPO=""
 TRACE_HF_NAMESPACE=""
-NO_UPLOAD_TRACES=false
-NO_REPLAY_ORACLE=false
+RESUMABLE=""
+RUN_ID=""
 
 EXTRA=()
 
@@ -282,6 +284,10 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --gen_length|--gen-length)
+      EVAL_GEN_LENGTH="$2"
+      shift 2
+      ;;
     --weight_decay|--weight-decay)
       WEIGHT_DECAY="$2"
       shift 2
@@ -292,6 +298,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --seed)
       SEED="$2"
+      if [[ "$MODE" == "eval" ]]; then
+        EVAL_SEED="$2"
+      fi
       shift 2
       ;;
     --out_dir|--out-dir)
@@ -392,13 +401,13 @@ while [[ $# -gt 0 ]]; do
       TRACE_HF_NAMESPACE="$2"
       shift 2
       ;;
-    --no_upload_traces|--no-upload-traces)
-      NO_UPLOAD_TRACES=true
-      shift
+    --resumable)
+      RESUMABLE="$2"
+      shift 2
       ;;
-    --no_replay_oracle|--no-replay-oracle)
-      NO_REPLAY_ORACLE=true
-      shift
+    --run_id|--run-id)
+      RUN_ID="$2"
+      shift 2
       ;;
 
     *)
@@ -484,15 +493,18 @@ else
   append_if_set eval.schedulers "$SCHEDULERS"
   append_if_set eval.max_samples "$MAX_SAMPLES"
   append_if_set eval.steps "$EVAL_STEPS"
+  append_if_set eval.gen_length "$EVAL_GEN_LENGTH"
+  append_if_set eval.seed "$EVAL_SEED"
   append_if_set eval.batch_size "$EVAL_BATCH_SIZE"
   append_if_set eval.out_dir "$EVAL_OUT_DIR"
   append_bool_if_set eval.tracing_enabled "$TRACING_ENABLED"
   append_bool_if_set eval.trace_hf_upload "$TRACE_HF_UPLOAD"
   append_if_set eval.trace_hf_dataset_repo "$TRACE_HF_DATASET_REPO"
   append_if_set eval.trace_hf_namespace "$TRACE_HF_NAMESPACE"
+  append_bool_if_set eval.wandb "$WANDB"
+  append_bool_if_set eval.resumable "$RESUMABLE"
+  append_if_set eval.run_id "$RUN_ID"
   [[ -n "$DEVICE" ]] && append_if_set eval.device "$DEVICE"
-  [[ "$NO_UPLOAD_TRACES" == "true" ]] && OVERRIDES+=(eval.upload_traces=false)
-  [[ "$NO_REPLAY_ORACLE" == "true" ]] && OVERRIDES+=(eval.replay_oracle=false)
 fi
 
 append_if_set wandb_project "$WANDB_PROJECT"

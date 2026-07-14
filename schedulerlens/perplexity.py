@@ -16,8 +16,11 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _LLADA_PCFG_DIR = _REPO_ROOT / "llada-pcfg"
-if str(_LLADA_PCFG_DIR) not in sys.path:
-    sys.path.insert(0, str(_LLADA_PCFG_DIR))
+_LLADA_PCFG_SCRIPTS = _LLADA_PCFG_DIR / "scripts"
+for _path in (_REPO_ROOT, _LLADA_PCFG_DIR, _LLADA_PCFG_SCRIPTS):
+    _text = str(_path)
+    if _text not in sys.path:
+        sys.path.insert(0, _text)
 
 
 @dataclass
@@ -73,9 +76,8 @@ def compute_sample_perplexity(
     replay_oracle: bool = False,
 ) -> SamplePerplexity:
     """Per-sample commit NLL/PPL; oracle fields when PCFG metadata + engine present."""
-    from pcfg_metrics import (
+    from schedulerlens.pcfg_oracle import (
         extract_unmask_events,
-        masked_perplexity,
         replay_oracle_mt_jt,
         trace_model_commit_nll,
         trace_oracle_nll,
@@ -107,7 +109,7 @@ def compute_sample_perplexity(
 
     return SamplePerplexity(
         model_commit_nll=model_nll,
-        model_commit_ppl=masked_perplexity(model_nll),
+        model_commit_ppl=_ppl(model_nll),
         oracle_nll=oracle_nll,
         oracle_ppl=_ppl(oracle_nll),
         Mt_total=Mt_total,

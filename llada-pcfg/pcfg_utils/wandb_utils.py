@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pcfg_utils.distributed import is_main
 
 
@@ -10,6 +12,29 @@ def format_lr(lr: float) -> str:
     mantissa, exponent = text.split("e")
     mantissa = mantissa.rstrip("0").rstrip(".")
     return f"{mantissa}e{exponent}"
+
+
+def resolve_eval_model_name(
+    *,
+    model_dir: Path,
+    hf_model: str | None,
+    variant: str,
+) -> str:
+    """Short model label for eval trace / W&B run names."""
+    if hf_model is not None and str(hf_model).strip():
+        return str(hf_model).strip().rsplit("/", 1)[-1]
+    name = model_dir.name
+    if name.startswith("checkpoint-"):
+        name = model_dir.parent.name
+    if not name or name == ".":
+        return f"llada-{variant}-pcfg"
+    return name
+
+
+def default_eval_run_name(model_name: str, scheduler_key: str, steps: int) -> str:
+    """``{model}-pcfg_{scheduler}_s{steps}`` (trace filename stem and W&B run name)."""
+    safe_model = str(model_name).replace("/", "-")
+    return f"{safe_model}-pcfg_{scheduler_key}_s{int(steps)}"
 
 
 def default_wandb_run_name(

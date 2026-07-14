@@ -362,11 +362,9 @@ Checkpoints include model weights, config, tokenizer, and `pcfg_vocab.txt`.
 | Phase | Metric | Meaning |
 | ----- | ------ | ------- |
 | Train / val | `masked_ce_loss`, `masked_ppl` | LLaDA Eq. (3) on independently masked tokens |
-| Generation | `exact_match` | Full content+eos matches reference |
-| Generation | `structural_accuracy` | Syntax token match rate (keywords, delimiters, operators; excludes `id`/`fld`/`num`/`flt`) |
-| Oracle | `oracle_nll`, `oracle_ppl` | −log q(xᵢ \| committed) from PCFG engine |
-| Oracle | `Mt`, `Jt` | KL(model ‖ q) and joint entropy per unmask step |
-| Traces | `M_hat`, `J_hat` | SchedulerLens proxies from confidences / order |
+| Suffix eval | `exact_match` | Generated suffix (content+eos) matches reference |
+| Suffix eval | `structural_accuracy` | Syntax token match rate on suffix (excludes `id`/`fld`/`num`/`flt`) |
+| Traces (SchedulerLens) | `M_hat`, `J_hat`, oracle `Mt`/`Jt` | Post-hoc via `schedulerlens.run --replay-oracle` |
 
 Validation holds out a **random 5%** of the train corpus (`--val-fraction`, default 0.05) with deterministic masking per example index. Validation is **masked CE loss only** — schedulers are not run during training. Best checkpoint by validation loss: `checkpoint-best_val/`.
 
@@ -380,30 +378,30 @@ After training, evaluate on the test split with all eight Strace schedulers (`pd
 # Via Hydra launcher (repo root)
 ./scripts/llada-pcfg.sh --mode eval eval.hf_model=username/llada-100m-pcfg eval.schedulers=all
 
-# Direct script (# from repo root)
-# from repo root
-TRACING_ENABLED=true TRACE_HF_UPLOAD=true python llada-pcfg/scripts/pcfg_eval.py \
+# Direct script (from repo root)
+python llada-pcfg/scripts/pcfg_eval.py \
   --model-path checkpoints/llada-100m-pcfg/checkpoint-best_val \
-  --corpus data/pcfg --schedulers all --max-samples 64 --steps 128
+  --hf-dataset pcfg-code --schedulers all --steps 128 --resumable
 ```
 
 Load from HuggingFace Hub:
 
 ```bash
-TRACING_ENABLED=true python llada-pcfg/scripts/pcfg_eval.py \
+python llada-pcfg/scripts/pcfg_eval.py \
   --hf-model username/llada-100m-pcfg \
-  --hf-dataset pcfg-code --schedulers pd,bd,eb
+  --hf-dataset pcfg-code --schedulers pd,bd,eb --resumable
 ```
 
-Outputs:
-- `eval_outputs/pcfg/pcfg_eval_<variant>.json` — per-scheduler metrics
-- `eval_outputs/pcfg/trace_outputs/pcfg_<variant>_<scheduler>_s<steps>.jsonl` — traces for SchedulerLens
+Outputs (per scheduler, `run_name = {model}-pcfg_{scheduler}_s{steps}`):
+- `eval_outputs/pcfg/pcfg_eval_{model}.json` — aggregate summary
+- `eval_outputs/pcfg/{run_name}/checkpoint.jsonl` — resumable sample checkpoint (when `--resumable`)
+- `eval_outputs/pcfg/{run_name}/trace_outputs/{run_name}.jsonl` — traces for SchedulerLens
 
 Analyze traces (proxies + perplexity + oracle Mt/Jt):
 
 ```bash
 python -m schedulerlens.run \
-  eval_outputs/pcfg/trace_outputs/pcfg_100m_pd_s128.jsonl \
+  eval_outputs/pcfg/llada-100m-pcfg-pcfg_pd_s128/trace_outputs/llada-100m-pcfg-pcfg_pd_s128.jsonl \
   -o outputs/schedulerlens/pcfg_pd --replay-oracle
 ```
 

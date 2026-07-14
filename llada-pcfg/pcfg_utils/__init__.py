@@ -16,7 +16,13 @@ from pcfg_utils.checkpoint import (
 from pcfg_utils.distributed import is_main, setup_distributed, unwrap_model
 from pcfg_utils.schedule import resolve_warmup_steps, wsd_lr
 from pcfg_utils.splits import split_train_val
-from pcfg_utils.wandb_utils import default_wandb_run_name, format_lr, init_wandb
+from pcfg_utils.wandb_utils import (
+    default_eval_run_name,
+    default_wandb_run_name,
+    format_lr,
+    init_wandb,
+    resolve_eval_model_name,
+)
 from utils import (
     checkpoints_dir,
     data_dir,
@@ -42,12 +48,14 @@ __all__ = [
     "ckpt_path",
     "data_dir",
     "default_checkpoint_dir",
+    "default_eval_run_name",
     "default_wandb_run_name",
     "ensure_dir",
     "ensure_import_paths",
     "eval_outputs_dir",
     "format_lr",
     "init_wandb",
+    "resolve_eval_model_name",
     "is_main",
     "maybe_resume",
     "package_root",
