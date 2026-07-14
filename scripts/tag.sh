@@ -26,7 +26,7 @@
 ########################################################################################
 # TAG launcher — runs `python hydra_runners/run_tag.py` with Hydra (config: config/tag.yaml)
 #
-# Slurm: sbatch scripts/tag.sh --slurm --cst_checkpoint ... --model_path ... --prompt "..."
+# Slurm: sbatch scripts/tag.sh --cst_checkpoint ... --model_path ... --prompt "..."
 # Local: ./scripts/tag.sh --cst_checkpoint ... --prompt "..."
 ########################################################################################
 
@@ -60,7 +60,7 @@ Options (shell only):
   --with_residual         add residual err nodes/edges
   --output_exclude_eos    mask EOS in logits before softmax (lexical readout)
   --no_eos_harness        full run: disable EOS early stop (reference-style)
-  --slurm                 use srun when already inside a Slurm allocation
+  --slurm                 optional: one srun wrap (omit with sbatch unless your site requires it)
   -h, --help              show this message
 
 Any other args are passed to Hydra, e.g.:
@@ -76,7 +76,8 @@ Examples:
            --hidden_pt outputs/.../hidden/file.pt --out_dir outputs/tag_from_pt
 
 Slurm:
-  sbatch scripts/tag.sh --slurm --cst_checkpoint ... --model_path ./models/llada --prompt "..."
+  sbatch scripts/tag.sh --cst_checkpoint ... --model_path ./models/llada --prompt "..."
+  # Add --slurm only if your cluster requires srun for GPU binding inside sbatch.
 EOF
 }
 
@@ -142,7 +143,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${SLURM_WRAPPED:-}" == "1" ]] || [[ "${SLURM_JOB_ID:-}" != "" ]]; then
+if [[ "${SLURM_WRAPPED:-}" == "1" ]]; then
   RUN=(srun)
 else
   RUN=()

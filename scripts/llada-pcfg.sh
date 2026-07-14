@@ -37,8 +37,8 @@
 #   ./scripts/llada-pcfg.sh --mode eval --hf_model username/llada-100m-pcfg --schedulers all
 #
 # Slurm:
-#   sbatch scripts/llada-pcfg.sh --mode train --hf_dataset pcfg-code --batch_size 128 --slurm
-#   sbatch scripts/llada-pcfg.sh --mode train --nproc 4 --hf_dataset pcfg-code --slurm
+#   sbatch scripts/llada-pcfg.sh --mode eval --hf_model user/llada-100m-pcfg --schedulers all
+#   sbatch scripts/llada-pcfg.sh --mode eval --slurm ...  # one srun (GPU step); omit --slurm inside sbatch unless your site requires it
 #
 # Hydra multirun (login node, one job per combo):
 #   python hydra_runners/run_llada-pcfg.py mode=train train.variant=100m,200m --multirun launcher=slurm_h100
@@ -64,7 +64,7 @@ LLaDA-PCFG launcher — config defaults in config/llada-pcfg.yaml; flags overrid
 
 Run:
   --mode train|eval       (default: train)
-  --slurm                 use srun inside a Slurm allocation
+  --slurm                 wrap launch in a single srun (optional with sbatch; avoid double-srun)
   --device DEV            0|1|cuda|cuda:0|cpu
   --offline               cached HF + local W&B
   --launcher NAME         Hydra launcher group (local|slurm_h100|slurm_l40|...)
@@ -531,7 +531,7 @@ if [[ "$SLURM_MODE" == "true" ]]; then
   export LLADA_PCFG_SLURM_WRAPPED=1
 fi
 
-if [[ "${LLADA_PCFG_SLURM_WRAPPED:-}" == "1" ]] || [[ "${SLURM_JOB_ID:-}" != "" ]]; then
+if [[ "${LLADA_PCFG_SLURM_WRAPPED:-}" == "1" ]]; then
   RUN=(srun)
 else
   RUN=()

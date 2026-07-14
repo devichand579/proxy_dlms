@@ -63,7 +63,7 @@ Options:
   --hidden_dir DIR      mode=eval only: local folder of .pt to score (not used for store)
   --checkpoint PATH     eval: CST checkpoint .pt
   --task_name NAME      store/eval: lm-eval task (e.g. gsm8k)
-  --slurm               use srun when already inside a Slurm allocation
+  --slurm               optional: one srun wrap (omit with sbatch unless your site requires it)
   -h, --help            show this message
 
 Examples:
@@ -118,7 +118,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${SLURM_WRAPPED:-}" == "1" ]] || [[ "${SLURM_JOB_ID:-}" != "" ]]; then
+if [[ "${SLURM_WRAPPED:-}" == "1" ]]; then
   RUN=(srun)
 else
   RUN=()

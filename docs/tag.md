@@ -287,7 +287,8 @@ python hydra_runners/run_tag.py ... hidden_pt=... no_logits=true
 python hydra_runners/run_tag.py ... influence_node_mass=0.7 influence_edge_mass=0.95
 ```
 
-Slurm: `sbatch scripts/tag.sh --slurm --cst_checkpoint ... --model_path ... --prompt "..."`
+Slurm: `sbatch scripts/tag.sh --cst_checkpoint ... --model_path ... --prompt "..."`  
+Add `--slurm` only if your cluster requires `srun` for GPU binding inside `sbatch`.
 
 ---
 

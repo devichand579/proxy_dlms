@@ -248,6 +248,9 @@ def _train_launch_prefix(nproc: int) -> list[str]:
 def _wrap_slurm(cmd: list[str], *, use_slurm: bool) -> list[str]:
     if not use_slurm:
         return cmd
+    # llada-pcfg.sh already launched hydra under srun (--slurm / sbatch); do not nest.
+    if os.environ.get("LLADA_PCFG_SLURM_WRAPPED"):
+        return cmd
     if os.environ.get("SLURM_JOB_ID"):
         return ["srun", *cmd]
     return cmd
