@@ -3,10 +3,11 @@
 #SBATCH --output=job_outputs/llada-pcfg_job_out_%j.out
 #SBATCH --error=job_outputs/llada-pcfg_job_err_%j.err
 #SBATCH --ntasks=1
+#SBATCH --qos=limited
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64gb
-#SBATCH --time=47:00:00
-#SBATCH --partition=gpu_h100  # gpu_l40, gpu_h100, dibdp (AIRAWAT)
+#SBATCH --time=48:00:00
+#SBATCH --partition=gpu_l40  # gpu_l40, gpu_h100, dibdp (AIRAWAT)
 #SBATCH --gres=gpu:1
 
 ########################################################################################
@@ -46,7 +47,14 @@
 set -euo pipefail
 
 # shellcheck source=_repo_root.sh
-source "$(dirname "${BASH_SOURCE[0]}")/_repo_root.sh"
+_script_dir="$(dirname "${BASH_SOURCE[0]}")"
+# When sbatch copies the script to its spool dir, _repo_root.sh won't be there;
+# fall back to the original submission directory.
+if [[ ! -f "$_script_dir/_repo_root.sh" && -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  _script_dir="${SLURM_SUBMIT_DIR}/scripts"
+fi
+source "$_script_dir/_repo_root.sh"
+unset _script_dir
 
 usage() {
   cat <<'EOF'

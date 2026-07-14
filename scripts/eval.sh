@@ -47,7 +47,14 @@
 # Offline (cached datasets + local W&B): add --offline (run scripts/download_datasets.sh first).
 
 # shellcheck source=_repo_root.sh
-source "$(dirname "${BASH_SOURCE[0]}")/_repo_root.sh"
+_script_dir="$(dirname "${BASH_SOURCE[0]}")"
+# When sbatch copies the script to its spool dir, _repo_root.sh won't be there;
+# fall back to the original submission directory.
+if [[ ! -f "$_script_dir/_repo_root.sh" && -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  _script_dir="${SLURM_SUBMIT_DIR}/scripts"
+fi
+source "$_script_dir/_repo_root.sh"
+unset _script_dir
 BATCH_SIZE=""
 MODE=""
 STRATEGY=""
