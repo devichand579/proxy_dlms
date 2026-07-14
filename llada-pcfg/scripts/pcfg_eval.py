@@ -50,7 +50,7 @@ else:
 import torch
 from hf_hub import apply_pcfg_hf_env, resolve_hf_token
 from models.pcfg_models import load_pcfg_llada_checkpoint
-from pcfg_data import ARCH_LEN, fit_corpus_for_arch, load_corpus_from_disk, load_corpus_from_hub
+from pcfg_data import ARCH_LEN, Vocab, fit_corpus_for_arch, load_corpus_from_disk, load_corpus_from_hub
 from pcfg_metrics import (
     PromptSuffixEvalSample,
     build_prompt_suffix_batch,
@@ -193,6 +193,38 @@ def resolve_block_length(mode: str, gen_length: int, block_length: int | None) -
     return gen_length
 
 
+def pcfg_invalid_token_ids(
+    vocab: Vocab,
+    model_config,
+    *,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Ids in the padded output vocab with no PCFG terminal (embedding_size > vocab.size)."""
+    vocab_size = int(vocab.size)
+    embedding_size = int(getattr(model_config, "embedding_size", None) or vocab_size)
+    if embedding_size <= vocab_size:
+        return None
+    return torch.arange(vocab_size, embedding_size, dtype=torch.long, device=device)
+
+
+def extract_gen_suffix_ids(
+    row: torch.Tensor,
+    *,
+    gen_start: int,
+    gen_length: int,
+    ref_suffix_len: int,
+    eos_id: int,
+    use_eos_harness: bool,
+) -> list[int]:
+    """Slice the generated suffix; with EOS harness, truncate through first EOS (inclusive)."""
+    gen_tail = row[gen_start : gen_start + gen_length].detach().cpu().tolist()
+    if use_eos_harness:
+        eos_pos = next((i for i, tid in enumerate(gen_tail) if int(tid) == int(eos_id)), None)
+        if eos_pos is not None:
+            return gen_tail[: eos_pos + 1]
+    return gen_tail[:ref_suffix_len]
+
+
 def resolve_model_path(
     *,
     model_path: Path | None,
@@ -309,6 +341,9 @@ def eval_scheduler(
     wandb_project: str,
     wandb_config: dict,
     wandb_resume_id: str | None,
+    use_eos_harness: bool = True,
+    top_k: int = 2,
+    invalid_token_ids: torch.Tensor | None = None,
 ) -> dict:
     mode, strategy = SCHEDULER_MAP[scheduler_key]
     strategy_kw = {} if strategy is None else {"strategy": strategy}
@@ -334,6 +369,8 @@ def eval_scheduler(
         "strategy": strategy,
         "gen_length": gen_length,
         "steps": steps,
+        "use_eos_harness": use_eos_harness,
+        "top_k": top_k,
         "run_name": run_name,
         "resumable": resumable,
         "work_dir": str(work_dir),
@@ -391,12 +428,13 @@ def eval_scheduler(
                 gen_length=gen_length,
                 block_length=bl,
                 mode=mode,
-                top_k=1,
+                top_k=top_k,
                 trace_name=run_name if tracing_enabled else None,
                 upload_to_wandb=False,
                 mask_id=vocab.mask_id,
                 eos_id=vocab.eos_id,
-                use_eos_harness=False,
+                use_eos_harness=use_eos_harness,
+                invalid_token_ids=invalid_token_ids,
                 **strategy_kw,
             )
         finally:
@@ -415,8 +453,14 @@ def eval_scheduler(
 
         for b, sample in enumerate(batch_plan):
             gen_start = prompt_tensor_width
-            gen_end = gen_start + len(sample.ref_suffix_ids)
-            gen_suffix = out[b, gen_start:gen_end].detach().cpu().tolist()
+            gen_suffix = extract_gen_suffix_ids(
+                out[b],
+                gen_start=gen_start,
+                gen_length=gen_length,
+                ref_suffix_len=len(sample.ref_suffix_ids),
+                eos_id=vocab.eos_id,
+                use_eos_harness=use_eos_harness,
+            )
             suffix_tokens = sample.tokens[sample.n_visible :]
 
             em = suffix_exact_match(gen_suffix, sample.ref_suffix_ids)
@@ -526,6 +570,19 @@ def main():
     p.add_argument("--seed", type=int, default=0,
                    help="Seed for per-sample prompt lengths (seed+sample_idx; shared across schedulers).")
     p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument(
+        "--top-k",
+        type=int,
+        default=2,
+        help="Tokens transferred per step for top_k schedulers (default: 2; matches lmeval.yaml).",
+    )
+    p.add_argument(
+        "--use-eos-harness",
+        dest="use_eos_harness",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Stop schedulers early once EOS is decoded (default: true; matches main eval harness).",
+    )
     p.add_argument("--device", default=None)
     p.add_argument("--out-dir", type=Path, default=None)
     p.add_argument(
@@ -588,8 +645,15 @@ def main():
     wandb_enabled = bool(args.wandb)
     run_id_override = args.run_id
 
-    model, _config, vocab = load_pcfg_llada_checkpoint(model_dir, device=str(device))
+    model, model_config, vocab = load_pcfg_llada_checkpoint(model_dir, device=str(device))
     model.eval()
+    invalid_token_ids = pcfg_invalid_token_ids(vocab, model_config, device=device)
+    if invalid_token_ids is not None:
+        print(
+            f"masking {invalid_token_ids.numel()} padded output vocab id(s) "
+            f"({vocab.size}..{int(getattr(model_config, 'embedding_size', vocab.size)) - 1}) for stochastic schedulers",
+            flush=True,
+        )
 
     test = load_test_corpus(args)
     if args.max_samples is not None:
@@ -608,6 +672,8 @@ def main():
         "steps": args.steps,
         "gen_length": args.gen_length,
         "seed": args.seed,
+        "use_eos_harness": bool(args.use_eos_harness),
+        "top_k": int(args.top_k),
         "resumable": bool(args.resumable),
         "tracing_enabled": tracing_enabled,
         "wandb": wandb_enabled,
@@ -632,7 +698,8 @@ def main():
 
     print(
         f"model={model_dir} name={model_name} test={len(test)} schedulers={schedulers} "
-        f"gen_length={args.gen_length} seed={args.seed} resumable={args.resumable} "
+        f"gen_length={args.gen_length} seed={args.seed} top_k={args.top_k} "
+        f"use_eos_harness={args.use_eos_harness} resumable={args.resumable} "
         f"tracing={tracing_enabled} wandb={wandb_enabled} device={device}",
         flush=True,
     )
@@ -670,6 +737,9 @@ def main():
             wandb_project=wandb_project,
             wandb_config=wandb_config,
             wandb_resume_id=wandb_resume_id,
+            use_eos_harness=bool(args.use_eos_harness),
+            top_k=int(args.top_k),
+            invalid_token_ids=invalid_token_ids,
         )
         summary["schedulers"][key] = m
         print(

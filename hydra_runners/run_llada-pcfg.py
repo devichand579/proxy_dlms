@@ -153,6 +153,7 @@ def _build_eval_argv(ev: dict[str, Any], *, offline: bool = False) -> list[str]:
         ("gen_length", "--gen-length"),
         ("seed", "--seed"),
         ("batch_size", "--batch-size"),
+        ("top_k", "--top-k"),
         ("device", "--device"),
     ]
     for key, flag in scalar_keys:
@@ -167,6 +168,9 @@ def _build_eval_argv(ev: dict[str, Any], *, offline: bool = False) -> list[str]:
         argv.append("--resumable")
     elif ev.get("resumable") is False:
         argv.append("--no-resumable")
+
+    if ev.get("use_eos_harness") is False:
+        argv.append("--no-use-eos-harness")
 
     if ev.get("tracing_enabled") is False:
         argv.append("--no-tracing-enabled")

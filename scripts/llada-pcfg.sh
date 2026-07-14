@@ -104,7 +104,8 @@ Eval (maps to eval.* in config):
   --hf_namespace ORG
   --schedulers LIST       all or comma list: pd,bd,eb,fdm,fhs,top_k_c,top_k_m,dus
   --max_samples N
-  --steps N --gen_length N --seed N --batch_size N
+  --steps N --gen_length N --seed N --batch_size N --top_k N
+  --use_eos_harness true|false   (default true; false = full step budget)
   --out_dir PATH
   --tracing_enabled true|false
   --trace_hf_upload true|false
@@ -180,6 +181,8 @@ EVAL_STEPS=""
 EVAL_GEN_LENGTH=""
 EVAL_SEED=""
 EVAL_BATCH_SIZE=""
+EVAL_TOP_K=""
+USE_EOS_HARNESS=""
 EVAL_OUT_DIR=""
 TRACING_ENABLED=""
 TRACE_HF_UPLOAD=""
@@ -393,6 +396,18 @@ while [[ $# -gt 0 ]]; do
       MAX_SAMPLES="$2"
       shift 2
       ;;
+    --top_k|--top-k)
+      EVAL_TOP_K="$2"
+      shift 2
+      ;;
+    --use_eos_harness|--use-eos-harness)
+      USE_EOS_HARNESS="$2"
+      shift 2
+      ;;
+    --no_eos_harness|--no-eos-harness)
+      USE_EOS_HARNESS="false"
+      shift
+      ;;
     --tracing_enabled|--tracing-enabled)
       TRACING_ENABLED="$2"
       shift 2
@@ -504,6 +519,8 @@ else
   append_if_set eval.gen_length "$EVAL_GEN_LENGTH"
   append_if_set eval.seed "$EVAL_SEED"
   append_if_set eval.batch_size "$EVAL_BATCH_SIZE"
+  append_if_set eval.top_k "$EVAL_TOP_K"
+  append_bool_if_set eval.use_eos_harness "$USE_EOS_HARNESS"
   append_if_set eval.out_dir "$EVAL_OUT_DIR"
   append_bool_if_set eval.tracing_enabled "$TRACING_ENABLED"
   append_bool_if_set eval.trace_hf_upload "$TRACE_HF_UPLOAD"

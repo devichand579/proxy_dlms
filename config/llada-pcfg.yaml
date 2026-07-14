@@ -78,6 +78,8 @@ eval:
   gen_length: 128  # fixed suffix generation window (lm-eval style)
   seed: 0          # per-sample prompt split: Random(seed + sample_idx)
   batch_size: 16
+  top_k: 2  # top_k schedulers only (matches config/lmeval.yaml)
+  use_eos_harness: true  # early stop when EOS decoded (main eval harness default)
   device: null
   out_dir: null  # default eval_outputs/pcfg at repo root
 

@@ -77,7 +77,7 @@ def build_prompt_suffix_batch(
     plan: Sequence[PromptSuffixEvalSample],
     vocab: Vocab,
 ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
-    """Left-aligned prompts (padded), for lm-eval-style ``generate`` (appends gen_length masks)."""
+    """Left-pad prompts (lm-eval style): visible tokens right-aligned before ``generate`` appends masks."""
     if not plan:
         raise ValueError("empty eval plan")
     max_pl = max((s.n_visible for s in plan), default=0)
@@ -85,14 +85,15 @@ def build_prompt_suffix_batch(
     attn = []
     prompt_lens = []
     for sample in plan:
-        ids = vocab.encode(sample.tokens[: sample.n_visible])
+        n_vis = sample.n_visible
+        ids = vocab.encode(sample.tokens[:n_vis])
         row = np.full(max_pl, vocab.pad_id, dtype=np.int64)
         mask = np.zeros(max_pl, dtype=np.int64)
-        row[: sample.n_visible] = ids
-        mask[: sample.n_visible] = 1
+        row[max_pl - n_vis :] = ids
+        mask[max_pl - n_vis :] = 1
         rows.append(row)
         attn.append(mask)
-        prompt_lens.append(sample.n_visible)
+        prompt_lens.append(n_vis)
     return (
         torch.tensor(np.stack(rows), dtype=torch.long),
         torch.tensor(np.stack(attn), dtype=torch.long),

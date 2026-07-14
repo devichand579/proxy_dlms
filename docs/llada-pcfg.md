@@ -392,6 +392,10 @@ python llada-pcfg/scripts/pcfg_eval.py \
   --hf-dataset pcfg-code --schedulers pd,bd,eb --resumable
 ```
 
+**EOS harness:** `eval.use_eos_harness` defaults to `true` (same as main `eval.py`): schedulers may stop early once EOS is decoded with no masks before it. Use `--no-use-eos-harness` or `eval.use_eos_harness=false` for full-step reference-style generation.
+
+**Harness parity:** prompts are **left-padded** (like `eval.py`); suffix metrics truncate through the first EOS when the harness is on; `eval.top_k` defaults to `2` for top_k schedulers; padded output vocab ids (`vocab_size..embedding_size-1`) are masked for FHS.
+
 Outputs (per scheduler, `run_name = {model}-pcfg_{scheduler}_s{steps}`):
 - `eval_outputs/pcfg/pcfg_eval_{model}.json` — aggregate summary
 - `eval_outputs/pcfg/{run_name}/checkpoint.jsonl` — resumable sample checkpoint (when `--resumable`)
