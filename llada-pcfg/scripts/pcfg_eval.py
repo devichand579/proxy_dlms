@@ -389,7 +389,7 @@ def eval_scheduler(
                 attention_mask,
                 steps=steps,
                 gen_length=gen_length,
-                block_length=bl if bl is not None else gen_length,
+                block_length=bl,
                 mode=mode,
                 top_k=1,
                 trace_name=run_name if tracing_enabled else None,
