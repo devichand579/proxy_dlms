@@ -383,7 +383,7 @@ def eval_scheduler(
         traces: list[dict] = []
         token = _task_trace_list_ctx.set(traces)
         try:
-            out, _steps_taken, _blocks = generate(
+            out, _steps_taken, _blocks, _gen_time = generate(
                 model,
                 input_ids,
                 attention_mask,
