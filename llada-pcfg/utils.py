@@ -1,20 +1,5 @@
 """
-Repo layout and shared path helpers for llada-pcfg.
-
-All generated artifacts (checkpoints, corpora, eval outputs) live under the
-Strace repo root — not inside ``llada-pcfg/``.
-
-Typical layout::
-
-    Strace/
-      checkpoints/llada-{variant}-pcfg/   # default when hf_model unset
-      checkpoints/{hf_model}/             # default when train.hf_model is set
-      data/pcfg/
-      eval_outputs/pcfg/
-      llada-pcfg/
-        scripts/
-        pcfg_utils/
-        utils.py
+Utilities for llada-pcfg.
 """
 
 from __future__ import annotations
@@ -59,11 +44,11 @@ def eval_outputs_dir() -> Path:
 
 
 def default_checkpoint_dir(variant: str, *, hf_model: str | None = None) -> Path:
-    """Default checkpoint root under ``checkpoints/``.
+    """Default checkpoint root under "checkpoints/".
 
-    When ``hf_model`` is set and ``out_dir`` is not, use the short repo name
-    (e.g. ``llada-300m-pcfg-1B``) so parallel runs do not clobber each other.
-    Otherwise fall back to ``llada-{variant}-pcfg``.
+    When hf_model is set and out_dir is not, use the short repo name
+    (e.g. "llada-300m-pcfg-1B") so parallel runs do not clobber each other.
+    Otherwise fall back to "llada-{variant}-pcfg".
     """
     if hf_model is not None:
         name = str(hf_model).strip().rsplit("/", 1)[-1]

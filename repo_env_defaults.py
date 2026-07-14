@@ -6,10 +6,10 @@ from __future__ import annotations
 import os
 
 # Keep in sync with .env.example.
-HF_TOKEN_DEFAULT = "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"
+HF_TOKEN_DEFAULT = "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" # NOTE: DON'T COMMIT THIS TOKEN
 WANDB_API_KEY_DEFAULT = (
     "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"
-)
+) # NOTE: DON'T COMMIT THIS TOKEN
 WANDB_PROJECT_DEFAULT = "strace"
 
 
@@ -36,9 +36,6 @@ def apply_offline_env(target: dict[str, str] | None = None) -> None:
 
 def resolve_eval_device(device: str | None = None) -> tuple[str, str | None]:
     """Map CLI/YAML device to harness ``device`` and optional ``CUDA_VISIBLE_DEVICES``.
-
-    Returns ``(model_device, cuda_visible_devices)`` where ``cuda_visible_devices`` is
-    ``None`` when the caller should not change ``CUDA_VISIBLE_DEVICES`` (empty string = unset CPU).
     """
     if device is None or not str(device).strip():
         return "cuda", None

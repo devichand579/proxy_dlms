@@ -12,11 +12,7 @@ def get_gen_length_steps(task_name: str) -> tuple[int, int]:
 
 
 def resolve_gen_length_steps(cfg, task_name: str) -> tuple[int, int]:
-    """Pick ``gen_length`` and ``steps`` from ``cfg``, or use task defaults.
-
-    Reads keys ``gen_length`` and ``steps`` (Hydra YAML, OmegaConf, or plain dict).
-    Omit a key or set it to null to keep the default for that slot.
-    Raises if ``steps > gen_length``.
+    """Pick gen_length and steps from cfg, or use task defaults.
     """
     gen_d, steps_d = get_gen_length_steps(task_name)
     gl_raw = cfg.get("gen_length") if cfg is not None else None

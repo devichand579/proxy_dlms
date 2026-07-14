@@ -117,7 +117,7 @@ train:
   hf_hiddens_revision: main
   hf_hiddens_private: false
   hf_local_cache_dir: outputs/cst_hf_cache
-  # Restricted GPU node: enqueue Hub jobs; run ``python hidden_hf_worker.py poll`` on a login machine.
+  # Restricted GPU node: enqueue Hub jobs; run ``python -m cst.hidden_hf_worker poll`` on a login machine.
   hf_use_worker_queue: false
   hf_worker_queue_dir: outputs/hf_worker_queue
   hf_worker_wait_timeout_sec: 86400

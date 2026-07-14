@@ -181,7 +181,7 @@ def dispatch_or_run(
     if use_queue and queue_dir:
         job_id = submit_job(queue_dir, job)
         logger.info(
-            "enqueued HF job %s — run: python hidden_hf_worker.py poll --queue-dir %s",
+            "enqueued HF job %s — run: python -m cst.hidden_hf_worker poll --queue-dir %s",
             job_id,
             queue_dir,
         )

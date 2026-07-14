@@ -32,7 +32,7 @@ python hydra_runners/run_cst.py mode=eval eval.hidden_dir=/path/to/hiddens eval.
 
 **lm-eval + CST metrics during benchmarks:** `hydra_runners/launch_eval.py` with `cst_checkpoint=...` (separate from the table above).
 
-**Config:** `config/cst.yaml` — `store.*`, `train.*`, `cst.*`. **Code:** `cst/`, `cst/hf_hiddens/`, `hidden_hf_worker.py`.
+**Config:** `config/cst.yaml` — `store.*`, `train.*`, `cst.*`. **Code:** `cst/`, `cst/hf_hiddens/`, `cst/hidden_hf_worker.py`.
 
 ---
 
@@ -117,7 +117,7 @@ train:
   hf_worker_queue_dir: outputs/hf_worker_queue
 ```
 
-On a login machine: `python hidden_hf_worker.py poll --queue-dir outputs/hf_worker_queue --watch`
+On a login machine: `python -m cst.hidden_hf_worker poll --queue-dir outputs/hf_worker_queue --watch`
 
 ---
 
@@ -209,7 +209,7 @@ Mixed prompt pools for **train store** only: GSM8K, Minerva, ARC, CSQA, TACO. Se
 | File | Role |
 |------|------|
 | `hydra_runners/run_cst.py` | **`mode=store`** / **`train`** / **`eval`** (single entry point) |
-| `hidden_hf_worker.py` | Hub I/O worker + queue |
+| `cst/hidden_hf_worker.py` | Hub I/O worker + queue |
 | `config/cst.yaml` | All modes |
 | `scripts/cst.sh` | Shell / Slurm wrapper |
 
