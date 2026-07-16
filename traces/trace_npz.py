@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import gc
 import json
+import logging
+import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Union
+from typing import Dict, Iterable, Iterator, List, Optional, Union
 
 import numpy as np
 
-TRACE_NPZ_VERSION = 2
+logger = logging.getLogger(__name__)
+
+DEFAULT_PACK_MEMORY_FRACTION = 0.25
+DEFAULT_PACK_JSON_EXPANSION = 2.5
 STEP_FIELDS = (
     "mask_index",
     "predictions",
@@ -33,6 +40,19 @@ def _squeeze_batch(row) -> np.ndarray:
     while arr.ndim > 1:
         arr = arr[0]
     return arr
+
+
+def _token_ids_from_field(value) -> Optional[list[int]]:
+    if value is None:
+        return None
+    row = _squeeze_batch(value)
+    return [int(t) for t in row.tolist()]
+
+
+def _batched_token_field(token_ids: Optional[list[int]]) -> Optional[list[list[int]]]:
+    if token_ids is None:
+        return None
+    return [token_ids]
 
 
 def _step_array(step_traces: List[dict], field: str, dtype, *, gen_length: int) -> np.ndarray:
@@ -68,26 +88,506 @@ def _step_presence(step_traces: List[dict], field: str) -> np.ndarray:
     )
 
 
-def trace_dict_to_arrays(trace_dict: dict) -> Dict[str, np.ndarray]:
-    """Pack one JSON trace dict into dense arrays."""
-    step_traces = trace_dict.get("step_traces") or []
+def _sample_sidecar_dict(sample: dict, step_traces: List[dict]) -> dict:
+    step_extras: list[dict] = []
+    for step in step_traces:
+        step_extras.append(
+            {
+                "intervention_applied": bool(step.get("intervention_applied", False)),
+                "intervention_type": step.get("intervention_type"),
+                "metadata": step.get("metadata") or {},
+            }
+        )
+    sidecar: dict = {"step_extras": step_extras}
+    metadata = sample.get("metadata")
+    if metadata:
+        sidecar["metadata"] = metadata
+    return sidecar
+
+
+def _encode_sidecar_blob(sidecar: dict) -> bytes:
+    return json.dumps(sidecar, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _decode_sidecar_blob(blob: bytes) -> dict:
+    if not blob:
+        return {}
+    return json.loads(blob.decode("utf-8"))
+
+
+def _parse_jsonl_task_header(line: str) -> Optional[str]:
+    if not line.startswith("# task="):
+        return None
+    payload = line.split("=", 1)[1].strip()
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return payload
+
+
+def iter_jsonl_trace_samples(path: Union[str, Path]) -> Iterator[dict]:
+    """Yield one trace dict per JSONL data line (comments skipped)."""
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            yield json.loads(line)
+
+
+def read_jsonl_task_name(path: Union[str, Path]) -> Optional[str]:
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                task = _parse_jsonl_task_header(line)
+                if task is not None:
+                    return task
+                continue
+            return None
+    return None
+
+
+def read_jsonl_sample_at_index(path: Union[str, Path], index: int) -> dict:
+    if index < 0:
+        raise IndexError(index)
+    for i, sample in enumerate(iter_jsonl_trace_samples(path)):
+        if i == index:
+            return sample
+    raise IndexError(f"sample index {index} out of range")
+
+
+def _available_json_batch_budget_bytes(*, reserved_bytes: int = 0) -> int:
+    """Bytes available for holding parsed JSONL sample dicts during pack."""
+    cap = os.environ.get("TRACE_PACK_MEMORY_BYTES", "").strip()
+    if cap:
+        return max(0, int(cap) - reserved_bytes)
+    try:
+        import psutil
+
+        available = psutil.virtual_memory().available
+    except Exception:
+        available = 512 * 1024 * 1024
+    fraction = float(os.environ.get("TRACE_PACK_MEMORY_FRACTION", DEFAULT_PACK_MEMORY_FRACTION))
+    return max(0, int(available * fraction) - reserved_bytes)
+
+
+def _estimate_stacked_array_bytes(shape: JsonlTraceShape) -> int:
+    """Approximate RAM for pre-allocated NPZ arrays (excluding sidecar text)."""
+    n = shape.n_samples
+    g = shape.gen_length
+    s = shape.max_steps
+    total = n * g * 2  # unmask_step_at_pos int16
+    total += n * (shape.max_prompt_len + shape.max_final_len) * 4
+    total += n * 64  # scalars / token lengths / times
+    for field, dtype in FIELD_DTYPES.items():
+        total += n * s * g * np.dtype(dtype).itemsize
+        if field in OPTIONAL_STEP_FIELDS:
+            total += n * s
+    return total
+
+
+def jsonl_pack_batch_size(
+    jsonl_path: Union[str, Path],
+    shape: JsonlTraceShape,
+    *,
+    stacked_bytes: int,
+) -> int:
+    """Choose how many JSONL samples to parse per batch from free RAM."""
+    fixed = os.environ.get("TRACE_PACK_BATCH_SAMPLES", "").strip()
+    if fixed:
+        return max(1, min(int(fixed), shape.n_samples))
+
+    file_bytes = Path(jsonl_path).stat().st_size
+    avg_line_bytes = max(1, file_bytes // max(shape.n_samples, 1))
+    expansion = float(os.environ.get("TRACE_PACK_JSON_EXPANSION", DEFAULT_PACK_JSON_EXPANSION))
+    per_sample_bytes = max(1, int(avg_line_bytes * expansion))
+
+    budget = _available_json_batch_budget_bytes(reserved_bytes=stacked_bytes)
+    batch = max(1, budget // per_sample_bytes)
+
+    max_batch = os.environ.get("TRACE_PACK_MAX_BATCH", "").strip()
+    if max_batch:
+        batch = min(batch, int(max_batch))
+    min_batch = int(os.environ.get("TRACE_PACK_MIN_BATCH", "1"))
+    batch = max(min_batch, batch)
+    return min(batch, shape.n_samples)
+
+
+def iter_jsonl_trace_batches(
+    path: Union[str, Path],
+    batch_size: int,
+) -> Iterator[list[dict]]:
+    """Load JSONL samples in batches of ``batch_size`` dicts."""
+    batch: list[dict] = []
+    for sample in iter_jsonl_trace_samples(path):
+        batch.append(sample)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+@dataclass(frozen=True)
+class JsonlTraceShape:
+    task_name: Optional[str]
+    n_samples: int
+    gen_length: int
+    max_steps: int
+    max_prompt_len: int
+    max_final_len: int
+
+
+def _sample_gen_length(sample: dict) -> int:
+    gl = int(sample.get("gen_length") or 0)
+    if gl > 0:
+        return gl
+    step_traces = sample.get("step_traces") or []
+    if not step_traces:
+        raise ValueError("trace has no step_traces")
+    return int(len(_squeeze_batch(step_traces[0].get("mask_index") or [0])))
+
+
+def scan_jsonl_trace_shape(path: Union[str, Path]) -> JsonlTraceShape:
+    """Single streaming pass: count samples and discover array shapes."""
+    path = Path(path)
+    task_name: Optional[str] = None
+    n_samples = 0
+    gen_lengths: set[int] = set()
+    max_steps = 0
+    max_prompt_len = 0
+    max_final_len = 0
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                if task_name is None:
+                    task_name = _parse_jsonl_task_header(line)
+                continue
+
+            sample = json.loads(line)
+            step_traces = sample.get("step_traces") or []
+            if not step_traces:
+                raise ValueError(f"sample {n_samples}: trace has no step_traces")
+            max_steps = max(max_steps, len(step_traces))
+            gen_lengths.add(_sample_gen_length(sample))
+
+            prompt_tokens = _token_ids_from_field(sample.get("prompt"))
+            if prompt_tokens:
+                max_prompt_len = max(max_prompt_len, len(prompt_tokens))
+            final_tokens = _token_ids_from_field(sample.get("final_sequence"))
+            if final_tokens:
+                max_final_len = max(max_final_len, len(final_tokens))
+
+            n_samples += 1
+            del sample
+
+    if n_samples == 0:
+        raise ValueError(f"No samples found in {path}")
+    gen_lengths.discard(0)
+    if len(gen_lengths) != 1:
+        raise ValueError(f"Mixed gen_length values in {path}: {sorted(gen_lengths)}")
+
+    return JsonlTraceShape(
+        task_name=task_name,
+        n_samples=n_samples,
+        gen_length=next(iter(gen_lengths)),
+        max_steps=max_steps,
+        max_prompt_len=max_prompt_len,
+        max_final_len=max_final_len,
+    )
+
+
+def _shape_from_samples(
+    samples: list[dict],
+    *,
+    task_name: Optional[str] = None,
+) -> JsonlTraceShape:
+    if not samples:
+        raise ValueError("No samples to pack")
+
+    gen_lengths: set[int] = set()
+    max_steps = 0
+    max_prompt_len = 0
+    max_final_len = 0
+    for sample in samples:
+        step_traces = sample.get("step_traces") or []
+        if not step_traces:
+            raise ValueError("trace has no step_traces")
+        max_steps = max(max_steps, len(step_traces))
+        gen_lengths.add(_sample_gen_length(sample))
+        prompt_tokens = _token_ids_from_field(sample.get("prompt"))
+        if prompt_tokens:
+            max_prompt_len = max(max_prompt_len, len(prompt_tokens))
+        final_tokens = _token_ids_from_field(sample.get("final_sequence"))
+        if final_tokens:
+            max_final_len = max(max_final_len, len(final_tokens))
+
+    gen_lengths.discard(0)
+    if len(gen_lengths) != 1:
+        raise ValueError(f"Mixed gen_length values: {sorted(gen_lengths)}")
+    return JsonlTraceShape(
+        task_name=task_name,
+        n_samples=len(samples),
+        gen_length=next(iter(gen_lengths)),
+        max_steps=max_steps,
+        max_prompt_len=max_prompt_len,
+        max_final_len=max_final_len,
+    )
+
+
+def _fill_token_row(
+    sample: dict,
+    index: int,
+    field: str,
+    matrix: np.ndarray,
+    lengths: np.ndarray,
+) -> None:
+    tokens = _token_ids_from_field(sample.get(field))
+    if tokens is None:
+        lengths[index] = -1
+        return
+    lengths[index] = len(tokens)
+    if tokens:
+        matrix[index, : len(tokens)] = np.asarray(tokens, dtype=np.int32)
+
+
+def _preallocate_stacked(
+    *,
+    n_samples: int,
+    gen_length: int,
+    max_steps: int,
+    max_prompt_len: int,
+    max_final_len: int,
+) -> Dict[str, np.ndarray]:
+    stacked: Dict[str, np.ndarray] = {
+        "n_samples": np.int32(n_samples),
+        "gen_length": np.int32(gen_length),
+        "n_steps": np.zeros(n_samples, dtype=np.int32),
+        "prompt_len": np.zeros(n_samples, dtype=np.int32),
+        "unmask_step_at_pos": np.zeros((n_samples, gen_length), dtype=np.int16),
+        "gen_only": np.zeros(n_samples, dtype=np.bool_),
+        "start_time": np.full(n_samples, np.nan, dtype=np.float64),
+        "end_time": np.full(n_samples, np.nan, dtype=np.float64),
+        "prompt_tokens": np.zeros((n_samples, max_prompt_len), dtype=np.int32),
+        "prompt_token_len": np.full(n_samples, -1, dtype=np.int32),
+        "final_sequence_tokens": np.zeros((n_samples, max_final_len), dtype=np.int32),
+        "final_sequence_len": np.full(n_samples, -1, dtype=np.int32),
+    }
+    for field, dtype in FIELD_DTYPES.items():
+        stacked[field] = np.zeros((n_samples, max_steps, gen_length), dtype=dtype)
+        if field in OPTIONAL_STEP_FIELDS:
+            stacked[f"{field}_present"] = np.zeros((n_samples, max_steps), dtype=np.bool_)
+    return stacked
+
+
+def _pack_sample_into_stacked(
+    sample: dict,
+    index: int,
+    *,
+    gen_length: int,
+    stacked: Dict[str, np.ndarray],
+) -> bytes:
+    """Fill pre-allocated stacked arrays for one sample; return encoded sidecar bytes."""
+    step_traces = sample.get("step_traces") or []
     if not step_traces:
         raise ValueError("trace has no step_traces")
 
-    gen_length = int(
-        trace_dict.get("gen_length")
-        or len(_squeeze_batch(step_traces[0].get("mask_index") or [0]))
+    n_steps = len(step_traces)
+    stacked["n_steps"][index] = np.int32(n_steps)
+    stacked["prompt_len"][index] = np.int32(int(sample.get("prompt_len") or 0))
+    stacked["unmask_step_at_pos"][index] = _unmask_step_at_pos(
+        sample.get("unmasking_order"),
+        gen_length,
     )
-    packed = {
-        "n_steps": np.int32(len(step_traces)),
-        "prompt_len": np.int32(int(trace_dict.get("prompt_len") or 0)),
-        "unmask_step_at_pos": _unmask_step_at_pos(trace_dict.get("unmasking_order"), gen_length),
-    }
+
     for field, dtype in FIELD_DTYPES.items():
-        packed[field] = _step_array(step_traces, field, dtype, gen_length=gen_length)
-    for field in OPTIONAL_STEP_FIELDS:
-        packed[f"{field}_present"] = _step_presence(step_traces, field)
-    return packed
+        row = _step_array(step_traces, field, dtype, gen_length=gen_length)
+        stacked[field][index, :n_steps] = row
+        if field in OPTIONAL_STEP_FIELDS:
+            stacked[f"{field}_present"][index, :n_steps] = _step_presence(step_traces, field)
+
+    return _encode_sidecar_blob(_sample_sidecar_dict(sample, step_traces))
+
+
+def _append_sample_to_stacked(
+    idx: int,
+    sample: dict,
+    *,
+    gen_length: int,
+    stacked: Dict[str, np.ndarray],
+    sidecar_offsets: np.ndarray,
+    sidecar_data: bytearray,
+) -> None:
+    sidecar_offsets[idx] = len(sidecar_data)
+    sidecar_data.extend(
+        _pack_sample_into_stacked(
+            sample,
+            idx,
+            gen_length=gen_length,
+            stacked=stacked,
+        )
+    )
+    _fill_token_row(sample, idx, "prompt", stacked["prompt_tokens"], stacked["prompt_token_len"])
+    _fill_token_row(
+        sample,
+        idx,
+        "final_sequence",
+        stacked["final_sequence_tokens"],
+        stacked["final_sequence_len"],
+    )
+    stacked["gen_only"][idx] = bool(sample.get("gen_only", True))
+    if sample.get("start_time") is not None:
+        stacked["start_time"][idx] = float(sample["start_time"])
+    if sample.get("end_time") is not None:
+        stacked["end_time"][idx] = float(sample["end_time"])
+
+
+def _pack_samples_into_stacked(
+    stacked: Dict[str, np.ndarray],
+    shape: JsonlTraceShape,
+    samples: Iterable[dict],
+    *,
+    start_index: int = 0,
+    sidecar_offsets: Optional[np.ndarray] = None,
+    sidecar_data: Optional[bytearray] = None,
+    finalize: bool = True,
+) -> tuple[np.ndarray, bytes]:
+    if sidecar_offsets is None:
+        sidecar_offsets = np.zeros(shape.n_samples + 1, dtype=np.int64)
+    if sidecar_data is None:
+        sidecar_data = bytearray()
+
+    n_packed = 0
+    for sample in samples:
+        idx = start_index + n_packed
+        _append_sample_to_stacked(
+            idx,
+            sample,
+            gen_length=shape.gen_length,
+            stacked=stacked,
+            sidecar_offsets=sidecar_offsets,
+            sidecar_data=sidecar_data,
+        )
+        n_packed += 1
+
+    if finalize:
+        sidecar_offsets[shape.n_samples] = len(sidecar_data)
+    return sidecar_offsets, bytes(sidecar_data)
+
+
+def _write_npz_archive(
+    output_path: Union[str, Path],
+    stacked: Dict[str, np.ndarray],
+    sidecar_offsets: np.ndarray,
+    sidecar_bytes: bytes,
+    *,
+    task_name: Optional[str] = None,
+) -> Path:
+    output_path = Path(output_path)
+    stacked["sidecar_bytes"] = (
+        np.frombuffer(sidecar_bytes, dtype=np.uint8) if sidecar_bytes else np.zeros(0, dtype=np.uint8)
+    )
+    stacked["sidecar_offsets"] = sidecar_offsets
+    if task_name is not None:
+        stacked["task"] = np.array(str(task_name))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(output_path, **stacked)
+    return output_path
+
+
+def _pack_trace_shape_to_npz(
+    shape: JsonlTraceShape,
+    samples: Iterable[dict],
+    output_path: Union[str, Path],
+    *,
+    task_name: Optional[str] = None,
+) -> Path:
+    task = task_name if task_name is not None else shape.task_name
+    stacked = _preallocate_stacked(
+        n_samples=shape.n_samples,
+        gen_length=shape.gen_length,
+        max_steps=shape.max_steps,
+        max_prompt_len=shape.max_prompt_len,
+        max_final_len=shape.max_final_len,
+    )
+    sidecar_offsets, sidecar_bytes = _pack_samples_into_stacked(stacked, shape, samples)
+    return _write_npz_archive(output_path, stacked, sidecar_offsets, sidecar_bytes, task_name=task)
+
+
+def pack_jsonl_to_npz(
+    input_path: Union[str, Path],
+    output_path: Union[str, Path],
+    *,
+    task_name: Optional[str] = None,
+) -> Path:
+    """Convert JSONL to NPZ using RAM-aware batching (two passes over the file)."""
+    input_path = Path(input_path)
+    shape = scan_jsonl_trace_shape(input_path)
+    task = task_name if task_name is not None else shape.task_name
+
+    stacked = _preallocate_stacked(
+        n_samples=shape.n_samples,
+        gen_length=shape.gen_length,
+        max_steps=shape.max_steps,
+        max_prompt_len=shape.max_prompt_len,
+        max_final_len=shape.max_final_len,
+    )
+    stacked_bytes = _estimate_stacked_array_bytes(shape)
+    batch_size = jsonl_pack_batch_size(input_path, shape, stacked_bytes=stacked_bytes)
+    budget = _available_json_batch_budget_bytes(reserved_bytes=stacked_bytes)
+    avg_line = max(1, input_path.stat().st_size // max(shape.n_samples, 1))
+    logger.info(
+        "JSONL pack: %d samples, batch_size=%d (budget=%.1f GiB, ~%.1f KiB/line, arrays=%.1f GiB)",
+        shape.n_samples,
+        batch_size,
+        budget / (1024**3),
+        avg_line / 1024,
+        stacked_bytes / (1024**3),
+    )
+
+    sidecar_offsets = np.zeros(shape.n_samples + 1, dtype=np.int64)
+    sidecar_data = bytearray()
+    sample_index = 0
+    for batch in iter_jsonl_trace_batches(input_path, batch_size):
+        _pack_samples_into_stacked(
+            stacked,
+            shape,
+            batch,
+            start_index=sample_index,
+            sidecar_offsets=sidecar_offsets,
+            sidecar_data=sidecar_data,
+            finalize=False,
+        )
+        sample_index += len(batch)
+        del batch
+        gc.collect()
+
+    sidecar_offsets[shape.n_samples] = len(sidecar_data)
+    return _write_npz_archive(
+        output_path,
+        stacked,
+        sidecar_offsets,
+        bytes(sidecar_data),
+        task_name=task,
+    )
+
+
+def pack_samples_to_npz(
+    samples: list[dict],
+    output_path: Union[str, Path],
+    *,
+    task_name: Optional[str] = None,
+) -> Path:
+    """Pack in-memory trace samples into a compressed NPZ archive."""
+    shape = _shape_from_samples(samples, task_name=task_name)
+    return _pack_trace_shape_to_npz(shape, samples, output_path, task_name=task_name)
 
 
 def arrays_to_trace_dict(
@@ -97,10 +597,22 @@ def arrays_to_trace_dict(
     prompt_len: int,
     arrays: Dict[str, np.ndarray],
     sample_index: int,
+    prompt_tokens: Optional[np.ndarray] = None,
+    prompt_token_len: Optional[np.ndarray] = None,
+    final_sequence_tokens: Optional[np.ndarray] = None,
+    final_sequence_len: Optional[np.ndarray] = None,
+    gen_only: Optional[np.ndarray] = None,
+    start_time: Optional[np.ndarray] = None,
+    end_time: Optional[np.ndarray] = None,
+    sidecar_blob: Optional[bytes] = None,
 ) -> dict:
     """Reconstruct one JSON-compatible trace dict from packed arrays."""
     step_traces: List[dict] = []
+    sidecar = _decode_sidecar_blob(sidecar_blob or b"")
+    step_extras = sidecar.get("step_extras") or []
+
     for t in range(int(n_steps)):
+        extras = step_extras[t] if t < len(step_extras) else {}
         step = {"step": t}
         for field in STEP_FIELDS:
             present_key = f"{field}_present"
@@ -109,9 +621,9 @@ def arrays_to_trace_dict(
                 continue
             arr = arrays[field][sample_index, t]
             step[field] = arr.reshape(1, gen_length).tolist()
-        step["intervention_applied"] = False
-        step["intervention_type"] = None
-        step["metadata"] = {}
+        step["intervention_applied"] = bool(extras.get("intervention_applied", False))
+        step["intervention_type"] = extras.get("intervention_type")
+        step["metadata"] = extras.get("metadata") or {}
         step_traces.append(step)
 
     unmask = arrays["unmask_step_at_pos"][sample_index]
@@ -121,8 +633,8 @@ def arrays_to_trace_dict(
         if int(step) >= 0
     }
 
-    return {
-        "gen_only": True,
+    trace: dict = {
+        "gen_only": bool(gen_only[sample_index]) if gen_only is not None else True,
         "prompt": None,
         "final_sequence": None,
         "prompt_len": int(prompt_len),
@@ -133,24 +645,31 @@ def arrays_to_trace_dict(
         "end_time": None,
     }
 
+    if start_time is not None:
+        val = float(start_time[sample_index])
+        trace["start_time"] = None if np.isnan(val) else val
+    if end_time is not None:
+        val = float(end_time[sample_index])
+        trace["end_time"] = None if np.isnan(val) else val
 
-def _load_jsonl_samples(path: Path) -> tuple[Optional[str], List[dict]]:
-    task_name: Optional[str] = None
-    samples: List[dict] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("#"):
-                if line.startswith("# task="):
-                    try:
-                        task_name = json.loads(line.split("=", 1)[1])
-                    except json.JSONDecodeError:
-                        task_name = line.split("=", 1)[1].strip()
-                continue
-            samples.append(json.loads(line))
-    return task_name, samples
+    if prompt_tokens is not None and prompt_token_len is not None:
+        plen = int(prompt_token_len[sample_index])
+        if plen >= 0:
+            trace["prompt"] = _batched_token_field(
+                [int(t) for t in prompt_tokens[sample_index, :plen].tolist()]
+            )
+
+    if final_sequence_tokens is not None and final_sequence_len is not None:
+        flen = int(final_sequence_len[sample_index])
+        if flen >= 0:
+            trace["final_sequence"] = _batched_token_field(
+                [int(t) for t in final_sequence_tokens[sample_index, :flen].tolist()]
+            )
+
+    metadata = sidecar.get("metadata")
+    if metadata:
+        trace["metadata"] = metadata
+    return trace
 
 
 def _load_json_samples(path: Path) -> tuple[Optional[str], List[dict]]:
@@ -165,86 +684,69 @@ def _load_json_samples(path: Path) -> tuple[Optional[str], List[dict]]:
     raise ValueError(f"Unsupported JSON trace format: {path}")
 
 
+def _load_npz_samples(path: Path) -> tuple[Optional[str], List[dict]]:
+    task_name: Optional[str] = None
+    with np.load(path, allow_pickle=False) as data:
+        if "task" in data:
+            task_name = str(data["task"])
+    return task_name, list(iter_npz_traces(path))
+
+
 def load_trace_samples(path: Union[str, Path]) -> tuple[Optional[str], List[dict]]:
-    """Load all samples from JSONL or JSON trace file."""
+    """Load all samples from JSONL, JSON, or NPZ trace file."""
     path = Path(path)
-    if path.suffix.lower() == ".jsonl":
-        return _load_jsonl_samples(path)
-    if path.suffix.lower() == ".json":
+    suffix = path.suffix.lower()
+    if suffix == ".jsonl":
+        return read_jsonl_task_name(path), list(iter_jsonl_trace_samples(path))
+    if suffix == ".json":
         return _load_json_samples(path)
+    if suffix == ".npz":
+        return _load_npz_samples(path)
     raise ValueError(f"Unsupported trace format: {path}")
 
 
 def convert_jsonl_to_npz(
     input_path: Union[str, Path],
     output_path: Optional[Union[str, Path]] = None,
+    *,
+    samples: Optional[List[dict]] = None,
+    task_name: Optional[str] = None,
 ) -> Path:
     """Convert a JSONL/JSON trace file to a compressed NPZ archive."""
     input_path = Path(input_path)
-    if output_path is None:
-        output_path = input_path.with_suffix(".npz")
-    else:
-        output_path = Path(output_path)
+    output_path = Path(output_path or input_path.with_suffix(".npz"))
 
-    task_name, samples = load_trace_samples(input_path)
-    if not samples:
-        raise ValueError(f"No samples found in {input_path}")
+    if samples is not None:
+        return pack_samples_to_npz(samples, output_path, task_name=task_name)
+    if input_path.suffix.lower() == ".jsonl":
+        return pack_jsonl_to_npz(input_path, output_path, task_name=task_name)
 
-    gen_lengths = {int(s.get("gen_length") or 0) for s in samples}
-    gen_lengths.discard(0)
-    if len(gen_lengths) != 1:
-        raise ValueError(f"Mixed gen_length values in {input_path}: {sorted(gen_lengths)}")
-    gen_length = next(iter(gen_lengths))
+    loaded_task, loaded_samples = load_trace_samples(input_path)
+    return pack_samples_to_npz(
+        loaded_samples,
+        output_path,
+        task_name=task_name if task_name is not None else loaded_task,
+    )
 
-    n_samples = len(samples)
-    n_steps = np.zeros(n_samples, dtype=np.int32)
-    prompt_len = np.zeros(n_samples, dtype=np.int32)
-    max_steps = 0
-    per_sample = []
-    for i, sample in enumerate(samples):
-        packed = trace_dict_to_arrays(sample)
-        per_sample.append(packed)
-        n_steps[i] = packed["n_steps"]
-        prompt_len[i] = packed["prompt_len"]
-        max_steps = max(max_steps, int(packed["n_steps"]))
 
-    stacked: Dict[str, np.ndarray] = {
-        "version": np.array(str(TRACE_NPZ_VERSION)),
-        "n_samples": np.int32(n_samples),
-        "gen_length": np.int32(gen_length),
-        "n_steps": n_steps,
-        "prompt_len": prompt_len,
-        "unmask_step_at_pos": np.stack([p["unmask_step_at_pos"] for p in per_sample], axis=0),
-    }
-    if task_name is not None:
-        stacked["task"] = np.array(str(task_name))
-
-    for field, dtype in FIELD_DTYPES.items():
-        arr = np.zeros((n_samples, max_steps, gen_length), dtype=dtype)
-        for i, packed in enumerate(per_sample):
-            t = int(packed["n_steps"])
-            arr[i, :t] = packed[field]
-        stacked[field] = arr
-        if field in OPTIONAL_STEP_FIELDS:
-            present = np.zeros((n_samples, max_steps), dtype=np.bool_)
-            for i, packed in enumerate(per_sample):
-                t = int(packed["n_steps"])
-                present[i, :t] = packed[f"{field}_present"]
-            stacked[f"{field}_present"] = present
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(output_path, **stacked)
-    return output_path
+def _sidecar_blob_for_sample(
+    sidecar_bytes: np.ndarray,
+    sidecar_offsets: np.ndarray,
+    sample_index: int,
+) -> bytes:
+    if sidecar_bytes.size == 0:
+        return b""
+    start = int(sidecar_offsets[sample_index])
+    end = int(sidecar_offsets[sample_index + 1])
+    if start >= end:
+        return b""
+    return bytes(sidecar_bytes[start:end])
 
 
 def iter_npz_traces(path: Union[str, Path]) -> Iterator[dict]:
     """Yield one trace dict per sample from an NPZ trace archive."""
     path = Path(path)
     with np.load(path, allow_pickle=False) as data:
-        version = str(data["version"])
-        if version != str(TRACE_NPZ_VERSION):
-            raise ValueError(f"Unsupported NPZ trace version {version!r} in {path}")
-
         n_samples = int(data["n_samples"])
         gen_length = int(data["gen_length"])
         n_steps = data["n_steps"]
@@ -256,13 +758,36 @@ def iter_npz_traces(path: Union[str, Path]) -> Iterator[dict]:
                 arrays[key] = data[key]
         arrays["unmask_step_at_pos"] = data["unmask_step_at_pos"]
 
+        prompt_tokens = data["prompt_tokens"] if "prompt_tokens" in data else None
+        prompt_token_len = data["prompt_token_len"] if "prompt_token_len" in data else None
+        final_sequence_tokens = (
+            data["final_sequence_tokens"] if "final_sequence_tokens" in data else None
+        )
+        final_sequence_len = data["final_sequence_len"] if "final_sequence_len" in data else None
+        gen_only = data["gen_only"] if "gen_only" in data else None
+        start_time = data["start_time"] if "start_time" in data else None
+        end_time = data["end_time"] if "end_time" in data else None
+        sidecar_bytes = data["sidecar_bytes"] if "sidecar_bytes" in data else None
+        sidecar_offsets = data["sidecar_offsets"] if "sidecar_offsets" in data else None
+
         for i in range(n_samples):
+            sidecar_blob = None
+            if sidecar_bytes is not None and sidecar_offsets is not None:
+                sidecar_blob = _sidecar_blob_for_sample(sidecar_bytes, sidecar_offsets, i)
             yield arrays_to_trace_dict(
                 gen_length=gen_length,
                 n_steps=int(n_steps[i]),
                 prompt_len=int(prompt_len[i]),
                 arrays=arrays,
                 sample_index=i,
+                prompt_tokens=prompt_tokens,
+                prompt_token_len=prompt_token_len,
+                final_sequence_tokens=final_sequence_tokens,
+                final_sequence_len=final_sequence_len,
+                gen_only=gen_only,
+                start_time=start_time,
+                end_time=end_time,
+                sidecar_blob=sidecar_blob,
             )
 
 

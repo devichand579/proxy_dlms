@@ -176,8 +176,7 @@ def download_file(
 ) -> Path:
     """Download a hub trace file.
 
-    Without ``dest``, returns the HF cache path (legacy; prefer ``download_file_to_temp``
-    for audit/convert pipelines).
+    Without ``dest``, returns the HF cache path
     With ``dest``, downloads directly there without leaving a blob in the shared HF cache.
     """
     from huggingface_hub import hf_hub_download

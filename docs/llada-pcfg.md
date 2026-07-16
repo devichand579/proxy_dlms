@@ -411,7 +411,7 @@ python -m schedulerlens.run \
 
 `perplexity.json` includes `model_commit_ppl` (from trace confidences) and `oracle_ppl` (exact PCFG marginals). With `--replay-oracle`, exact `Mt`/`Jt` are computed by re-forwarding the model at each trace step.
 
-PCFG metrics are computed by `pcfg_eval.py` and `schedulerlens` — not the lm-eval trace audit pipeline. PCFG traces (`pcfg_*.jsonl`) still get hook/structure checks in `trace_audit.py`, but **W&B / lm-eval scoring is skipped** automatically.
+PCFG metrics are computed by `pcfg_eval.py` and `schedulerlens` — not the lm-eval trace audit pipeline. PCFG traces (`pcfg_*` / `*-pcfg_*`) get hook/structure checks in `trace_audit.py`. **Sample count** is compared to the **`pcfg-code` Hub test split** (override with `--pcfg-dataset` / `--pcfg-namespace`; lm-eval / W&B accuracy is still skipped).
 
 ---
 

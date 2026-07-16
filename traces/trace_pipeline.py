@@ -13,30 +13,40 @@ from traces.hf_trace_upload import (
     cleanup_repo_cache,
     delete_file,
     download_file_to_temp,
+    ensure_dataset_repo,
     file_sizes,
     list_repo_files,
     remove_temp_download,
     resolve_repo,
+    trace_hf_dataset_private,
     trace_hf_revision,
     upload_file,
 )
 from traces.trace_checks import (
     TraceCheck,
     check_to_row,
-    check_trace_file,
+    check_trace_jsonl_streaming,
+    check_trace_npz_streaming,
+    conversion_repair_blockers,
     deduplicate_prompt_traces,
-    repair_samples,
+    stream_repair_jsonl,
+    trace_needs_repair,
     validate_npz_roundtrip,
 )
 from traces.trace_metrics import (
+    compare_pcfg_metrics_row,
     compare_with_metrics_row,
     expected_trace_names,
     is_pcfg_trace,
     load_metrics_lookup,
     prewarm_scoring_tasks,
-    pcfg_metrics_skip,
 )
-from traces.trace_npz import compression_ratio, convert_jsonl_to_npz, load_trace_samples
+from traces.trace_npz import (
+    compression_ratio,
+    convert_jsonl_to_npz,
+    load_trace_samples,
+    read_jsonl_task_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +57,12 @@ DEFAULT_CONVERT_CSV = Path(__file__).resolve().parent.parent / "fetch_evals/trac
 _CODE_EVAL_TASKS = frozenset({"humaneval", "openai_humaneval", "mbpp"})
 _METRIC_DELTA_FLAG_THRESHOLD = 0.02
 _METRIC_DELTA_WITH_COUNT_MISMATCH_THRESHOLD = 0.01
+
+
+def _repo_is_pcfg_only(jsonl_files: list[str]) -> bool:
+    if not jsonl_files:
+        return False
+    return all(is_pcfg_trace(_stem(f), first_metadata=None) for f in jsonl_files)
 
 
 def hub_inventory(
@@ -64,13 +80,21 @@ def hub_inventory(
     npz = sorted(f for f in files if f.endswith(".npz"))
     other = sorted(f for f in files if not f.endswith((".jsonl", ".npz")))
 
-    expected = expected_trace_names(metrics_csv)
+    pcfg_only = _repo_is_pcfg_only(jsonl)
+    expected: set[str] = set()
+    if not pcfg_only:
+        try:
+            expected = expected_trace_names(metrics_csv)
+        except FileNotFoundError:
+            expected = set()
+
     expected_jsonl = {f"{n}.jsonl" for n in expected}
     expected_npz = {f"{n}.npz" for n in expected}
 
     return {
         "repo": full_repo,
         "revision": rev,
+        "pcfg_only": pcfg_only,
         "expected_variants": len(expected),
         "jsonl_count": len(jsonl),
         "npz_count": len(npz),
@@ -98,6 +122,62 @@ def _load_done_names(csv_path: Path, name_field: str = "name") -> set[str]:
         return {row.get(name_field, "") for row in csv.DictReader(f) if row.get(name_field)}
 
 
+def _should_retry_convert_row(row: dict[str, Any]) -> bool:
+    return str(row.get("status") or "") != "ok"
+
+
+def _load_existing_convert_rows(
+    csv_path: Path,
+    *,
+    retry_errors: bool,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    if not csv_path.is_file():
+        return [], set()
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        rows = [dict(row) for row in csv.DictReader(f)]
+    done = {
+        row["name"]
+        for row in rows
+        if row.get("name") and not (retry_errors and _should_retry_convert_row(row))
+    }
+    return rows, done
+
+
+def _convert_failure_row(
+    *,
+    name: str,
+    filename: str,
+    npz_name: str,
+    source_repo: str,
+    output_repo: str,
+    status: str,
+    check: TraceCheck,
+    repaired: bool,
+    n_samples: int,
+    jsonl_bytes: int = 0,
+    npz_bytes: int = 0,
+    compression_ratio: str = "",
+    issues: list[str],
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "jsonl_filename": filename,
+        "npz_filename": npz_name,
+        "source_repo": source_repo,
+        "output_repo": output_repo,
+        "status": status,
+        "transfer_status": check.transfer_status,
+        "repaired": repaired,
+        "n_samples": n_samples,
+        "jsonl_bytes": jsonl_bytes,
+        "npz_bytes": npz_bytes,
+        "compression_ratio": compression_ratio,
+        "roundtrip_ok": False,
+        "jsonl_deleted_on_hub": False,
+        "issues": "; ".join(issues),
+    }
+
+
 def _is_audit_error_row(row: dict[str, Any]) -> bool:
     issues = str(row.get("issues") or "")
     return issues.startswith("audit failed:")
@@ -114,6 +194,23 @@ def _should_retry_audit_row(row: dict[str, Any]) -> bool:
     )
 
 
+def _resolve_output_repo(
+    *,
+    repo_id: Optional[str],
+    namespace: Optional[str],
+    output_repo_id: Optional[str],
+    output_namespace: Optional[str],
+) -> str:
+    return resolve_repo(
+        output_repo_id or repo_id,
+        output_namespace if output_namespace is not None else namespace,
+    )
+
+
+def _audit_done_key(row: dict[str, Any]) -> str:
+    return str(row.get("filename") or row.get("name") or "")
+
+
 def _load_existing_audit_rows(
     csv_path: Path,
     *,
@@ -124,9 +221,9 @@ def _load_existing_audit_rows(
     with open(csv_path, newline="", encoding="utf-8") as f:
         rows = [annotate_audit_row(dict(row)) for row in csv.DictReader(f)]
     done = {
-        row["name"]
+        _audit_done_key(row)
         for row in rows
-        if row.get("name") and not (retry_errors and _should_retry_audit_row(row))
+        if _audit_done_key(row) and not (retry_errors and _should_retry_audit_row(row))
     }
     return rows, done
 
@@ -217,6 +314,7 @@ def _write_csv_rows(rows: list[dict[str, Any]], output_csv: Path, fields: list[s
 AUDIT_CSV_FIELDS = [
     "name",
     "filename",
+    "source_format",
     "on_hub",
     "size_bytes",
     "size_mb",
@@ -257,6 +355,8 @@ CONVERT_CSV_FIELDS = [
     "name",
     "jsonl_filename",
     "npz_filename",
+    "source_repo",
+    "output_repo",
     "status",
     "transfer_status",
     "repaired",
@@ -270,6 +370,68 @@ CONVERT_CSV_FIELDS = [
 ]
 
 
+def _metrics_for_audit(
+    *,
+    name: str,
+    check: TraceCheck,
+    meta: dict[str, str],
+    metrics_csv: str | Path | None,
+    compute_accuracy: bool,
+    samples: list[dict] | None = None,
+    pcfg_hf_dataset: str | None = None,
+    pcfg_hf_namespace: str | None = None,
+    token: bool | str | None = True,
+) -> dict[str, Any]:
+    pcfg = is_pcfg_trace(name, samples, first_metadata=check.first_metadata)
+    if pcfg:
+        if check.first_metadata:
+            m = check.first_metadata
+            meta = {
+                "model": str(m.get("variant", "pcfg")),
+                "task": "pcfg",
+                "mode": str(m.get("scheduler", "")),
+                "steps": "",
+            }
+        n_samples = check.n_samples - check.removable_duplicates
+        return compare_pcfg_metrics_row(
+            n_samples=n_samples,
+            sample_indices=check.pcfg_sample_indices,
+            hf_dataset=pcfg_hf_dataset,
+            namespace=pcfg_hf_namespace,
+            token=token,
+        )
+
+    if not compute_accuracy:
+        return {
+            "metric_wandb": None,
+            "metric_key_wandb": "",
+            "metric_trace": None,
+            "metric_key_trace": "",
+            "metric_delta": None,
+            "n_scored": 0,
+            "n_unmatched": 0,
+            "n_samples_expected": None,
+            "sample_count_delta": None,
+            "metrics_flags": "accuracy skipped",
+        }
+
+    if samples is None:
+        raise ValueError("full trace samples required for lm-eval accuracy audit")
+
+    samples_for_metrics = samples
+    if check.removable_duplicates > 0:
+        samples_for_metrics, _ = deduplicate_prompt_traces(samples)
+
+    return compare_with_metrics_row(
+        run_name=name,
+        samples=samples_for_metrics,
+        metrics_lookup=load_metrics_lookup(metrics_csv),
+        task=meta.get("task", ""),
+        model=meta.get("model", ""),
+        compute_accuracy=True,
+    )
+
+
 def audit_one_hub_file(
     filename: str,
     *,
@@ -279,9 +441,12 @@ def audit_one_hub_file(
     metrics_csv: str | Path | None = None,
     max_samples: Optional[int] = 3,
     compute_accuracy: bool = True,
+    pcfg_hf_dataset: str | None = None,
+    pcfg_hf_namespace: str | None = None,
     token: bool | str | None = True,
 ) -> dict[str, Any]:
-    """Download one Hub JSONL, audit, compare metrics, cleanup cache."""
+    """Download one Hub trace file (JSONL or NPZ), audit, compare metrics, cleanup cache."""
+    source_format = "npz" if filename.endswith(".npz") else "jsonl"
     full_repo = resolve_repo(repo_id, namespace)
     rev = revision if revision is not None else trace_hf_revision()
     name = _stem(filename)
@@ -297,44 +462,45 @@ def audit_one_hub_file(
         path, temp_dir = download_file_to_temp(
             filename, repo_id=full_repo, revision=rev, token=token
         )
-        check = check_trace_file(path, max_samples=max_samples)
-        _, samples = load_trace_samples(path)
-        samples_for_metrics = samples
-        if check.removable_duplicates > 0:
-            samples_for_metrics, _ = deduplicate_prompt_traces(samples)
+        name_is_pcfg = is_pcfg_trace(name, first_metadata=None)
+        need_full_samples = compute_accuracy and not name_is_pcfg
 
-        if is_pcfg_trace(name, samples_for_metrics):
-            if samples_for_metrics:
-                m = samples_for_metrics[0].get("metadata") or {}
-                meta = {
-                    "model": str(m.get("variant", "pcfg")),
-                    "task": "pcfg",
-                    "mode": str(m.get("scheduler", "")),
-                    "steps": "",
-                }
-            metrics_cmp = pcfg_metrics_skip(n_samples=len(samples_for_metrics))
-        elif compute_accuracy:
-            metrics_cmp = compare_with_metrics_row(
-                run_name=name,
-                samples=samples_for_metrics,
-                metrics_lookup=load_metrics_lookup(metrics_csv),
-                task=meta.get("task", ""),
-                model=meta.get("model", ""),
-                compute_accuracy=True,
+        if source_format == "jsonl":
+            check = check_trace_jsonl_streaming(
+                path,
+                max_samples=max_samples,
+                collect_pcfg_audit=True,
             )
+            if not name_is_pcfg:
+                name_is_pcfg = is_pcfg_trace(name, first_metadata=check.first_metadata)
+            if name_is_pcfg or not compute_accuracy:
+                need_full_samples = False
         else:
-            metrics_cmp = {
-                "metric_wandb": None,
-                "metric_key_wandb": "",
-                "metric_trace": None,
-                "metric_key_trace": "",
-                "metric_delta": None,
-                "n_scored": 0,
-                "n_unmatched": 0,
-                "n_samples_expected": None,
-                "sample_count_delta": None,
-                "metrics_flags": "accuracy skipped",
-            }
+            check = check_trace_npz_streaming(
+                path,
+                max_samples=max_samples,
+                collect_pcfg_audit=True,
+            )
+            if not name_is_pcfg:
+                name_is_pcfg = is_pcfg_trace(name, first_metadata=check.first_metadata)
+            if name_is_pcfg or not compute_accuracy:
+                need_full_samples = False
+
+        samples: list[dict] | None = None
+        if need_full_samples:
+            _, samples = load_trace_samples(path)
+
+        metrics_cmp = _metrics_for_audit(
+            name=name,
+            check=check,
+            meta=meta,
+            metrics_csv=metrics_csv,
+            compute_accuracy=compute_accuracy,
+            samples=samples,
+            pcfg_hf_dataset=pcfg_hf_dataset,
+            pcfg_hf_namespace=pcfg_hf_namespace,
+            token=token,
+        )
     finally:
         if temp_dir is not None:
             remove_temp_download(temp_dir)
@@ -342,6 +508,7 @@ def audit_one_hub_file(
     row = check_to_row(check, extra={
         "name": name,
         "filename": filename,
+        "source_format": source_format,
         "on_hub": True,
         "size_bytes": sizes.get(filename, check.size_bytes),
         "model": meta.get("model", ""),
@@ -362,9 +529,13 @@ def run_audit_all(
     output_csv: str | Path | None = None,
     max_samples: Optional[int] = 3,
     compute_accuracy: bool = True,
+    include_jsonl: bool = True,
+    include_npz: bool = True,
     limit: Optional[int] = None,
     resume: bool = True,
     retry_errors: bool = True,
+    pcfg_hf_dataset: str | None = None,
+    pcfg_hf_namespace: str | None = None,
     token: bool | str | None = True,
 ) -> list[dict[str, Any]]:
     inv = hub_inventory(
@@ -375,12 +546,17 @@ def run_audit_all(
         token=token,
     )
     cleanup_repo_cache(inv["repo"], revision=inv["revision"])
-    filenames = inv["jsonl_files"]
+    filenames: list[str] = []
+    if include_jsonl:
+        filenames.extend(inv["jsonl_files"])
+    if include_npz:
+        filenames.extend(inv["npz_files"])
+    filenames = sorted(filenames)
     if limit is not None:
         filenames = filenames[:limit]
 
     output_csv = Path(output_csv or DEFAULT_AUDIT_CSV)
-    if compute_accuracy and metrics_csv:
+    if compute_accuracy and metrics_csv and not inv.get("pcfg_only"):
         lookup = load_metrics_lookup(metrics_csv)
         tasks = {row.get("task", "") for row in lookup.values() if row.get("task")}
         prewarm_errors = prewarm_scoring_tasks(tasks)
@@ -397,11 +573,10 @@ def run_audit_all(
         rows, done = [], set()
 
     for i, filename in enumerate(filenames):
-        name = _stem(filename)
-        if name in done:
+        if filename in done:
             continue
         if resume and retry_errors:
-            rows = [row for row in rows if row.get("name") != name]
+            rows = [row for row in rows if _audit_done_key(row) != filename]
         logger.info("[%d/%d] audit %s", i + 1, len(filenames), filename)
         try:
             row = audit_one_hub_file(
@@ -411,15 +586,18 @@ def run_audit_all(
                 metrics_csv=metrics_csv,
                 max_samples=max_samples,
                 compute_accuracy=compute_accuracy,
+                pcfg_hf_dataset=pcfg_hf_dataset,
+                pcfg_hf_namespace=pcfg_hf_namespace,
                 token=token,
             )
         except Exception as exc:
             logger.error("[%d/%d] FAILED %s: %s", i + 1, len(filenames), filename, exc)
-            # Write a minimal error row so resume can retry transient failures later.
+            name = _stem(filename)
             meta = load_metrics_lookup(metrics_csv).get(name, {})
             row = annotate_audit_row({
                 "name": name,
                 "filename": filename,
+                "source_format": "npz" if filename.endswith(".npz") else "jsonl",
                 "on_hub": True,
                 "model": meta.get("model", ""),
                 "task": meta.get("task", ""),
@@ -437,6 +615,8 @@ def convert_one_hub_file(
     *,
     repo_id: Optional[str] = None,
     namespace: Optional[str] = None,
+    output_repo_id: Optional[str] = None,
+    output_namespace: Optional[str] = None,
     revision: Optional[str] = None,
     repair: bool = True,
     delete_jsonl_on_hub: bool = False,
@@ -444,9 +624,15 @@ def convert_one_hub_file(
 ) -> dict[str, Any]:
     """
     Download JSONL -> audit -> optional repair -> NPZ -> validate -> upload NPZ -> cleanup.
-    Optionally delete JSONL from Hub after successful validation.
+    Optionally delete JSONL from the source Hub after successful validation.
     """
-    full_repo = resolve_repo(repo_id, namespace)
+    source_repo = resolve_repo(repo_id, namespace)
+    output_repo = _resolve_output_repo(
+        repo_id=repo_id,
+        namespace=namespace,
+        output_repo_id=output_repo_id,
+        output_namespace=output_namespace,
+    )
     rev = revision if revision is not None else trace_hf_revision()
     name = _stem(filename)
     npz_name = f"{name}.npz"
@@ -455,81 +641,101 @@ def convert_one_hub_file(
     temp_dir: Path | None = None
     try:
         path, temp_dir = download_file_to_temp(
-            filename, repo_id=full_repo, revision=rev, token=token
+            filename, repo_id=source_repo, revision=rev, token=token
         )
         jsonl_bytes = path.stat().st_size
-        check = check_trace_file(path, max_samples=None)
-        task_name, samples = load_trace_samples(path)
+        check = check_trace_jsonl_streaming(path, max_samples=3)
+        task_name = read_jsonl_task_name(path)
+        convert_path = path
         repaired = False
-        repairs: list[str] = []
-
-        needs_hook_repair = check.transfer_status in ("inferrable", "explicit_partial", "mixed")
-        needs_order_repair = any(
-            sample.get("step_traces") and not sample.get("unmasking_order") for sample in samples
-        )
-        needs_dedup = check.removable_duplicates > 0
-        if repair and (needs_hook_repair or needs_order_repair or needs_dedup):
-            samples, repairs = repair_samples(samples)
-            if repairs:
-                repaired = True
-                issues.extend(repairs[:20])
-                if len(repairs) > 20:
-                    issues.append(f"... and {len(repairs) - 20} more repairs")
+        ratio = 0.0
+        npz_bytes = 0
+        jsonl_deleted = False
 
         with tempfile.TemporaryDirectory(prefix="trace_npz_") as tmp:
             work = Path(tmp)
-            if repaired:
+
+            if repair and trace_needs_repair(check, None):
                 jsonl_work = work / filename
-                with open(jsonl_work, "w", encoding="utf-8") as f:
-                    if task_name:
-                        f.write(f"# task={json.dumps(task_name)}\n")
-                    for sample in samples:
-                        f.write(json.dumps(sample, ensure_ascii=False) + "\n")
-                src = jsonl_work
-            else:
-                src = path
+                _, repairs, repaired_task = stream_repair_jsonl(path, jsonl_work)
+                if repairs:
+                    repaired = True
+                    issues.extend(repairs[:20])
+                    if len(repairs) > 20:
+                        issues.append(f"... and {len(repairs) - 20} more repairs")
+                convert_path = jsonl_work
+                if repaired_task is not None:
+                    task_name = repaired_task
+                check = check_trace_jsonl_streaming(convert_path, max_samples=3)
+
+            repair_blockers = conversion_repair_blockers(
+                check,
+                None,
+                repair_enabled=repair,
+            )
+            if repair_blockers:
+                issues.extend(repair_blockers)
+                return _convert_failure_row(
+                    name=name,
+                    filename=filename,
+                    npz_name=npz_name,
+                    source_repo=source_repo,
+                    output_repo=output_repo,
+                    status="repair_blocked",
+                    check=check,
+                    repaired=repaired,
+                    n_samples=check.n_samples,
+                    jsonl_bytes=jsonl_bytes,
+                    issues=issues,
+                )
 
             npz_local = work / npz_name
-            convert_jsonl_to_npz(src, npz_local)
-            ratio = compression_ratio(src, npz_local)
+            convert_jsonl_to_npz(convert_path, npz_local, task_name=task_name)
+            ratio = compression_ratio(convert_path, npz_local)
             npz_bytes = npz_local.stat().st_size
 
-            roundtrip_issues = validate_npz_roundtrip(samples, npz_local)
+            roundtrip_issues = validate_npz_roundtrip(convert_path, npz_local)
             roundtrip_ok = not roundtrip_issues
             if roundtrip_issues:
                 issues.extend(roundtrip_issues)
 
             if not roundtrip_ok:
-                return {
-                    "name": name,
-                    "jsonl_filename": filename,
-                    "npz_filename": npz_name,
-                    "status": "roundtrip_failed",
-                    "transfer_status": check.transfer_status,
-                    "repaired": repaired,
-                    "n_samples": len(samples),
-                    "jsonl_bytes": jsonl_bytes,
-                    "npz_bytes": npz_bytes,
-                    "compression_ratio": f"{ratio:.2f}",
-                    "roundtrip_ok": False,
-                    "jsonl_deleted_on_hub": False,
-                    "issues": "; ".join(issues),
-                }
+                return _convert_failure_row(
+                    name=name,
+                    filename=filename,
+                    npz_name=npz_name,
+                    source_repo=source_repo,
+                    output_repo=output_repo,
+                    status="roundtrip_failed",
+                    check=check,
+                    repaired=repaired,
+                    n_samples=check.n_samples,
+                    jsonl_bytes=jsonl_bytes,
+                    npz_bytes=npz_bytes,
+                    compression_ratio=f"{ratio:.2f}",
+                    issues=issues,
+                )
+
+            if output_repo != source_repo:
+                ensure_dataset_repo(
+                    output_repo,
+                    token=token,
+                    private=trace_hf_dataset_private(),
+                )
 
             upload_file(
                 npz_local,
                 npz_name,
-                repo_id=full_repo,
+                repo_id=output_repo,
                 revision=rev,
                 token=token,
                 commit_message=f"NPZ trace {npz_name} ({npz_bytes} bytes)",
             )
 
-            jsonl_deleted = False
             if delete_jsonl_on_hub:
                 delete_file(
                     filename,
-                    repo_id=full_repo,
+                    repo_id=source_repo,
                     revision=rev,
                     token=token,
                     commit_message=f"remove JSONL after NPZ validated: {filename}",
@@ -540,10 +746,12 @@ def convert_one_hub_file(
             "name": name,
             "jsonl_filename": filename,
             "npz_filename": npz_name,
+            "source_repo": source_repo,
+            "output_repo": output_repo,
             "status": "ok",
             "transfer_status": check.transfer_status,
             "repaired": repaired,
-            "n_samples": len(samples),
+            "n_samples": check.n_samples,
             "jsonl_bytes": jsonl_bytes,
             "npz_bytes": npz_bytes,
             "compression_ratio": f"{ratio:.2f}",
@@ -560,6 +768,8 @@ def run_convert_all(
     *,
     repo_id: Optional[str] = None,
     namespace: Optional[str] = None,
+    output_repo_id: Optional[str] = None,
+    output_namespace: Optional[str] = None,
     revision: Optional[str] = None,
     output_csv: str | Path | None = None,
     repair: bool = True,
@@ -567,38 +777,77 @@ def run_convert_all(
     skip_existing_npz: bool = True,
     limit: Optional[int] = None,
     resume: bool = True,
+    retry_errors: bool = True,
     token: bool | str | None = True,
 ) -> list[dict[str, Any]]:
     inv = hub_inventory(repo_id=repo_id, namespace=namespace, revision=revision, token=token)
     cleanup_repo_cache(inv["repo"], revision=inv["revision"])
-    present_npz = {f"{_stem(f)}.npz" for f in inv["npz_files"]}
+    output_repo = _resolve_output_repo(
+        repo_id=repo_id,
+        namespace=namespace,
+        output_repo_id=output_repo_id,
+        output_namespace=output_namespace,
+    )
+    if output_repo != inv["repo"]:
+        output_inv = hub_inventory(
+            repo_id=output_repo_id or repo_id,
+            namespace=output_namespace if output_namespace is not None else namespace,
+            revision=revision,
+            token=token,
+        )
+        present_npz = {f"{_stem(f)}.npz" for f in output_inv["npz_files"]}
+    else:
+        present_npz = {f"{_stem(f)}.npz" for f in inv["npz_files"]}
     filenames = inv["jsonl_files"]
     if limit is not None:
         filenames = filenames[:limit]
 
     output_csv = Path(output_csv or DEFAULT_CONVERT_CSV)
-    done = _load_done_names(output_csv) if resume else set()
-    rows: list[dict[str, Any]] = []
-    if resume and output_csv.exists():
-        with open(output_csv, newline="", encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
+    if resume:
+        rows, done = _load_existing_convert_rows(output_csv, retry_errors=retry_errors)
+    else:
+        rows, done = [], set()
 
     for i, filename in enumerate(filenames):
         name = _stem(filename)
         if name in done:
             continue
+        if resume and retry_errors:
+            rows = [row for row in rows if row.get("name") != name]
         if skip_existing_npz and f"{name}.npz" in present_npz:
-            logger.info("skip %s (npz already on hub)", name)
+            logger.info("skip %s (npz already on %s)", name, output_repo)
             continue
-        logger.info("[%d/%d] convert %s", i + 1, len(filenames), filename)
-        row = convert_one_hub_file(
-            filename,
-            repo_id=inv["repo"],
-            revision=inv["revision"],
-            repair=repair,
-            delete_jsonl_on_hub=delete_jsonl_on_hub,
-            token=token,
-        )
+        logger.info("[%d/%d] convert %s -> %s", i + 1, len(filenames), filename, output_repo)
+        try:
+            row = convert_one_hub_file(
+                filename,
+                repo_id=inv["repo"],
+                revision=inv["revision"],
+                output_repo_id=output_repo_id,
+                output_namespace=output_namespace,
+                repair=repair,
+                delete_jsonl_on_hub=delete_jsonl_on_hub,
+                token=token,
+            )
+        except Exception as exc:
+            logger.error("[%d/%d] FAILED %s: %s", i + 1, len(filenames), filename, exc)
+            row = {
+                "name": name,
+                "jsonl_filename": filename,
+                "npz_filename": f"{name}.npz",
+                "source_repo": inv["repo"],
+                "output_repo": output_repo,
+                "status": "convert_failed",
+                "transfer_status": "",
+                "repaired": False,
+                "n_samples": 0,
+                "jsonl_bytes": 0,
+                "npz_bytes": 0,
+                "compression_ratio": "",
+                "roundtrip_ok": False,
+                "jsonl_deleted_on_hub": False,
+                "issues": f"convert failed: {exc}",
+            }
         rows.append(row)
         _write_csv_rows(rows, output_csv, CONVERT_CSV_FIELDS)
     return rows
@@ -606,11 +855,15 @@ def run_convert_all(
 
 def print_inventory(report: dict[str, Any]) -> int:
     print(f"repo: https://huggingface.co/datasets/{report['repo']}/tree/{report['revision']}")
-    print(f"expected variants: {report['expected_variants']}")
     print(f"jsonl on hub: {report['jsonl_count']}")
     print(f"npz on hub: {report['npz_count']}")
-    if report["other_files"]:
+    if report.get("other_files"):
         print(f"other files: {', '.join(report['other_files'])}")
+    if report.get("pcfg_only"):
+        print("inventory: PCFG repo (not compared to strace_metrics.csv)")
+        print("status: ok")
+        return 0
+    print(f"expected variants (strace_metrics.csv): {report['expected_variants']}")
     print(f"missing jsonl: {len(report['missing_jsonl'])}")
     for n in report["missing_jsonl"]:
         print(f"  - {n}")

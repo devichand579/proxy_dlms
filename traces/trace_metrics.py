@@ -61,18 +61,146 @@ def expected_trace_names(metrics_csv: str | Path | None = None) -> set[str]:
     return set(load_metrics_lookup(metrics_csv).keys())
 
 
-def is_pcfg_trace(run_name: str, samples: list[dict]) -> bool:
+def is_pcfg_trace(
+    run_name: str,
+    samples: list[dict] | None = None,
+    *,
+    first_metadata: dict | None = None,
+) -> bool:
     """PCFG llada-pcfg traces are not in strace_metrics.csv / lm-eval tasks."""
     name = str(run_name)
     if name.startswith("pcfg_") or "-pcfg_" in name:
+        return True
+    if (first_metadata or {}).get("task") == "pcfg_suffix":
         return True
     if samples and (samples[0].get("metadata") or {}).get("task") == "pcfg_suffix":
         return True
     return False
 
 
-def pcfg_metrics_skip(*, n_samples: int) -> dict[str, Any]:
-    """Audit row fragment: hook checks only, no W&B / lm-eval scoring."""
+def _ensure_llada_pcfg_import_path() -> Path:
+    root = Path(__file__).resolve().parent.parent / "llada-pcfg"
+    if str(root) not in _sys.path:
+        _sys.path.insert(0, str(root))
+    return root
+
+
+_pcfg_test_split_size_cache: dict[tuple[str, str], int] = {}
+
+
+def get_pcfg_test_split_size(
+    *,
+    hf_dataset: str | None = None,
+    namespace: str | None = None,
+    token: bool | str | None = True,
+) -> int:
+    """Length of the PCFG Hub corpus ``test`` split (default: ``pcfg-code``)."""
+    _ensure_llada_pcfg_import_path()
+    from hf_hub import load_pcfg_dataset, pcfg_dataset_repo, pcfg_namespace, resolve_hf_token
+
+    dataset = (hf_dataset or pcfg_dataset_repo()).strip()
+    ns = pcfg_namespace(namespace) or ""
+    cache_key = (dataset, ns)
+    if cache_key in _pcfg_test_split_size_cache:
+        return _pcfg_test_split_size_cache[cache_key]
+
+    ddict = load_pcfg_dataset(
+        dataset=dataset,
+        namespace=namespace,
+        token=resolve_hf_token(token),
+    )
+    if "test" not in ddict:
+        raise ValueError(f"PCFG dataset {dataset!r} has no test split")
+    test_size = int(ddict["test"].num_rows)
+    _pcfg_test_split_size_cache[cache_key] = test_size
+    return test_size
+
+
+def pcfg_sample_indices(samples: list[dict]) -> Optional[list[int]]:
+    """Per-trace ``metadata.sample_idx`` values, or None if missing on any sample."""
+    indices: list[int] = []
+    for sample in samples:
+        meta = sample.get("metadata") or {}
+        if "sample_idx" not in meta:
+            return None
+        try:
+            indices.append(int(meta["sample_idx"]))
+        except (TypeError, ValueError):
+            return None
+    return indices
+
+
+def resolve_pcfg_expected_sample_count(
+    n_samples: int,
+    test_split_size: int,
+    *,
+    sample_indices: Optional[list[int]] = None,
+) -> tuple[int, list[str]]:
+    """
+    Expected trace sample count for audit.
+
+    Full evals should match ``test_split_size``. A complete contiguous prefix
+    ``0..n-1`` (e.g. ``--max-samples``) expects ``n`` instead of the full split.
+    """
+    flags: list[str] = []
+    indices = sample_indices
+    if indices is not None and n_samples > 0:
+        unique = sorted(set(indices))
+        if len(unique) == n_samples and unique == list(range(unique[-1] + 1)):
+            if n_samples == test_split_size:
+                return test_split_size, flags
+            if n_samples < test_split_size:
+                flags.append(
+                    f"pcfg complete subset {n_samples}/{test_split_size} "
+                    f"(sample_idx 0..{unique[-1]})"
+                )
+                return n_samples, flags
+    if n_samples != test_split_size:
+        flags.append(f"sample_count {n_samples} != pcfg test split {test_split_size}")
+    return test_split_size, flags
+
+
+def compare_pcfg_metrics_row(
+    *,
+    n_samples: int,
+    sample_indices: Optional[list[int]] = None,
+    hf_dataset: str | None = None,
+    namespace: str | None = None,
+    token: bool | str | None = True,
+) -> dict[str, Any]:
+    """PCFG audit metrics: sample count vs Hub test split (no lm-eval scoring)."""
+    flags: list[str] = [
+        f"pcfg trace ({n_samples} samples): skipped lm-eval / wandb metrics",
+    ]
+    try:
+        test_size = get_pcfg_test_split_size(
+            hf_dataset=hf_dataset,
+            namespace=namespace,
+            token=token,
+        )
+    except Exception as exc:
+        flags.append(f"pcfg test split load failed: {exc}")
+        return {
+            "metric_wandb": None,
+            "metric_key_wandb": "",
+            "metric_trace": None,
+            "metric_key_trace": "",
+            "metric_delta": None,
+            "n_scored": 0,
+            "n_unmatched": 0,
+            "n_samples_expected": None,
+            "sample_count_delta": None,
+            "metrics_flags": "; ".join(flags),
+        }
+
+    expected, subset_flags = resolve_pcfg_expected_sample_count(
+        n_samples,
+        test_size,
+        sample_indices=sample_indices,
+    )
+    flags.extend(subset_flags)
+    sample_delta = n_samples - expected
+
     return {
         "metric_wandb": None,
         "metric_key_wandb": "",
@@ -81,9 +209,9 @@ def pcfg_metrics_skip(*, n_samples: int) -> dict[str, Any]:
         "metric_delta": None,
         "n_scored": 0,
         "n_unmatched": 0,
-        "n_samples_expected": None,
-        "sample_count_delta": None,
-        "metrics_flags": f"pcfg trace ({n_samples} samples): skipped lm-eval / wandb metrics",
+        "n_samples_expected": expected,
+        "sample_count_delta": sample_delta,
+        "metrics_flags": "; ".join(flags),
     }
 
 
