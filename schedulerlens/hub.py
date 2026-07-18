@@ -527,6 +527,149 @@ def _load_done_stems(csv_path: Path) -> set[str]:
     return done
 
 
+def _plot_artifacts_dir(output_dir: Path) -> Path:
+    path = Path(output_dir) / "plot_artifacts"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _save_stem_plot_artifacts(
+    art_dir: Path,
+    stem: str,
+    *,
+    fidelity: Optional[Dict[str, np.ndarray]] = None,
+    surfaces: Any = None,
+) -> None:
+    """Persist step-level plot inputs for one run; avoids holding them all in RAM."""
+    stem_dir = art_dir / stem
+    stem_dir.mkdir(parents=True, exist_ok=True)
+    if fidelity:
+        np.savez_compressed(
+            stem_dir / "fidelity.npz",
+            **{k: np.asarray(v) for k, v in fidelity.items()},
+        )
+    if surfaces is not None and getattr(surfaces, "n_samples", 0) > 0:
+        mt = getattr(surfaces, "mt_at_commit", None)
+        payload = {
+            "confidence": np.asarray(surfaces.confidence),
+            "entropy": np.asarray(surfaces.entropy),
+            "n_samples": np.asarray(int(surfaces.n_samples)),
+            "n_steps": np.asarray(int(surfaces.n_steps)),
+            "gen_length": np.asarray(int(surfaces.gen_length)),
+        }
+        if mt is not None and np.asarray(mt).size:
+            payload["mt_at_commit"] = np.asarray(mt)
+        np.savez_compressed(stem_dir / "surfaces.npz", **payload)
+
+
+def _load_fidelity_points(art_dir: Path) -> Dict[str, Dict[str, np.ndarray]]:
+    out: Dict[str, Dict[str, np.ndarray]] = {}
+    if not art_dir.is_dir():
+        return out
+    for stem_dir in sorted(art_dir.iterdir()):
+        path = stem_dir / "fidelity.npz"
+        if not stem_dir.is_dir() or not path.is_file():
+            continue
+        with np.load(path) as z:
+            out[stem_dir.name] = {k: np.asarray(z[k]) for k in z.files}
+    return out
+
+
+def _load_surfaces_by_stem(art_dir: Path) -> Dict[str, Any]:
+    from schedulerlens.plots import TraceSurfaces
+
+    out: Dict[str, Any] = {}
+    if not art_dir.is_dir():
+        return out
+    for stem_dir in sorted(art_dir.iterdir()):
+        path = stem_dir / "surfaces.npz"
+        if not stem_dir.is_dir() or not path.is_file():
+            continue
+        with np.load(path) as z:
+            mt = (
+                np.asarray(z["mt_at_commit"])
+                if "mt_at_commit" in z.files
+                else np.array([])
+            )
+            out[stem_dir.name] = TraceSurfaces(
+                confidence=np.asarray(z["confidence"]),
+                entropy=np.asarray(z["entropy"]),
+                mt_at_commit=mt,
+                n_samples=int(z["n_samples"]),
+                n_steps=int(z["n_steps"]),
+                gen_length=int(z["gen_length"]),
+            )
+    return out
+
+
+def _write_compare_plots(
+    output_dir: Path,
+    rows: Sequence[Dict[str, Any]],
+    *,
+    art_dir: Path,
+    strace_metrics_path: Optional[Union[str, Path]] = None,
+) -> Dict[str, Path]:
+    """Rebuild compare plots from CSV rows + on-disk step-level artifacts."""
+    if not rows:
+        return {}
+    try:
+        from schedulerlens.plots import save_compare_plots
+    except ImportError as e:
+        logger.warning("Skipping compare plots (missing dependency): %s", e)
+        return {}
+    fidelity = _load_fidelity_points(art_dir)
+    surfaces = _load_surfaces_by_stem(art_dir)
+    return save_compare_plots(
+        rows,
+        output_dir,
+        surfaces_by_stem=surfaces or None,
+        fidelity_points=fidelity or None,
+        strace_metrics_path=strace_metrics_path,
+    )
+
+
+def _write_run_plots(
+    output_dir: Path,
+    stem: str,
+    *,
+    metrics: Any,
+    fidelity: Optional[Dict[str, np.ndarray]] = None,
+    surfaces: Any = None,
+    row: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Path]:
+    """Write per-NPZ PNGs (trends + single-run compare panel) under run_plots/<stem>/."""
+    run_dir = Path(output_dir) / "run_plots" / stem
+    run_dir.mkdir(parents=True, exist_ok=True)
+    paths: Dict[str, Path] = {}
+    try:
+        from schedulerlens.plots import save_compare_plots, save_trend_plots
+    except ImportError as e:
+        logger.warning("Skipping run plots for %s (missing dependency): %s", stem, e)
+        return paths
+
+    if metrics is not None and getattr(metrics, "n_steps", 0) > 0:
+        m_plot, j_plot, unmasked_plot = save_trend_plots(
+            metrics, run_dir, prefix=stem
+        )
+        paths["M_t"] = m_plot
+        paths["J_t"] = j_plot
+        paths["unmasked"] = unmasked_plot
+
+    if row is not None:
+        surf_map = None
+        if surfaces is not None and getattr(surfaces, "n_samples", 0) > 0:
+            surf_map = {stem: surfaces}
+        fid_map = {stem: fidelity} if fidelity else None
+        for key, path in save_compare_plots(
+            [row],
+            run_dir,
+            surfaces_by_stem=surf_map,
+            fidelity_points=fid_map,
+        ).items():
+            paths[f"compare_{key}"] = path
+    return paths
+
+
 def run_compare(
     *,
     output_dir: Union[str, Path],
@@ -556,6 +699,8 @@ def run_compare(
     """Discover NPZs (Hub or local), analyze each, write CSV + comparison plots.
 
     Hub path: purge cache → per-file temp download → stream analyze → delete temp.
+    After each NPZ: flush CSV, persist step-level plot artifacts to disk, and
+    regenerate compare plots (so a crash keeps progress and RAM stays flat).
 
     With ``--replay-oracle`` and no fixed ``--hf-model``/``--model-path``, each
     PCFG stem's ``meta.model`` (e.g. ``llada-100m-pcfg``) is lazy-loaded from
@@ -567,6 +712,7 @@ def run_compare(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "schedulerlens_metrics.csv"
+    art_dir = _plot_artifacts_dir(output_dir)
 
     fixed_override = model_path is not None or hf_model is not None
     engine, vocab, model, device = _load_oracle_stack(
@@ -611,8 +757,7 @@ def run_compare(
         lazy._loaded_key = str(hf_model or model_path) if model is not None else None
 
     rows: List[Dict[str, Any]] = []
-    surfaces_by_stem: Dict[str, Any] = {}
-    fidelity_points: Dict[str, Dict[str, np.ndarray]] = {}
+    plot_paths: Dict[str, Path] = {}
     repo_label = ""
 
     done_stems: set[str] = set()
@@ -720,11 +865,31 @@ def run_compare(
                 )
                 rows.append(result["row"])
                 stem = result["meta"].stem
-                if result["surfaces"] is not None and result["surfaces"].n_samples > 0:
-                    surfaces_by_stem[stem] = result["surfaces"]
-                if result["fidelity"] is not None:
-                    fidelity_points[stem] = result["fidelity"]
-                # Flush after each file so a later crash does not lose oracle work.
+                fidelity = result.get("fidelity")
+                surfaces = result.get("surfaces")
+                metrics = result.get("metrics")
+
+                # Per-NPZ PNGs first (trends + single-run panel), then persist arrays.
+                run_plot_paths = _write_run_plots(
+                    output_dir,
+                    stem,
+                    metrics=metrics,
+                    fidelity=fidelity,
+                    surfaces=surfaces,
+                    row=result["row"],
+                )
+                _save_stem_plot_artifacts(
+                    art_dir,
+                    stem,
+                    fidelity=fidelity,
+                    surfaces=surfaces,
+                )
+                # Drop step-level payloads; batch compare reloads from plot_artifacts/.
+                result["surfaces"] = None
+                result["fidelity"] = None
+                result["metrics"] = None
+
+                # Flush CSV + batch compare plots after each file.
                 if resume and done_stems:
                     prior = read_metrics_csv(csv_path) if csv_path.is_file() else []
                     prior_kept = [
@@ -732,9 +897,34 @@ def run_compare(
                         for r in prior
                         if Path(str(r.get("filename") or "")).stem in done_stems
                     ]
-                    write_metrics_csv(csv_path, prior_kept + rows, append=False)
+                    all_so_far = prior_kept + rows
                 else:
-                    write_metrics_csv(csv_path, rows, append=False)
+                    all_so_far = rows
+                write_metrics_csv(csv_path, all_so_far, append=False)
+                with (output_dir / "compare_summary.json").open(
+                    "w", encoding="utf-8"
+                ) as f:
+                    json.dump(
+                        {
+                            "n_runs": len(all_so_far),
+                            "repo": repo_label,
+                            "rows": all_so_far,
+                        },
+                        f,
+                        indent=2,
+                    )
+                plot_paths = _write_compare_plots(
+                    output_dir,
+                    all_so_far,
+                    art_dir=art_dir,
+                    strace_metrics_path=strace_metrics_path,
+                )
+                logger.info(
+                    "Flushed CSV + plots after %s (%d run(s); run_plots=%d files)",
+                    name,
+                    len(all_so_far),
+                    len(run_plot_paths),
+                )
             except TraceProxyError as e:
                 logger.error("Fail-hard on %s: %s", name, e)
                 raise
@@ -761,19 +951,14 @@ def run_compare(
     with (output_dir / "compare_summary.json").open("w", encoding="utf-8") as f:
         json.dump({"n_runs": len(all_rows), "repo": repo_label, "rows": all_rows}, f, indent=2)
 
-    plot_paths = {}
-    try:
-        from schedulerlens.plots import save_compare_plots
-
-        plot_paths = save_compare_plots(
-            all_rows,
+    # Final pass (covers resume-only / empty-work cases; normally matches last flush).
+    if all_rows:
+        plot_paths = _write_compare_plots(
             output_dir,
-            surfaces_by_stem=surfaces_by_stem or None,
-            fidelity_points=fidelity_points or None,
+            all_rows,
+            art_dir=art_dir,
             strace_metrics_path=strace_metrics_path,
         )
-    except ImportError as e:
-        logger.warning("Skipping compare plots (missing dependency): %s", e)
 
     return {
         "rows": all_rows,
