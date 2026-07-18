@@ -70,7 +70,11 @@ def _squeeze_gen(arr) -> np.ndarray:
     return a
 
 
-def extract_unmask_events(trace_dict: dict) -> list[tuple[int, int, int]]:
+def extract_unmask_events(
+    trace_dict: dict,
+    *,
+    trace_name: str | Path | None = None,
+) -> list[tuple[int, int, int]]:
     """Return (step, gen_pos, token_id) for each commit in a trace.
 
     Positions are gen-relative (0 .. gen_length-1), matching trace fields.
@@ -78,7 +82,7 @@ def extract_unmask_events(trace_dict: dict) -> list[tuple[int, int, int]]:
     """
     from schedulerlens.proxies import TraceProxyError, validate_trace_for_metrics
 
-    validate_trace_for_metrics(trace_dict)
+    validate_trace_for_metrics(trace_dict, trace_name=trace_name)
 
     events: list[tuple[int, int, int]] = []
     step_traces = trace_dict.get("step_traces", [])
@@ -193,14 +197,19 @@ def oracle_nll_at_commit(
     return float(-math.log(float(marg[tid]) + EPS))
 
 
-def trace_model_commit_nll(trace_dict: dict, reference_ids: Sequence[int] | None = None) -> float:
+def trace_model_commit_nll(
+    trace_dict: dict,
+    reference_ids: Sequence[int] | None = None,
+    *,
+    trace_name: Union[str, Path, None] = None,
+) -> float:
     """Proxy NLL from trace confidences at commit time (gen-relative indices)."""
     ref = reference_ids if reference_ids is not None else reference_token_ids(trace_dict)
     if ref is None:
         return float("nan")
     nll = 0.0
     n = 0
-    for step, pos, tok in extract_unmask_events(trace_dict):
+    for step, pos, tok in extract_unmask_events(trace_dict, trace_name=trace_name):
         if pos >= len(ref):
             continue
         target = int(ref[pos])
@@ -219,6 +228,8 @@ def trace_oracle_nll(
     engine,
     trace_dict: dict,
     token_strings: Sequence[str] | None = None,
+    *,
+    trace_name: Union[str, Path, None] = None,
 ) -> float:
     """Exact oracle NLL -log q(x_i | prefix∪prior commits) along the unmask order.
 
@@ -235,7 +246,9 @@ def trace_oracle_nll(
     committed: dict[int, int] = {i: tmap[tokens[i]] for i in range(n_visible)}
     nll = 0.0
     count = 0
-    for _step, gen_pos, _tok in extract_unmask_events(trace_dict):
+    for _step, gen_pos, _tok in extract_unmask_events(
+        trace_dict, trace_name=trace_name
+    ):
         content_pos = gen_to_content_pos(gen_pos, n_visible, n_content)
         if content_pos is None:
             continue
@@ -329,6 +342,7 @@ def _precompute_step_jobs(
     vocab,
     *,
     tmap: Optional[dict] = None,
+    trace_name: Union[str, Path, None] = None,
 ) -> list[_StepJob]:
     """Build per-step jobs; each has independent pre-step committed + input_ids."""
     import torch
@@ -364,7 +378,9 @@ def _precompute_step_jobs(
 
     committed: dict[int, int] = {i: tmap[tokens[i]] for i in range(n_visible)}
     events_by_step: dict[int, list[tuple[int, int]]] = {}
-    for step, gen_pos, tok in extract_unmask_events(trace_dict):
+    for step, gen_pos, tok in extract_unmask_events(
+        trace_dict, trace_name=trace_name
+    ):
         events_by_step.setdefault(step, []).append((gen_pos, tok))
 
     jobs: list[_StepJob] = []
@@ -481,6 +497,7 @@ def replay_oracle_mt_jt(
     step_workers: Optional[int] = None,
     engine_pool: Optional[_EnginePool] = None,
     model_lock: Optional[threading.Lock] = None,
+    trace_name: Union[str, Path, None] = None,
 ) -> OracleSampleMetrics:
     """Re-forward model at each trace step; compute exact Mt and Jt vs PCFG oracle.
 
@@ -493,7 +510,9 @@ def replay_oracle_mt_jt(
     from pcfg_engine import kl
 
     tmap = getattr(engine, "t_idx", None) if engine is not None else None
-    jobs = _precompute_step_jobs(trace_dict, vocab, tmap=tmap)
+    jobs = _precompute_step_jobs(
+        trace_dict, vocab, tmap=tmap, trace_name=trace_name
+    )
     if not jobs:
         return OracleSampleMetrics(
             Mt_total=0.0,
@@ -624,12 +643,13 @@ def _compute_sample_perplexity_inner(
     step_workers: Optional[int] = None,
     engine_pool: Optional[_EnginePool] = None,
     model_lock: Optional[threading.Lock] = None,
+    trace_name: Union[str, Path, None] = None,
 ):
     """Return (SamplePerplexity, optional OracleSampleMetrics)."""
     meta = trace_dict.get("metadata") or {}
     ref_ids = meta.get("reference_token_ids")
     token_strings = meta.get("reference_tokens")
-    n_commits = len(extract_unmask_events(trace_dict))
+    n_commits = len(extract_unmask_events(trace_dict, trace_name=trace_name))
 
     if replay_oracle and model is not None and vocab is not None:
         # Full Mt/Jt replay also yields oracle/model NLL — skip extra chart walk.
@@ -643,6 +663,7 @@ def _compute_sample_perplexity_inner(
             step_workers=step_workers,
             engine_pool=engine_pool,
             model_lock=model_lock,
+            trace_name=trace_name,
         )
         return SamplePerplexity(
             model_commit_nll=oracle.model_nll,
@@ -654,10 +675,14 @@ def _compute_sample_perplexity_inner(
             n_commits=n_commits,
         ), oracle
 
-    model_nll = trace_model_commit_nll(trace_dict, ref_ids)
+    model_nll = trace_model_commit_nll(
+        trace_dict, ref_ids, trace_name=trace_name
+    )
     oracle_nll = float("nan")
     if engine is not None and token_strings is not None:
-        oracle_nll = trace_oracle_nll(engine, trace_dict, token_strings)
+        oracle_nll = trace_oracle_nll(
+            engine, trace_dict, token_strings, trace_name=trace_name
+        )
 
     return SamplePerplexity(
         model_commit_nll=model_nll,
@@ -680,6 +705,7 @@ def compute_sample_perplexity(
     replay_oracle: bool = False,
     forward_batch_size: int = 8,
     step_workers: Optional[int] = None,
+    trace_name: Union[str, Path, None] = None,
 ) -> SamplePerplexity:
     """Per-sample commit NLL/PPL; oracle fields when PCFG metadata + engine present."""
     sp, _oracle = _compute_sample_perplexity_inner(
@@ -691,6 +717,7 @@ def compute_sample_perplexity(
         replay_oracle=replay_oracle,
         forward_batch_size=forward_batch_size,
         step_workers=step_workers,
+        trace_name=trace_name,
     )
     return sp
 
@@ -810,6 +837,7 @@ def compute_task_perplexity(
             step_workers=n_step_workers,
             engine_pool=pool,
             model_lock=model_lock,
+            trace_name=trace_path,
         ), len(tr.get("step_traces") or [])
 
     n_done = 0

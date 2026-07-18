@@ -85,8 +85,9 @@ def trace_run_stem(model: str, task: str, scheduler: str, *, steps: int | None =
 
 
 _TRACE_STEPS_BUDGET_RE = re.compile(r"_s(?P<steps>\d+)$", re.IGNORECASE)
-# Scheduler token ``fdm`` as its own path segment (e.g. ``…_fdm_s128``, ``pcfg_fdm_s128``).
+# Scheduler tokens as path segments (e.g. ``…_fdm_s128``, ``…_fhs_s512``).
 _TRACE_FDM_RE = re.compile(r"(^|[_-])fdm([_-]|$)", re.IGNORECASE)
+_TRACE_FHS_RE = re.compile(r"(^|[_-])fhs([_-]|$)", re.IGNORECASE)
 
 
 def parse_trace_step_budget(name: str | Path | None) -> Optional[int]:
@@ -107,6 +108,13 @@ def is_fdm_trace_name(name: str | Path | None) -> bool:
     if name is None:
         return False
     return bool(_TRACE_FDM_RE.search(Path(str(name)).stem))
+
+
+def is_fhs_trace_name(name: str | Path | None) -> bool:
+    """True when the stem encodes the FHS scheduler (e.g. ``…_fhs_s512``)."""
+    if name is None:
+        return False
+    return bool(_TRACE_FHS_RE.search(Path(str(name)).stem))
 
 
 def squeeze_to_1d(data) -> np.ndarray:

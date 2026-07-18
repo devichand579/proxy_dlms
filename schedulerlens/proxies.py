@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -178,16 +179,27 @@ def _mask_diff_selection(
     return (mask_t & ~mask_next).astype(bool, copy=False)
 
 
-def validate_trace_for_metrics(trace_dict: dict) -> None:
+def validate_trace_for_metrics(
+    trace_dict: dict,
+    *,
+    trace_name: Optional[Union[str, Path]] = None,
+) -> None:
     """Fail hard if the trace is not repair-clean for SchedulerLens metrics.
 
     Catches issues that convert/repair-npz are meant to fix (selection↔mask-diff
-    mismatch, FDM phantom steps, missing required fields). Does **not** silently repair.
+    mismatch, FDM/FHS phantom steps, untrimmed tail, missing required fields).
+    Does **not** silently repair. Pass ``trace_name`` (NPZ/JSONL path or stem) so
+    FDM plateau / FHS corrector phantom checks are filename-gated like repair.
     """
     from traces.trace_checks import (
         count_phantom_extra_steps,
         count_selection_mask_mismatches,
         sample_tail_trimmed,
+    )
+    from traces.utils import (
+        is_fdm_trace_name,
+        is_fhs_trace_name,
+        parse_trace_step_budget,
     )
 
     steps_raw = trace_dict.get("step_traces") or []
@@ -217,10 +229,25 @@ def validate_trace_for_metrics(trace_dict: dict) -> None:
                     f"{None if arr is None else arr.shape[0]} != gen_length {gen_length}"
                 )
 
-    phantom = count_phantom_extra_steps(steps_raw, gen_length=gen_length)
+    is_fdm = is_fdm_trace_name(trace_name)
+    is_fhs = is_fhs_trace_name(trace_name)
+    budget = parse_trace_step_budget(trace_name)
+    phantom = count_phantom_extra_steps(
+        steps_raw,
+        gen_length=gen_length,
+        is_fdm=is_fdm,
+        is_fhs=is_fhs,
+        step_budget=budget,
+    )
     if phantom > 0:
+        kinds = []
+        if is_fdm:
+            kinds.append("FDM plateau")
+        if is_fhs:
+            kinds.append("FHS corrector")
+        kind = "/".join(kinds) if kinds else "phantom"
         raise TraceProxyError(
-            f"{phantom} phantom extra steps vs permanent-unmask plateaus; "
+            f"{phantom} {kind} extra steps; "
             "run convert/repair-npz before SchedulerLens metrics"
         )
 
@@ -335,13 +362,17 @@ def _resolve_selection(
     return np.zeros(gen_length, dtype=bool), np.zeros(gen_length, dtype=np.int64)
 
 
-def compute_sample_proxies(trace_dict: dict) -> SampleProxies:
+def compute_sample_proxies(
+    trace_dict: dict,
+    *,
+    trace_name: Optional[Union[str, Path]] = None,
+) -> SampleProxies:
     """Compute M̂, Ĵ, and per-step proxies for one trace dict.
 
     Raises ``TraceProxyError`` when required fields are missing or inconsistent.
     When no tokens are unmasked at a step, all proxy quantities for that step are 0.
     """
-    validate_trace_for_metrics(trace_dict)
+    validate_trace_for_metrics(trace_dict, trace_name=trace_name)
 
     step_traces = trace_dict.get("step_traces", [])
     T = len(step_traces)

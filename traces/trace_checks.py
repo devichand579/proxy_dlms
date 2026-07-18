@@ -20,7 +20,14 @@ from traces.trace_npz import (
     load_trace_samples,
     read_jsonl_sample_at_index,
 )
-from traces.utils import as_gen_vec, is_fdm_trace_name, squeeze_len, squeeze_to_1d
+from traces.utils import (
+    as_gen_vec,
+    is_fdm_trace_name,
+    is_fhs_trace_name,
+    parse_trace_step_budget,
+    squeeze_len,
+    squeeze_to_1d,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,21 @@ def mark_sample_tail_trimmed(sample: dict) -> None:
     meta = dict(sample.get("metadata") or {})
     meta[TRIMMED_TAIL_KEY] = True
     sample["metadata"] = meta
+
+
+
+def _resolve_scheduler_flags(
+    path: str | Path | None = None,
+    *,
+    is_fdm: Optional[bool] = None,
+    is_fhs: Optional[bool] = None,
+    step_budget: Optional[int] = None,
+) -> tuple[bool, bool, Optional[int]]:
+    """Resolve FDM/FHS/budget from explicit args or filename."""
+    fdm = is_fdm_trace_name(path) if is_fdm is None else bool(is_fdm)
+    fhs = is_fhs_trace_name(path) if is_fhs is None else bool(is_fhs)
+    budget = parse_trace_step_budget(path) if step_budget is None else step_budget
+    return fdm, fhs, budget
 
 
 @dataclass
@@ -159,24 +181,56 @@ def permanent_still_sets(steps: list[dict], *, gen_length: int) -> list[Optional
     return still
 
 
+def count_fhs_corrector_extras(
+    steps: list[dict],
+    *,
+    gen_length: int,
+    step_budget: Optional[int],
+) -> int:
+    """Traced FHS predictor-corrector forwards (one corrector per chunk).
+
+    Only for PC mode (``steps > 128``). Full PC without early stop records
+    ``gen_length + steps`` model calls. Correctors sit at the last index of each
+    chunk of size ``Ln + 1`` where ``Ln = gen_length // steps``. Extrapolation
+    (``steps <= 128``) is left alone.
+    """
+    if (
+        step_budget is None
+        or int(step_budget) <= 128
+        or gen_length <= 0
+        or gen_length % int(step_budget) != 0
+        or len(steps) <= int(step_budget)
+    ):
+        return 0
+    ln = gen_length // int(step_budget)
+    stride = ln + 1
+    return sum(1 for t in range(len(steps)) if (t % stride) == (stride - 1))
+
+
 def count_phantom_extra_steps(
     steps: list[dict],
     *,
     gen_length: int,
     is_fdm: bool = False,
+    is_fhs: bool = False,
+    step_budget: Optional[int] = None,
 ) -> int:
-    """Extra traced steps beyond permanent-unmask plateaus (FDM only).
-
-    Non-FDM traces can have genuine no-unmask steps that share a ``still`` value;
-    those are not counted as phantoms.
-    """
-    if not is_fdm or gen_length <= 0 or len(steps) < 2:
+    """Extra traced steps (FDM still-plateaus and/or FHS corrector forwards)."""
+    if gen_length <= 0 or len(steps) < 2:
         return 0
-    still = permanent_still_sets(steps, gen_length=gen_length)
-    if not still:
-        return 0
-    n_plateaus = 1 + sum(1 for t in range(1, len(still)) if still[t] != still[t - 1])
-    return max(0, len(steps) - n_plateaus)
+    extras = 0
+    if is_fdm:
+        still = permanent_still_sets(steps, gen_length=gen_length)
+        if still:
+            n_plateaus = 1 + sum(
+                1 for t in range(1, len(still)) if still[t] != still[t - 1]
+            )
+            extras += max(0, len(steps) - n_plateaus)
+    if is_fhs:
+        extras += count_fhs_corrector_extras(
+            steps, gen_length=gen_length, step_budget=step_budget
+        )
+    return extras
 
 
 def count_inferred_unmasks(steps: list[dict]) -> int:
@@ -446,6 +500,8 @@ def check_sample(
     index: int = 0,
     *,
     is_fdm: bool = False,
+    is_fhs: bool = False,
+    step_budget: Optional[int] = None,
 ) -> SampleCheck:
     issues: list[str] = []
     steps = trace_dict.get("step_traces") or []
@@ -484,12 +540,21 @@ def check_sample(
     mismatch_issues = count_selection_mask_mismatches(steps, gen_length=gen_length)
     issues.extend(mismatch_issues)
     phantom_extra = count_phantom_extra_steps(
-        steps, gen_length=gen_length, is_fdm=is_fdm
+        steps,
+        gen_length=gen_length,
+        is_fdm=is_fdm,
+        is_fhs=is_fhs,
+        step_budget=step_budget,
     )
     if phantom_extra:
+        if is_fdm and is_fhs:
+            kind = "FDM/FHS"
+        elif is_fdm:
+            kind = "FDM plateau"
+        else:
+            kind = "FHS corrector"
         issues.append(
-            f"{phantom_extra} FDM phantom extra steps vs permanent-unmask plateaus "
-            f"(repairable; keep first of each plateau)"
+            f"{phantom_extra} {kind} phantom extra steps (repairable)"
         )
     tail_trimmed = sample_tail_trimmed(trace_dict)
     if steps and not tail_trimmed:
@@ -547,9 +612,13 @@ def check_trace_samples(
     check_last: bool = True,
     collect_pcfg_audit: bool = False,
     is_fdm: Optional[bool] = None,
+    is_fhs: Optional[bool] = None,
+    step_budget: Optional[int] = None,
 ) -> TraceCheck:
     n = len(samples)
-    fdm = is_fdm_trace_name(path) if is_fdm is None else bool(is_fdm)
+    fdm, fhs, budget = _resolve_scheduler_flags(
+        path, is_fdm=is_fdm, is_fhs=is_fhs, step_budget=step_budget
+    )
 
     indices: list[int] = list(range(n)) if max_samples is None else list(range(min(max_samples, n)))
     if check_last and n > 0 and (n - 1) not in indices:
@@ -557,7 +626,10 @@ def check_trace_samples(
     indices = sorted(set(indices))
 
     sample_checks = [
-        check_sample(samples[i], index=i, is_fdm=fdm) for i in indices
+        check_sample(
+            samples[i], index=i, is_fdm=fdm, is_fhs=fhs, step_budget=budget
+        )
+        for i in indices
     ]
     dup = duplicate_prompt_stats(samples)
     first_metadata = (samples[0].get("metadata") or {}) if samples else None
@@ -584,6 +656,8 @@ def _stream_trace_check(
     max_samples: Optional[int],
     collect_pcfg_audit: bool,
     is_fdm: bool = False,
+    is_fhs: bool = False,
+    step_budget: Optional[int] = None,
 ) -> tuple[
     int,
     Optional[int],
@@ -618,7 +692,13 @@ def _stream_trace_check(
             any_missing_unmasking_order = True
         if n_samples in indices_to_check:
             sample_checks.append(
-                check_sample(sample, index=n_samples, is_fdm=is_fdm)
+                check_sample(
+                    sample,
+                    index=n_samples,
+                    is_fdm=is_fdm,
+                    is_fhs=is_fhs,
+                    step_budget=step_budget,
+                )
             )
         if collect_pcfg_audit and pcfg_indices is not None:
             if key is not None and key in seen_prompts:
@@ -657,12 +737,16 @@ def check_trace_jsonl_streaming(
     check_last: bool = True,
     collect_pcfg_audit: bool = False,
     is_fdm: Optional[bool] = None,
+    is_fhs: Optional[bool] = None,
+    step_budget: Optional[int] = None,
 ) -> TraceCheck:
     """Stream a JSONL trace file: one sample in memory at a time."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)
-    fdm = is_fdm_trace_name(path) if is_fdm is None else bool(is_fdm)
+    fdm, fhs, budget = _resolve_scheduler_flags(
+        path, is_fdm=is_fdm, is_fhs=is_fhs, step_budget=step_budget
+    )
 
     (
         n_samples,
@@ -678,6 +762,8 @@ def check_trace_jsonl_streaming(
         max_samples=max_samples,
         collect_pcfg_audit=collect_pcfg_audit,
         is_fdm=fdm,
+        is_fhs=fhs,
+        step_budget=budget,
     )
 
     if check_last and last_index is not None and last_index not in {
@@ -686,7 +772,13 @@ def check_trace_jsonl_streaming(
         if last_sample is None:
             last_sample = read_jsonl_sample_at_index(path, last_index)
         sample_checks.append(
-            check_sample(last_sample, index=last_index, is_fdm=fdm)
+            check_sample(
+                last_sample,
+                index=last_index,
+                is_fdm=fdm,
+                is_fhs=fhs,
+                step_budget=budget,
+            )
         )
 
     dup = duplicate_prompt_stats_from_counter(prompt_counts)
@@ -710,12 +802,16 @@ def check_trace_npz_streaming(
     check_last: bool = True,
     collect_pcfg_audit: bool = False,
     is_fdm: Optional[bool] = None,
+    is_fhs: Optional[bool] = None,
+    step_budget: Optional[int] = None,
 ) -> TraceCheck:
     """Stream an NPZ trace file: one sample in memory at a time."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)
-    fdm = is_fdm_trace_name(path) if is_fdm is None else bool(is_fdm)
+    fdm, fhs, budget = _resolve_scheduler_flags(
+        path, is_fdm=is_fdm, is_fhs=is_fhs, step_budget=step_budget
+    )
 
     (
         n_samples,
@@ -731,13 +827,21 @@ def check_trace_npz_streaming(
         max_samples=max_samples,
         collect_pcfg_audit=collect_pcfg_audit,
         is_fdm=fdm,
+        is_fhs=fhs,
+        step_budget=budget,
     )
 
     if check_last and last_index is not None and last_sample is not None and last_index not in {
         sc.index for sc in sample_checks
     }:
         sample_checks.append(
-            check_sample(last_sample, index=last_index, is_fdm=fdm)
+            check_sample(
+                last_sample,
+                index=last_index,
+                is_fdm=fdm,
+                is_fhs=fhs,
+                step_budget=budget,
+            )
         )
 
     dup = duplicate_prompt_stats_from_counter(prompt_counts)
@@ -755,17 +859,21 @@ def check_trace_npz_streaming(
 
 
 def _repair_sample_worker(
-    payload: tuple[dict, bool],
+    payload: tuple[dict, bool, bool, Optional[int]],
 ) -> tuple[dict, list[str]]:
     """Picklable worker entry for :func:`repair_samples_parallel`."""
-    sample, is_fdm = payload
-    return repair_sample_from_mask_diff(sample, is_fdm=is_fdm)
+    sample, is_fdm, is_fhs, step_budget = payload
+    return repair_sample_from_mask_diff(
+        sample, is_fdm=is_fdm, is_fhs=is_fhs, step_budget=step_budget
+    )
 
 
 def repair_samples_parallel(
     samples: list[dict],
     *,
     is_fdm: bool = False,
+    is_fhs: bool = False,
+    step_budget: Optional[int] = None,
     workers: int = 1,
 ) -> list[tuple[dict, list[str]]]:
     """Repair many samples; use a process pool when ``workers > 1``."""
@@ -774,9 +882,12 @@ def repair_samples_parallel(
     n_workers = max(1, int(workers))
     if n_workers == 1 or len(samples) == 1:
         return [
-            repair_sample_from_mask_diff(s, is_fdm=is_fdm) for s in samples
+            repair_sample_from_mask_diff(
+                s, is_fdm=is_fdm, is_fhs=is_fhs, step_budget=step_budget
+            )
+            for s in samples
         ]
-    payloads = [(s, is_fdm) for s in samples]
+    payloads = [(s, is_fdm, is_fhs, step_budget) for s in samples]
     chunksize = max(1, len(samples) // (n_workers * 4))
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         return list(pool.map(_repair_sample_worker, payloads, chunksize=chunksize))
@@ -786,6 +897,8 @@ def iter_repaired_jsonl(
     path: str | Path,
     *,
     is_fdm: Optional[bool] = None,
+    is_fhs: Optional[bool] = None,
+    step_budget: Optional[int] = None,
     workers: int = 1,
     batch_size: int = 32,
 ) -> Iterator[tuple[Literal["comment", "duplicate", "sample"], Any]]:
@@ -799,7 +912,9 @@ def iter_repaired_jsonl(
     When ``workers > 1``, samples are repaired in batches via a process pool.
     """
     path = Path(path)
-    fdm = is_fdm_trace_name(path) if is_fdm is None else bool(is_fdm)
+    fdm, fhs, budget = _resolve_scheduler_flags(
+        path, is_fdm=is_fdm, is_fhs=is_fhs, step_budget=step_budget
+    )
     n_workers = max(1, int(workers))
     batch_n = max(1, int(batch_size))
     seen: set[tuple[int, ...]] = set()
@@ -810,7 +925,11 @@ def iter_repaired_jsonl(
         if not batch:
             return
         for fixed, reps in repair_samples_parallel(
-            batch, is_fdm=fdm, workers=n_workers
+            batch,
+            is_fdm=fdm,
+            is_fhs=fhs,
+            step_budget=budget,
+            workers=n_workers,
         ):
             yield "sample", (fixed, reps)
         batch = []
@@ -833,7 +952,9 @@ def iter_repaired_jsonl(
                 seen.add(key)
 
             if n_workers <= 1:
-                fixed, reps = repair_sample_from_mask_diff(sample, is_fdm=fdm)
+                fixed, reps = repair_sample_from_mask_diff(
+                    sample, is_fdm=fdm, is_fhs=fhs, step_budget=budget
+                )
                 yield "sample", (fixed, reps)
             else:
                 batch.append(sample)
@@ -849,6 +970,8 @@ def stream_repair_jsonl(
     output_path: str | Path,
     *,
     is_fdm: Optional[bool] = None,
+    is_fhs: Optional[bool] = None,
+    step_budget: Optional[int] = None,
     workers: int = 1,
 ) -> tuple[int, list[str], Optional[str]]:
     """Write a repaired JSONL (dedup + mask-diff/phantom/trim). One sample in RAM."""
@@ -862,7 +985,11 @@ def stream_repair_jsonl(
 
     with open(output_path, "w", encoding="utf-8") as fout:
         for kind, payload in iter_repaired_jsonl(
-            input_path, is_fdm=is_fdm, workers=workers
+            input_path,
+            is_fdm=is_fdm,
+            is_fhs=is_fhs,
+            step_budget=step_budget,
+            workers=workers,
         ):
             if kind == "comment":
                 line = str(payload)
@@ -912,6 +1039,8 @@ def stream_repair_npz(
     *,
     task_name: Optional[str] = None,
     is_fdm: Optional[bool] = None,
+    is_fhs: Optional[bool] = None,
+    step_budget: Optional[int] = None,
     workers: int = 1,
 ) -> tuple[int, list[str], Optional[str], list[dict]]:
     """Unpack NPZ → repair (phantoms, mask-diff, drop last step) → repack NPZ."""
@@ -921,7 +1050,9 @@ def stream_repair_npz(
     output_path = Path(output_path)
     repairs: list[str] = []
     resolved_task = task_name if task_name is not None else read_npz_task_name(input_path)
-    fdm = is_fdm_trace_name(input_path) if is_fdm is None else bool(is_fdm)
+    fdm, fhs, budget = _resolve_scheduler_flags(
+        input_path, is_fdm=is_fdm, is_fhs=is_fhs, step_budget=step_budget
+    )
     seen: set[tuple[int, ...]] = set()
     raw_samples: list[dict] = []
     removed = 0
@@ -939,7 +1070,11 @@ def stream_repair_npz(
         raise ValueError(f"no samples to repair in {input_path}")
 
     repaired = repair_samples_parallel(
-        raw_samples, is_fdm=fdm, workers=workers
+        raw_samples,
+        is_fdm=fdm,
+        is_fhs=fhs,
+        step_budget=budget,
+        workers=workers,
     )
     samples: list[dict] = []
     for i, (fixed, reps) in enumerate(repaired):
@@ -1094,17 +1229,90 @@ def _plateau_ranges(still: list[Optional[frozenset[int]]]) -> list[tuple[int, in
     return ranges
 
 
+def repair_drop_fhs_corrector_steps(
+    sample: dict,
+    *,
+    is_fhs: bool = False,
+    step_budget: Optional[int] = None,
+) -> tuple[dict, list[str]]:
+    """Merge FHS predictor+corrector pairs into predictor steps, drop correctors.
+
+    Per chunk (``Ln`` predictors + 1 corrector, ``stride = Ln + 1``):
+
+    - keep ``mask_index`` and ``selected_positions`` from each predictor
+    - copy ``predictions`` / ``confidences`` / ``entropies`` from the chunk corrector
+    - set ``selected_tokens`` from corrector predictions on selected positions
+    """
+    out = copy.deepcopy(sample)
+    steps = out.get("step_traces") or []
+    gen_length = int(out.get("gen_length") or 0)
+    repairs: list[str] = []
+    n_corr = count_fhs_corrector_extras(
+        steps, gen_length=gen_length, step_budget=step_budget
+    )
+    if not is_fhs or n_corr <= 0 or step_budget is None:
+        return out, repairs
+
+    ln = gen_length // int(step_budget)
+    stride = ln + 1
+    new_steps: list[dict] = []
+    for base in range(0, len(steps), stride):
+        corr_i = base + ln
+        if corr_i >= len(steps):
+            # Incomplete final chunk (early stop): keep remaining predictors as-is.
+            for t in range(base, len(steps)):
+                step = copy.deepcopy(steps[t])
+                step["step"] = len(new_steps)
+                new_steps.append(step)
+            break
+        corr = steps[corr_i]
+        corr_pred = _gen_vec(corr.get("predictions"), gen_length=gen_length, dtype=np.int32)
+        for t in range(base, base + ln):
+            if t >= len(steps):
+                break
+            step = copy.deepcopy(steps[t])
+            step["step"] = len(new_steps)
+            for field in ("predictions", "confidences", "entropies"):
+                if corr.get(field) is not None:
+                    step[field] = copy.deepcopy(corr[field])
+            sel = _gen_vec(
+                step.get("selected_positions"), gen_length=gen_length, dtype=np.bool_
+            )
+            if sel is not None and corr_pred is not None:
+                _write_selection_fields(
+                    step, sel, predictions=corr.get("predictions"), gen_length=gen_length
+                )
+            new_steps.append(step)
+
+    if len(new_steps) == len(steps):
+        return out, repairs
+
+    out["step_traces"] = new_steps
+    inferred = infer_unmasking_order(new_steps, gen_length=gen_length)
+    if inferred:
+        out["unmasking_order"] = inferred
+    repairs.append(
+        f"merged FHS predictor+corrector steps "
+        f"({len(steps)} -> {len(new_steps)}; stride={stride}; "
+        f"mask/selected_pos from predictor, logits/tokens from corrector)"
+    )
+    return out, repairs
+
+
 def repair_collapse_phantom_steps(
     sample: dict,
     *,
     is_fdm: bool = False,
 ) -> tuple[dict, list[str]]:
-    """Drop FDM phantom / empty-growth plateau extras (FDM filename only).
+    """Drop FDM empty-growth plateau extras (FDM filename only).
 
-    Detect FDM from the trace stem (``…_fdm_…``). For each permanent-unmask
-    plateau keep the **first** step (outer ``model(x)`` before hyps; Hub checks
-    show neighbor/mask continuity ties across the plateau). Rebuild ``selected_*``
-    from permanent-set growth. Non-FDM schedulers are left unchanged.
+    SchedulerLens FDM archives: within each permanent-unmask plateau, mask /
+    predictions / confidence / entropy are bit-identical and there are no
+    temporary hyp unmasks; ``selected_*`` sits only on the **last** step and
+    equals still-set growth into the next plateau. Keep that last step; drop
+    the empty-growth duplicates before it. Rebuild ``selected_*`` from
+    permanent-set growth (matches the kept step's recorded selection).
+    Non-FDM schedulers are left unchanged.
     """
     out = copy.deepcopy(sample)
     steps = out.get("step_traces") or []
@@ -1113,14 +1321,16 @@ def repair_collapse_phantom_steps(
     if not is_fdm or gen_length <= 0 or len(steps) < 2:
         return out, repairs
 
-    extras = count_phantom_extra_steps(steps, gen_length=gen_length, is_fdm=True)
+    extras = count_phantom_extra_steps(
+        steps, gen_length=gen_length, is_fdm=True, is_fhs=False
+    )
     if extras <= 0:
         return out, repairs
 
     still = permanent_still_sets(steps, gen_length=gen_length)
     plateaus = _plateau_ranges(still)
-    # Always keep the first step of each plateau.
-    keep_indices = [lo for lo, _hi in plateaus]
+    # Keep the last step of each plateau (carries selected_* / commit).
+    keep_indices = [hi for _lo, hi in plateaus]
 
     new_steps: list[dict] = []
     for i, keep_i in enumerate(keep_indices):
@@ -1153,7 +1363,7 @@ def repair_collapse_phantom_steps(
         out["unmasking_order"] = inferred
     repairs.append(
         f"collapsed {len(steps)} -> {len(new_steps)} steps "
-        f"(dropped {len(steps) - len(new_steps)} FDM plateau extras; keep first)"
+        f"(dropped {len(steps) - len(new_steps)} FDM plateau extras; keep last)"
     )
     return out, repairs
 
@@ -1205,15 +1415,24 @@ def repair_sample_from_mask_diff(
     sample: dict,
     *,
     is_fdm: bool = False,
+    is_fhs: bool = False,
+    step_budget: Optional[int] = None,
 ) -> tuple[dict, list[str]]:
     """Repair one sample for SchedulerLens-ready step fields.
 
     Order:
-    1. Collapse FDM plateaus (filename encodes FDM) — keep first of each plateau.
-    2. Align ``selected_*`` to mask_diff on every step that has a next mask.
-    3. Drop the final step entirely (cannot validate without a next ``mask_index``).
+    1. Drop FHS corrector forwards (filename encodes FHS + ``_s{N}``).
+    2. Collapse FDM plateaus (filename encodes FDM) — keep last of each plateau.
+    3. Align ``selected_*`` to mask_diff on every step that has a next mask.
+    4. Drop the final step entirely (cannot validate without a next ``mask_index``).
     """
-    out, repairs = repair_collapse_phantom_steps(sample, is_fdm=is_fdm)
+    out, repairs = repair_drop_fhs_corrector_steps(
+        sample, is_fhs=is_fhs, step_budget=step_budget
+    )
+    collapsed, collapse_reps = repair_collapse_phantom_steps(out, is_fdm=is_fdm)
+    if collapse_reps:
+        out = collapsed
+        repairs.extend(collapse_reps)
     steps = out.get("step_traces") or []
     gen_length = int(out.get("gen_length") or 0)
     selection_changed = bool(repairs)

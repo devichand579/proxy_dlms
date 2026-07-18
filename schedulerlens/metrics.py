@@ -245,7 +245,9 @@ def compute_task_metrics(
         if max_samples is not None and i >= max_samples:
             break
         try:
-            all_sample_proxies.append(compute_sample_proxies(trace_dict))
+            all_sample_proxies.append(
+                compute_sample_proxies(trace_dict, trace_name=trace_path)
+            )
         except TraceProxyError as e:
             raise TraceProxyError(f"sample {i}: {e}") from e
 
@@ -774,7 +776,7 @@ def collect_sample_proxy_trends(
     for i, tr in enumerate(_iter_traces(trace_path)):
         if max_samples is not None and i >= max_samples:
             break
-        samples.append(compute_sample_proxies(tr))
+        samples.append(compute_sample_proxies(tr, trace_name=trace_path))
     t_max = max((len(sp.step_proxies) for sp in samples), default=0)
     return samples, t_max
 

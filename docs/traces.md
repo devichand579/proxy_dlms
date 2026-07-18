@@ -87,7 +87,7 @@ Audit checks:
 - Required step fields present, correct lengths
 - Null `selected_positions` / transfer hook status (`explicit_all`, `inferrable`, `missing_transfer`, …)
 - **Selection vs mask-diff counts** — when `selected_positions` is present, its True-count must match the mask-index unmask count for that step (steps with a next mask only); mismatches are flagged `SELECTION_MASK_MISMATCH` (repairable; common on DUS when per-position writes overwrite the transfer hook)
-- **Phantom extra steps** — FDM only (filename encodes `_fdm_`). Flagged when there are more steps than permanent-unmask plateaus (flag `PHANTOM_STEPS`; hyps or empty-growth runs). Repair keeps the **first** step of each plateau and rebuilds `selected_*` from plateau growth. Non-FDM schedulers are not collapsed (their empty-growth steps stay).
+- **Phantom extra steps** — FDM (`_fdm_`) and/or FHS (`_fhs_`). FDM: more steps than permanent-unmask plateaus (empty-growth duplicates; Hub SL traces show identical mask/preds across the plateau, with `selected_*` only on the last step); repair keeps the **last** of each plateau. FHS predictor-corrector (`steps > 128`): corrector forwards were also traced (`n_steps ≈ gen_length + steps`); repair **merges** each chunk (keep predictor `mask_index` / `selected_positions`, copy corrector preds/conf/entropy/`selected_tokens`) then drops corrector steps. Live: corrector uses `suppress_step_recording(update_open_step=True)` so logits/tokens refresh the open predictor step.
 - **Untrimmed trailing step** — every scheduler’s last `step_trace` has no next `mask_index`, so mask-diff cannot validate it (flag `UNTRIMMED_TAIL`). Repair **drops that last step** after phantom collapse (all schedulers), marks `metadata.schedulerlens_trimmed_tail`, and trusts `selected_*` on the new last step.
 - **Duplicate prompts** — same `prompt` token ids; column `removable_duplicates` (= `n_samples - unique_prompts`)
 - Missing `unmasking_order` when inferrable from hooks or mask diffs
@@ -111,7 +111,7 @@ python traces/trace_audit.py convert-all --output-repo schedulerlens-npz
 Per file:
 1. Download JSONL
 2. Stream-audit content (one sample in RAM at a time)
-3. **Repair+pack** (default on): two streaming passes over the source JSONL (no intermediate repaired JSONL). Dedup, collapse FDM plateaus (keep first of each; from `_fdm_` in the filename), align `selected_*` to mask diffs, **drop the trailing step (all schedulers)**, rebuild `unmasking_order`, write NPZ. Use `--workers N` to repair samples in a process pool. Conversion is **blocked** if repair is required but disabled (`--no-repair`), or if issues remain after repair (`status: repair_blocked`).
+3. **Repair+pack** (default on): two streaming passes over the source JSONL (no intermediate repaired JSONL). Dedup, collapse FDM plateaus (keep last of each; from `_fdm_` in the filename), align `selected_*` to mask diffs, **drop the trailing step (all schedulers)**, rebuild `unmasking_order`, write NPZ. Use `--workers N` to repair samples in a process pool. Conversion is **blocked** if repair is required but disabled (`--no-repair`), or if issues remain after repair (`status: repair_blocked`).
 4. Stream-audit the NPZ, spot-check round-trip on a few repaired samples, upload, optional JSONL delete, cleanup.
 
 Stage timings log at INFO (`download`, `repair+pack`, `post-repair audit`, `roundtrip`, `upload`). NPZ write uses deflate level `TRACE_NPZ_COMPRESSLEVEL` (default `1`, faster than numpy’s old default); set `TRACE_NPZ_COMPRESS=0` for uncompressed (fastest, larger).
@@ -137,7 +137,7 @@ Skips clean files unless `--force`. Writes `fetch_evals/trace_repair_npz.csv` fo
 
 ---
 
-FDM nested hypothesis forwards use `suppress_step_recording()` so they do not open extra `step_traces` (live fix; archive repair still collapses any older phantom plateaus).
+FDM nested hypothesis forwards and FHS predictor-corrector corrector forwards use `suppress_step_recording()` so they do not open extra `step_traces` (live fix; archive repair still collapses older FDM plateaus / drops FHS correctors).
 
 ## Testing (hooks)
 

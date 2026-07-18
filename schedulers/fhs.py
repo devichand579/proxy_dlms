@@ -21,10 +21,20 @@ from schedulers.utils import (
 )
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
-    from traces.trace_wrapper import trace_scheduler
+    from traces.trace_wrapper import suppress_step_recording, trace_scheduler
 else:
     def trace_scheduler(*args, **kwargs):
         return lambda x: x
+
+    class suppress_step_recording:  # noqa: N801 — match tracing API
+        def __init__(self, *, update_open_step: bool = False):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
 
 def _model_logits(model, x, attention_mask=None, t_cond=None):
@@ -399,7 +409,11 @@ def generate_fhs_predictor_corrector(
             # ----- Corrector (only at end of chunk): refine SAME tokens, do not unmask new ones
             if i == Ln - 1:
                 steps_taken += 1
-                logits_corr = _model_logits(model, x, attention_mask, t_cond)
+                # Corrector NFE counts toward steps_taken but must not open a traced
+                # step. update_open_step refreshes preds/conf/entropy on the predictor
+                # step; setitem refine updates selected_tokens to the final tokens.
+                with suppress_step_recording(update_open_step=True):
+                    logits_corr = _model_logits(model, x, attention_mask, t_cond)
 
                 mask_eos_eot_logits(logits_corr, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
                 mask_invalid_token_logits(logits_corr, invalid_token_ids)

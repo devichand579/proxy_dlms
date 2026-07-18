@@ -19,20 +19,34 @@ _task_trace_list_ctx: contextvars.ContextVar[Optional[List]] = contextvars.Conte
 _suppress_step_trace_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "suppress_step_trace", default=False
 )
+# When True with suppress: refresh predictions/confidences/entropies on the open
+# step from this forward (FHS corrector) without opening a new step.
+_update_open_step_logits_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "update_open_step_logits", default=False
+)
 
 
 class suppress_step_recording:
     """Skip traced step opens for nested model forwards (e.g. FDM hypotheses).
 
-    Nestable via ContextVar tokens. The forward still runs; only step recording
-    and ``_last_x`` / ``_last_logits`` updates are suppressed.
+    Nestable via ContextVar tokens. The forward still runs; step opens and
+    ``_last_x`` updates are suppressed.
+
+    Args:
+        update_open_step: If True (FHS corrector), overwrite logits-derived
+            fields on the current open step from this forward's logits.
     """
+
+    def __init__(self, *, update_open_step: bool = False):
+        self.update_open_step = bool(update_open_step)
 
     def __enter__(self):
         self._token = _suppress_step_trace_ctx.set(True)
+        self._upd_token = _update_open_step_logits_ctx.set(self.update_open_step)
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        _update_open_step_logits_ctx.reset(self._upd_token)
         _suppress_step_trace_ctx.reset(self._token)
         return False
 
@@ -82,8 +96,14 @@ class ModelTracer:
             output = original_forward(*args, **kwargs)
 
             # Nested hyp / probe forwards (e.g. FDM) must not open steps or clobber
-            # _last_x / _last_logits used for transfer detection on the real decode step.
+            # _last_x used for transfer detection on the real decode step.
             if _suppress_step_trace_ctx.get():
+                if (
+                    _update_open_step_logits_ctx.get()
+                    and hasattr(output, "logits")
+                    and output.logits is not None
+                ):
+                    self._refresh_open_step_logits(output.logits)
                 return output
 
             if len(args) > 0:
@@ -117,6 +137,19 @@ class ModelTracer:
             return output
         
         return original_forward, traced_forward
+
+    def _refresh_open_step_logits(self, logits: torch.Tensor) -> None:
+        """Overwrite logits metrics on the current open step (no new step)."""
+        self._last_logits = logits.clone()
+        batch_size = int(logits.shape[0]) if logits.dim() >= 1 else 1
+        if self._batch_contexts is not None and batch_size == len(self._batch_contexts):
+            for b in range(batch_size):
+                ctx = self._batch_contexts[b]
+                ctx._current_logits = logits[b : b + 1].clone()
+                ctx.record_logits_metrics(logits[b : b + 1])
+        elif self.tracing_context is not None:
+            self.tracing_context._current_logits = logits.clone()
+            self.tracing_context.record_logits_metrics(logits)
     
     def _intercept_argmax(self, original_argmax):
         """Patch argmax to capture x0 for transfer detection."""
@@ -198,35 +231,50 @@ class ModelTracer:
                 )
         return True
     
-    def _detect_single_position_transfer(self, x, x0_trace, pos_val, value):
-        """True if x[0, pos] = value is a single-token unmask."""
+    def _gen_pos_selected_on_open_step(self, pos_val: int, batch_index: int = 0) -> bool:
+        """True if the open step already marked this gen-region position selected."""
+        ctx = None
+        if self._batch_contexts is not None and 0 <= batch_index < len(self._batch_contexts):
+            ctx = self._batch_contexts[batch_index]
+        elif self.tracing_context is not None:
+            ctx = self.tracing_context
+        if ctx is None or not ctx.trace.step_traces:
+            return False
+        sel = ctx.trace.step_traces[-1].selected_positions
+        if sel is None:
+            return False
+        pl = int(ctx.prompt_len or 0)
+        gen_pos = int(pos_val) - pl
+        if gen_pos < 0 or gen_pos >= sel.shape[-1]:
+            return False
+        return bool(sel[0, gen_pos].item())
+
+    def _detect_single_position_transfer(
+        self, x, x0_trace, pos_val, value, *, batch_index: int = 0
+    ):
+        """True if x[0, pos] = value is a single-token unmask or refine."""
         if pos_val < 0 or x.shape[1] <= pos_val:
             return None
-        
-        # Check if position was masked
+
         was_masked = was_position_masked(x, pos_val, self.mask_id)
         is_real_token = get_value_item(value, self.mask_id) != self.mask_id
-        
-        if not (was_masked and is_real_token):
+        if not is_real_token:
             return None
-        
-        # Extract value
+
         val_item, val_tensor = extract_tensor_value(value, device=x.device, dtype=torch.long)
         if val_item is None or val_tensor is None:
             return None
-        
-        # Check if matches x0 (for deterministic schedulers)
+
         matches_x0 = value_matches_x0(x0_trace, pos_val, val_item)
-        
-        # Record if matches x0 OR was masked (for stochastic schedulers like FHS)
-        if matches_x0 or was_masked:
-            transfer_positions = torch.tensor([pos_val], device=x.device, dtype=torch.long)
-            # Update x0_trace with actual value
-            if x0_trace.shape[1] > pos_val:
-                x0_trace[0, pos_val] = int(val_item)
-            return transfer_positions, val_tensor
-        
-        return None
+        # Predictor unmask (masked → token) or FHS corrector refine of already-selected pos.
+        refine = self._gen_pos_selected_on_open_step(int(pos_val), batch_index=batch_index)
+        if not ((was_masked and (matches_x0 or was_masked)) or refine):
+            return None
+
+        transfer_positions = torch.tensor([pos_val], device=x.device, dtype=torch.long)
+        if x0_trace.shape[1] > pos_val:
+            x0_trace[0, pos_val] = int(val_item)
+        return transfer_positions, val_tensor
     
     def _detect_multiple_positions_transfer(self, x, x0_trace, pos_tensor, value):
         """True if x[0, positions] = values is a multi-token unmask."""
@@ -411,8 +459,11 @@ class ModelTracer:
             x0_trace = x0_trace[batch_idx : batch_idx + 1]
 
         transfer_info = None
+        b_for_sel = batch_idx if isinstance(batch_idx, int) else 0
         if isinstance(pos_idx, int):
-            transfer_info = self._detect_single_position_transfer(x, x0_trace, pos_idx, value)
+            transfer_info = self._detect_single_position_transfer(
+                x, x0_trace, pos_idx, value, batch_index=b_for_sel
+            )
         elif _is_tensor_like(pos_idx) and hasattr(pos_idx, 'dtype') and pos_idx.dtype in (torch.long, torch.int64, torch.int32, torch.int):
             transfer_info = self._detect_multiple_positions_transfer(x, x0_trace, pos_idx, value)
 
