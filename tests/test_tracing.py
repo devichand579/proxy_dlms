@@ -266,11 +266,17 @@ def main(
                             f.write(json.dumps(t, ensure_ascii=False) + "\n")
                     check = check_trace_file(path, max_samples=batch_size)
 
-                hooks_ok = check.hooks_ok and check.samples_missing_required == 0
+                sel_mismatch = check.samples_selection_mask_mismatch
+                hooks_ok = (
+                    check.hooks_ok
+                    and check.samples_missing_required == 0
+                    and sel_mismatch == 0
+                )
                 if sched_name in BOOLEAN_SCHEDULERS and batch_size > 1:
                     hooks_ok = (
                         check.samples_with_any_selected == check.samples_checked
                         and check.samples_missing_required == 0
+                        and sel_mismatch == 0
                     )
 
                 status = "ok" if hooks_ok else "fail"
@@ -280,15 +286,17 @@ def main(
                     "batch_size": batch_size,
                     "n_traces": len(traces),
                     "transfer_status": check.transfer_status,
+                    "selection_mask_mismatch": sel_mismatch,
                     "hooks_ok": hooks_ok,
                     "status": status,
                 })
                 logger.info(
-                    "%s / %s: %s transfer=%s",
+                    "%s / %s: %s transfer=%s sel_mismatch=%s",
                     _model_label(model_dir),
                     sched_name,
                     status,
                     check.transfer_status,
+                    sel_mismatch,
                 )
             except Exception as e:
                 logger.exception("%s / %s failed", _model_label(model_dir), sched_name)
@@ -341,6 +349,8 @@ if __name__ == "__main__":
     for r in rows:
         print(
             f"  {r.get('model')} / {r.get('scheduler')}: {r.get('status')} "
-            f"transfer={r.get('transfer_status', '-')} hooks_ok={r.get('hooks_ok', '-')}"
+            f"transfer={r.get('transfer_status', '-')} "
+            f"sel_mismatch={r.get('selection_mask_mismatch', '-')} "
+            f"hooks_ok={r.get('hooks_ok', '-')}"
         )
     sys.exit(0 if fail == 0 else 2)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -18,6 +18,11 @@ PROXY_ATTRS = (
 )
 M_PROXY_ATTRS = ("M_hat_t", "mean_regret", "cascade_gain")
 J_PROXY_ATTRS = ("J_hat_t", "instability", "rank_volatility")
+SUB_PROXY_ATTRS = ("mean_regret", "cascade_gain", "instability", "rank_volatility")
+
+
+class TraceProxyError(ValueError):
+    """Raised when required trace fields are missing or inconsistent."""
 
 
 @dataclass
@@ -58,15 +63,17 @@ def _empty_caps() -> Dict[str, CapsPair]:
 
 
 def _caps_pair(step_proxies: List[StepProxies], attr: str) -> CapsPair:
-    if not step_proxies:
+    # Empty-unmask steps are defined as 0 but must not dilute sample caps.
+    active = [sp for sp in step_proxies if sp.n_selected > 0]
+    if not active:
         return CapsPair()
-    values = [float(getattr(sp, attr)) for sp in step_proxies]
+    values = [float(getattr(sp, attr)) for sp in active]
     uniform = float(np.mean(values))
-    total_weight = sum(sp.weight for sp in step_proxies)
+    total_weight = sum(sp.weight for sp in active)
     if total_weight <= 0:
         return CapsPair(entropy=uniform, uniform=uniform)
     entropy = float(
-        sum(sp.weight * v for sp, v in zip(step_proxies, values)) / total_weight
+        sum(sp.weight * v for sp, v in zip(active, values)) / total_weight
     )
     return CapsPair(entropy=entropy, uniform=uniform)
 
@@ -108,12 +115,235 @@ def _fast_kendall_tau(a: np.ndarray, b: np.ndarray) -> float:
         return _kendall_tau(a, b)
 
 
+def _to_np(data, dtype=np.float32) -> Optional[np.ndarray]:
+    if data is None:
+        return None
+    arr = np.array(data, dtype=dtype)
+    while arr.ndim > 1:
+        arr = arr[0]
+    return arr
+
+
+def _require_array(
+    arr: Optional[np.ndarray],
+    *,
+    name: str,
+    step: int,
+    gen_length: int,
+) -> np.ndarray:
+    if arr is None:
+        raise TraceProxyError(f"step {step}: missing required field {name!r}")
+    if arr.shape[0] != gen_length:
+        raise TraceProxyError(
+            f"step {step}: {name} length {arr.shape[0]} != gen_length {gen_length}"
+        )
+    return arr
+
+
+def _zero_step(step: int, n_committed: int, n_remaining: int) -> StepProxies:
+    """All proxy quantities are zero when no tokens are unmasked."""
+    return StepProxies(
+        step=step,
+        M_hat_t=0.0,
+        J_hat_t=0.0,
+        weight=0.0,
+        mean_regret=0.0,
+        cascade_gain=0.0,
+        instability=0.0,
+        rank_volatility=0.0,
+        n_committed=n_committed,
+        n_selected=0,
+        n_remaining=n_remaining,
+    )
+
+
+def _mask_diff_selection(
+    steps: List[dict],
+    t: int,
+    gen_length: int,
+) -> Optional[np.ndarray]:
+    """Positions that become unmasked between step t and t+1; None if unknown."""
+    mask_t = steps[t]["mask_index"]
+    if mask_t is None:
+        return None
+    mask_t = _require_array(mask_t, name="mask_index", step=t, gen_length=gen_length)
+    if t + 1 >= len(steps):
+        return np.zeros(gen_length, dtype=bool)
+    mask_next = steps[t + 1]["mask_index"]
+    if mask_next is None:
+        return None
+    mask_next = _require_array(
+        mask_next, name="mask_index", step=t + 1, gen_length=gen_length
+    )
+    return (mask_t & ~mask_next).astype(bool, copy=False)
+
+
+def validate_trace_for_metrics(trace_dict: dict) -> None:
+    """Fail hard if the trace is not repair-clean for SchedulerLens metrics.
+
+    Catches issues that convert/repair-npz are meant to fix (selection↔mask-diff
+    mismatch, FDM phantom steps, missing required fields). Does **not** silently repair.
+    """
+    from traces.trace_checks import (
+        count_phantom_extra_steps,
+        count_selection_mask_mismatches,
+        sample_tail_trimmed,
+    )
+
+    steps_raw = trace_dict.get("step_traces") or []
+    if not steps_raw:
+        return
+
+    gen_length = int(trace_dict.get("gen_length") or 0)
+    if gen_length <= 0:
+        raise TraceProxyError(f"invalid gen_length={gen_length}")
+
+    if not sample_tail_trimmed(trace_dict):
+        raise TraceProxyError(
+            "trailing step not trimmed (schedulerlens_trimmed_tail); "
+            "run convert/repair-npz before SchedulerLens metrics"
+        )
+
+    required = ("mask_index", "predictions", "confidences", "entropies")
+    for t, st in enumerate(steps_raw):
+        for name in required:
+            val = st.get(name)
+            if val is None:
+                raise TraceProxyError(f"step {t}: missing required field {name!r}")
+            arr = _to_np(val, dtype=np.float32 if name in ("confidences", "entropies") else np.int64)
+            if arr is None or arr.shape[0] != gen_length:
+                raise TraceProxyError(
+                    f"step {t}: {name} length "
+                    f"{None if arr is None else arr.shape[0]} != gen_length {gen_length}"
+                )
+
+    phantom = count_phantom_extra_steps(steps_raw, gen_length=gen_length)
+    if phantom > 0:
+        raise TraceProxyError(
+            f"{phantom} phantom extra steps vs permanent-unmask plateaus; "
+            "run convert/repair-npz before SchedulerLens metrics"
+        )
+
+    mismatches = count_selection_mask_mismatches(steps_raw, gen_length=gen_length)
+    if mismatches:
+        head = "; ".join(mismatches[:5])
+        more = f" (+{len(mismatches) - 5} more)" if len(mismatches) > 5 else ""
+        raise TraceProxyError(
+            f"selected_positions vs mask_diff mismatch; repair the trace first: {head}{more}"
+        )
+
+    # Build normalized steps for set-equality / missing-selection checks.
+    steps: List[dict] = []
+    for st in steps_raw:
+        steps.append({
+            "mask_index": _to_np(st.get("mask_index"), dtype=np.bool_),
+            "predictions": _to_np(st.get("predictions"), dtype=np.int64),
+            "selected_positions": _to_np(st.get("selected_positions"), dtype=np.bool_),
+            "selected_tokens": _to_np(st.get("selected_tokens"), dtype=np.int64),
+        })
+
+    last_t = len(steps) - 1
+    for t in range(len(steps)):
+        is_last = t == last_t
+        inferred = _mask_diff_selection(steps, t, gen_length)
+        if inferred is None:
+            raise TraceProxyError(
+                f"step {t}: cannot read mask_index pair for mask_diff validation"
+            )
+        n_diff = int(np.sum(inferred))
+        sel = steps[t]["selected_positions"]
+        sel_tok = steps[t]["selected_tokens"]
+        # Last step has no next mask after repair drops the trailing step; trust selected_*.
+        if is_last:
+            if sel is None and sel_tok is not None:
+                raise TraceProxyError(
+                    f"step {t}: selected_tokens present without selected_positions"
+                )
+            if sel is not None and sel_tok is None:
+                raise TraceProxyError(
+                    f"step {t}: selected_positions present without selected_tokens"
+                )
+            if sel is not None:
+                _require_array(sel, name="selected_positions", step=t, gen_length=gen_length)
+                _require_array(sel_tok, name="selected_tokens", step=t, gen_length=gen_length)
+            continue
+        if n_diff > 0 and sel is None:
+            raise TraceProxyError(
+                f"step {t}: missing selected_positions but mask_diff has {n_diff} unmasks; "
+                "repair the trace first"
+            )
+        if sel is None and sel_tok is not None:
+            raise TraceProxyError(
+                f"step {t}: selected_tokens present without selected_positions"
+            )
+        if sel is not None and sel_tok is None:
+            raise TraceProxyError(
+                f"step {t}: selected_positions present without selected_tokens"
+            )
+        if sel is None:
+            continue
+        sel_b = _require_array(sel, name="selected_positions", step=t, gen_length=gen_length)
+        sel_b = sel_b.astype(bool, copy=False)
+        _require_array(sel_tok, name="selected_tokens", step=t, gen_length=gen_length)
+        if not np.array_equal(sel_b, inferred):
+            only_sel = int(np.sum(sel_b & ~inferred))
+            only_diff = int(np.sum(inferred & ~sel_b))
+            raise TraceProxyError(
+                f"step {t}: selected_positions set != mask_diff "
+                f"(sel_count={int(sel_b.sum())} diff_count={n_diff} "
+                f"only_sel={only_sel} only_diff={only_diff}); repair the trace first"
+            )
+
+
+def _resolve_selection(
+    steps: List[dict],
+    t: int,
+    gen_length: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (selected_positions, selected_tokens). Fail hard on format/repair issues."""
+    st = steps[t]
+    sel = st["selected_positions"]
+    sel_tok = st["selected_tokens"]
+    inferred = _mask_diff_selection(steps, t, gen_length)
+    is_last = t == len(steps) - 1
+
+    if sel is not None and sel_tok is not None:
+        sel = _require_array(sel, name="selected_positions", step=t, gen_length=gen_length)
+        sel_tok = _require_array(sel_tok, name="selected_tokens", step=t, gen_length=gen_length)
+        sel_b = sel.astype(bool, copy=False)
+        # Non-last steps must match mask_diff; last step is trusted after repair drop.
+        if (
+            not is_last
+            and inferred is not None
+            and not np.array_equal(sel_b, inferred)
+        ):
+            raise TraceProxyError(
+                f"step {t}: selected_positions != mask_diff "
+                f"(sel={int(sel_b.sum())} diff={int(inferred.sum())}); repair the trace first"
+            )
+        return sel_b, np.asarray(sel_tok, dtype=np.int64)
+
+    if not is_last and inferred is not None and inferred.any():
+        raise TraceProxyError(
+            f"step {t}: missing selected_positions but mask_diff has {int(inferred.sum())} "
+            "unmasks; repair the trace first"
+        )
+    if sel is not None or sel_tok is not None:
+        raise TraceProxyError(
+            f"step {t}: incomplete selected_* pair (one of positions/tokens is missing)"
+        )
+    return np.zeros(gen_length, dtype=bool), np.zeros(gen_length, dtype=np.int64)
+
+
 def compute_sample_proxies(trace_dict: dict) -> SampleProxies:
-    """Compute M̂, Ĵ, and per-step proxies for one trace dict."""
+    """Compute M̂, Ĵ, and per-step proxies for one trace dict.
+
+    Raises ``TraceProxyError`` when required fields are missing or inconsistent.
+    When no tokens are unmasked at a step, all proxy quantities for that step are 0.
+    """
+    validate_trace_for_metrics(trace_dict)
+
     step_traces = trace_dict.get("step_traces", [])
-    unmasking_order: Dict[int, int] = {
-        int(k): int(v) for k, v in trace_dict.get("unmasking_order", {}).items()
-    }
     T = len(step_traces)
     if T == 0:
         empty = _empty_caps()
@@ -124,16 +354,6 @@ def compute_sample_proxies(trace_dict: dict) -> SampleProxies:
             J_hat_uniform=0.0,
             caps=empty,
         )
-
-    # ---- Pre-load all step tensors (gen-region, shape [gen_length]) ---- #
-    def _to_np(data, dtype=np.float32) -> Optional[np.ndarray]:
-        if data is None:
-            return None
-        arr = np.array(data, dtype=dtype)
-        # shape may be [[...]] (batch dim); squeeze to 1-D
-        while arr.ndim > 1:
-            arr = arr[0]
-        return arr
 
     steps: List[dict] = []
     for st in step_traces:
@@ -146,111 +366,128 @@ def compute_sample_proxies(trace_dict: dict) -> SampleProxies:
             "selected_tokens": _to_np(st.get("selected_tokens"), dtype=np.int64),
         })
 
-    # Build committed_token[i] = token committed at position i
-    # and commit_conf[i] = confidence at the step it was committed
-    gen_length = int(trace_dict.get("gen_length") or (
-        steps[0]["mask_index"].shape[0] if steps[0]["mask_index"] is not None else 0
-    ))
+    if steps[0]["mask_index"] is None:
+        raise TraceProxyError("step 0: missing required field 'mask_index'")
+    gen_length = int(trace_dict.get("gen_length") or steps[0]["mask_index"].shape[0])
+    if gen_length <= 0:
+        raise TraceProxyError(f"invalid gen_length={gen_length}")
+
+    # Resolve selection for every step up front (fail-hard; no silent repair).
+    resolved: List[Tuple[np.ndarray, np.ndarray]] = []
+    for t in range(T):
+        resolved.append(_resolve_selection(steps, t, gen_length))
 
     committed_token = np.full(gen_length, -1, dtype=np.int64)
     commit_conf = np.zeros(gen_length, dtype=np.float32)
 
-    for t, st in enumerate(steps):
-        sel = st["selected_positions"]
-        sel_tok = st["selected_tokens"]
-        conf = st["confidences"]
-        if sel is None or sel_tok is None:
-            continue
-        positions = np.where(sel)[0]
-        for pos in positions:
-            if committed_token[pos] == -1:
-                committed_token[pos] = sel_tok[pos] if sel_tok[pos] != 0 else (
-                    steps[t]["predictions"][pos] if steps[t]["predictions"] is not None else -1
+    for t, (sel, sel_tok) in enumerate(resolved):
+        conf = _require_array(
+            steps[t]["confidences"], name="confidences", step=t, gen_length=gen_length
+        )
+        pred = _require_array(
+            steps[t]["predictions"], name="predictions", step=t, gen_length=gen_length
+        )
+        for pos in np.where(sel)[0]:
+            if committed_token[pos] != -1:
+                continue
+            # Trust selected_tokens only on selected positions (no pad/0 heuristic).
+            tok = int(sel_tok[pos])
+            if tok < 0:
+                tok = int(pred[pos])
+            if tok < 0:
+                raise TraceProxyError(
+                    f"step {t}: selected position {pos} has no usable token id"
                 )
-                commit_conf[pos] = conf[pos] if conf is not None else 0.0
+            committed_token[pos] = tok
+            commit_conf[pos] = float(conf[pos])
 
-    # ---- Per-step proxy computation ---- #
     step_proxy_list: List[StepProxies] = []
 
     for t in range(T):
-        st = steps[t]
-        mask_t = st["mask_index"]          # bool [gen_length]: masked at START of step t
-        sel_t = st["selected_positions"]   # bool [gen_length]: unmasked at step t
-        conf_t = st["confidences"]
-        pred_t = st["predictions"]
-        ent_t = st["entropies"]
+        mask_t = _require_array(
+            steps[t]["mask_index"], name="mask_index", step=t, gen_length=gen_length
+        )
+        conf_t = _require_array(
+            steps[t]["confidences"], name="confidences", step=t, gen_length=gen_length
+        )
+        pred_t = _require_array(
+            steps[t]["predictions"], name="predictions", step=t, gen_length=gen_length
+        )
+        ent_t = _require_array(
+            steps[t]["entropies"], name="entropies", step=t, gen_length=gen_length
+        )
+        sel_t, _sel_tok = resolved[t]
 
-        if mask_t is None or sel_t is None:
-            continue
-
-        # S_t: positions selected at step t
         S_t = np.where(sel_t)[0]
-        # C_t: committed before step t (not masked at start of t)
         C_t = np.where(~mask_t)[0]
-        # S̄_t: still masked after step t
         S_bar_t = np.where(mask_t & ~sel_t)[0]
 
         n_selected = len(S_t)
         n_committed = len(C_t)
         n_remaining = len(S_bar_t)
 
-        # ---- Entropy-drop weight w_t ---- #
-        weight = 0.0
-        if ent_t is not None and n_selected > 0:
-            weight = float(np.sum(ent_t[S_t]))
+        if n_selected == 0:
+            step_proxy_list.append(_zero_step(t, n_committed, n_remaining))
+            continue
 
-        # ---- Cascade gain cg(t) ---- #
+        weight = float(np.sum(ent_t[S_t]))
+
         cascade_gain_val = 0.0
         if t > 0 and n_remaining > 0:
-            conf_prev = steps[t - 1]["confidences"]
-            if conf_t is not None and conf_prev is not None:
-                delta = conf_t[S_bar_t] - conf_prev[S_bar_t]
-                cascade_gain_val = float(np.mean(delta))
+            conf_prev = _require_array(
+                steps[t - 1]["confidences"],
+                name="confidences",
+                step=t - 1,
+                gen_length=gen_length,
+            )
+            delta = conf_t[S_bar_t] - conf_prev[S_bar_t]
+            cascade_gain_val = float(np.mean(delta))
 
-        # ---- Mean positive regret over C_t ---- #
         mean_regret_val = 0.0
-        if n_committed > 0 and conf_t is not None and pred_t is not None:
+        if n_committed > 0:
             regrets = []
             for pos in C_t:
-                tok = committed_token[pos]
+                tok = int(committed_token[pos])
                 if tok < 0:
-                    continue
-                # Approximate p_θ(x̂_i | context_t):
-                # If model still predicts committed token, use current confidence.
-                # Otherwise probability is below current argmax confidence -> approx 0.
+                    raise TraceProxyError(
+                        f"step {t}: committed position {pos} has no recorded token"
+                    )
                 if pred_t[pos] == tok:
                     prob_committed = float(conf_t[pos])
                 else:
                     prob_committed = 0.0
                 r = float(commit_conf[pos]) - prob_committed
                 regrets.append(max(0.0, r))
-            if regrets:
-                mean_regret_val = float(np.mean(regrets))
+            mean_regret_val = float(np.mean(regrets)) if regrets else 0.0
 
-        # ---- M̂_t ---- #
         M_hat_t = mean_regret_val / (1.0 + max(0.0, cascade_gain_val))
 
-        # ---- Prediction instability inst(t) ---- #
         instability_val = 0.0
-        if n_selected > 0 and t > 0:
-            pred_prev = steps[t - 1]["predictions"]
-            if pred_t is not None and pred_prev is not None:
-                same = np.sum(pred_t[S_t] == pred_prev[S_t])
-                instability_val = 1.0 - float(same) / n_selected
+        if t > 0:
+            pred_prev = _require_array(
+                steps[t - 1]["predictions"],
+                name="predictions",
+                step=t - 1,
+                gen_length=gen_length,
+            )
+            same = np.sum(pred_t[S_t] == pred_prev[S_t])
+            instability_val = 1.0 - float(same) / n_selected
 
-        # ---- Rank volatility vol(t) ---- #
         rank_vol_val = 0.0
         if t > 0 and gen_length >= 2:
-            conf_prev = steps[t - 1]["confidences"]
-            if conf_t is not None and conf_prev is not None:
-                c_cur = conf_t.astype(np.float64)
-                c_prv = conf_prev.astype(np.float64)
-                r_cur = np.argsort(np.argsort(c_cur)).astype(np.float64)
-                r_prv = np.argsort(np.argsort(c_prv)).astype(np.float64)
-                tau = _fast_kendall_tau(r_cur, r_prv)
-                rank_vol_val = 1.0 - (tau + 1.0) / 2.0
+            conf_prev = _require_array(
+                steps[t - 1]["confidences"],
+                name="confidences",
+                step=t - 1,
+                gen_length=gen_length,
+            )
+            c_cur = conf_t.astype(np.float64)
+            c_prv = conf_prev.astype(np.float64)
+            r_cur = np.argsort(np.argsort(c_cur)).astype(np.float64)
+            r_prv = np.argsort(np.argsort(c_prv)).astype(np.float64)
+            tau = _fast_kendall_tau(r_cur, r_prv)
+            rank_vol_val = 1.0 - (tau + 1.0) / 2.0
 
-        # ---- Ĵ_t ---- #
         J_hat_t = instability_val * rank_vol_val
 
         step_proxy_list.append(StepProxies(
@@ -268,16 +505,11 @@ def compute_sample_proxies(trace_dict: dict) -> SampleProxies:
         ))
 
     caps = _aggregate_sample_caps(step_proxy_list)
-    M_hat = caps["M_hat_t"].entropy
-    J_hat = caps["J_hat_t"].entropy
-    M_hat_uniform = caps["M_hat_t"].uniform
-    J_hat_uniform = caps["J_hat_t"].uniform
-
     return SampleProxies(
-        M_hat=M_hat,
-        J_hat=J_hat,
-        M_hat_uniform=M_hat_uniform,
-        J_hat_uniform=J_hat_uniform,
+        M_hat=caps["M_hat_t"].entropy,
+        J_hat=caps["J_hat_t"].entropy,
+        M_hat_uniform=caps["M_hat_t"].uniform,
+        J_hat_uniform=caps["J_hat_t"].uniform,
         caps=caps,
         step_proxies=step_proxy_list,
     )

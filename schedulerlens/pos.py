@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -418,3 +419,76 @@ def _per_sample_tag_trends(
         for tag in tag_set:
             out[tag].append([float(counters[t][tag]) for t in range(t_max)])
     return out
+
+# --- CLI ---
+
+def run_pos_analysis(
+    trace_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    *,
+    max_samples: Optional[int] = None,
+    bucket_size: Optional[int] = None,
+    top_k: int = 10,
+    model_path: Optional[Union[str, Path]] = None,
+    models_root: Optional[Union[str, Path]] = None,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Compute POS metrics, write pos_metrics.json and plots."""
+    from schedulerlens.plots import save_pos_plots
+
+    trace_path = Path(trace_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics = compute_pos_metrics(
+        trace_path,
+        max_samples=max_samples,
+        bucket_size=bucket_size,
+        top_k=top_k,
+        model_path=model_path,
+        models_root=models_root,
+        verbose=verbose,
+    )
+
+    metrics_path = output_dir / "pos_metrics.json"
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "trace_path": str(trace_path.resolve()),
+                **metrics.to_dict(),
+            },
+            f,
+            indent=2,
+        )
+
+    result: Dict[str, Any] = {
+        "n_samples": metrics.n_samples,
+        "n_steps": metrics.n_steps,
+        "model_name": metrics.model_name,
+        "model_dir": metrics.model_dir,
+        "metrics_path": str(metrics_path.resolve()),
+        "metrics": metrics,
+        "pos_mean_unmask_plot": None,
+        "pos_unmask_trend_plot": None,
+        "pos_bucket_trend_plot": None,
+        "pos_bucket_mean_unmask_plot": None,
+    }
+
+    if metrics.n_steps > 0 and metrics.mean_unmask_step_by_pos:
+        prefix = trace_path.stem
+        mean_plot, trend_plot, bucket_plot, bucket_mean_plot = save_pos_plots(
+            metrics, output_dir, prefix=prefix
+        )
+        result["pos_mean_unmask_plot"] = str(mean_plot.resolve())
+        result["pos_unmask_trend_plot"] = str(trend_plot.resolve())
+        result["pos_bucket_trend_plot"] = (
+            str(bucket_plot.resolve()) if bucket_plot else None
+        )
+        result["pos_bucket_mean_unmask_plot"] = (
+            str(bucket_mean_plot.resolve()) if bucket_mean_plot else None
+        )
+    else:
+        logger.warning("Skipped POS plots: no unmask events found.")
+
+    return result
+

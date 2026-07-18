@@ -1,21 +1,29 @@
-"""Compact NPZ storage for eval traces (JSONL -> stacked arrays)."""
+"""Compact NPZ storage for eval traces (JSONL/JSON → stacked arrays)."""
 
 from __future__ import annotations
 
+import copy
 import gc
+import io
 import json
 import logging
 import os
-from dataclasses import dataclass
+import time
+import zipfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Union
 
 import numpy as np
 
+from traces.utils import squeeze_to_1d
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_PACK_MEMORY_FRACTION = 0.25
 DEFAULT_PACK_JSON_EXPANSION = 2.5
+# Deflate level for NPZ (1=fast, 9=small). Uncompressed via TRACE_NPZ_COMPRESS=0.
+DEFAULT_NPZ_COMPRESSLEVEL = 1
 STEP_FIELDS = (
     "mask_index",
     "predictions",
@@ -35,18 +43,10 @@ FIELD_DTYPES = {
 }
 
 
-def _squeeze_batch(row) -> np.ndarray:
-    arr = np.asarray(row)
-    while arr.ndim > 1:
-        arr = arr[0]
-    return arr
-
-
 def _token_ids_from_field(value) -> Optional[list[int]]:
     if value is None:
         return None
-    row = _squeeze_batch(value)
-    return [int(t) for t in row.tolist()]
+    return [int(t) for t in squeeze_to_1d(value).tolist()]
 
 
 def _batched_token_field(token_ids: Optional[list[int]]) -> Optional[list[list[int]]]:
@@ -62,7 +62,7 @@ def _step_array(step_traces: List[dict], field: str, dtype, *, gen_length: int) 
         data = step.get(field)
         if data is None:
             continue
-        row = _squeeze_batch(data).astype(dtype, copy=False)
+        row = squeeze_to_1d(data).astype(dtype, copy=False)
         if row.shape[0] != gen_length:
             raise ValueError(
                 f"step {t} field {field}: expected length {gen_length}, got {row.shape[0]}"
@@ -248,7 +248,7 @@ def _sample_gen_length(sample: dict) -> int:
     step_traces = sample.get("step_traces") or []
     if not step_traces:
         raise ValueError("trace has no step_traces")
-    return int(len(_squeeze_batch(step_traces[0].get("mask_index") or [0])))
+    return int(len(squeeze_to_1d(step_traces[0].get("mask_index") or [0])))
 
 
 def scan_jsonl_trace_shape(path: Union[str, Path]) -> JsonlTraceShape:
@@ -482,6 +482,14 @@ def _pack_samples_into_stacked(
     return sidecar_offsets, bytes(sidecar_data)
 
 
+def _npz_compress_settings() -> tuple[bool, int]:
+    """Return (use_deflate, compresslevel)."""
+    raw = os.environ.get("TRACE_NPZ_COMPRESS", "1").strip().lower()
+    use = raw not in ("0", "false", "no", "off")
+    level = int(os.environ.get("TRACE_NPZ_COMPRESSLEVEL", str(DEFAULT_NPZ_COMPRESSLEVEL)))
+    return use, max(0, min(9, level))
+
+
 def _write_npz_archive(
     output_path: Union[str, Path],
     stacked: Dict[str, np.ndarray],
@@ -498,7 +506,27 @@ def _write_npz_archive(
     if task_name is not None:
         stacked["task"] = np.array(str(task_name))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(output_path, **stacked)
+
+    use_deflate, level = _npz_compress_settings()
+    t0 = time.perf_counter()
+    compression = zipfile.ZIP_DEFLATED if use_deflate else zipfile.ZIP_STORED
+    # ZIP_STORED rejects compresslevel on some Python builds — only pass when deflating.
+    zf_kwargs: dict = {"compression": compression}
+    if use_deflate:
+        zf_kwargs["compresslevel"] = level
+    with zipfile.ZipFile(output_path, mode="w", **zf_kwargs) as zf:
+        for key, value in stacked.items():
+            buf = io.BytesIO()
+            np.save(buf, np.asanyarray(value), allow_pickle=False)
+            zf.writestr(f"{key}.npy", buf.getvalue())
+    logger.info(
+        "wrote NPZ %s (%.1f MiB, compress=%s level=%s) in %.1fs",
+        output_path.name,
+        output_path.stat().st_size / (1024 * 1024),
+        use_deflate,
+        level if use_deflate else "-",
+        time.perf_counter() - t0,
+    )
     return output_path
 
 
@@ -555,6 +583,8 @@ def pack_jsonl_to_npz(
     sidecar_offsets = np.zeros(shape.n_samples + 1, dtype=np.int64)
     sidecar_data = bytearray()
     sample_index = 0
+    batch_i = 0
+    t_pack = time.perf_counter()
     for batch in iter_jsonl_trace_batches(input_path, batch_size):
         _pack_samples_into_stacked(
             stacked,
@@ -566,8 +596,18 @@ def pack_jsonl_to_npz(
             finalize=False,
         )
         sample_index += len(batch)
+        batch_i += 1
+        if batch_i == 1 or sample_index == shape.n_samples or batch_i % 4 == 0:
+            logger.info(
+                "JSONL pack progress: %d/%d samples (%.1fs)",
+                sample_index,
+                shape.n_samples,
+                time.perf_counter() - t_pack,
+            )
         del batch
-        gc.collect()
+        # Full GC every batch is expensive; run periodically.
+        if batch_i % 4 == 0:
+            gc.collect()
 
     sidecar_offsets[shape.n_samples] = len(sidecar_data)
     return _write_npz_archive(
@@ -585,7 +625,7 @@ def pack_samples_to_npz(
     *,
     task_name: Optional[str] = None,
 ) -> Path:
-    """Pack in-memory trace samples into a compressed NPZ archive."""
+    """Pack in-memory trace samples into an NPZ archive."""
     shape = _shape_from_samples(samples, task_name=task_name)
     return _pack_trace_shape_to_npz(shape, samples, output_path, task_name=task_name)
 
@@ -619,8 +659,9 @@ def arrays_to_trace_dict(
             if present_key in arrays and not bool(arrays[present_key][sample_index, t]):
                 step[field] = None
                 continue
+            # Keep a (1, G) ndarray view — avoid .tolist() (huge Python object graphs).
             arr = arrays[field][sample_index, t]
-            step[field] = arr.reshape(1, gen_length).tolist()
+            step[field] = np.asarray(arr).reshape(1, gen_length)
         step["intervention_applied"] = bool(extras.get("intervention_applied", False))
         step["intervention_type"] = extras.get("intervention_type")
         step["metadata"] = extras.get("metadata") or {}
@@ -684,12 +725,16 @@ def _load_json_samples(path: Path) -> tuple[Optional[str], List[dict]]:
     raise ValueError(f"Unsupported JSON trace format: {path}")
 
 
-def _load_npz_samples(path: Path) -> tuple[Optional[str], List[dict]]:
-    task_name: Optional[str] = None
+def read_npz_task_name(path: Union[str, Path]) -> Optional[str]:
+    """Return the optional ``task`` string stored in an NPZ archive."""
     with np.load(path, allow_pickle=False) as data:
         if "task" in data:
-            task_name = str(data["task"])
-    return task_name, list(iter_npz_traces(path))
+            return str(data["task"])
+    return None
+
+
+def _load_npz_samples(path: Path) -> tuple[Optional[str], List[dict]]:
+    return read_npz_task_name(path), list(iter_npz_traces(path))
 
 
 def load_trace_samples(path: Union[str, Path]) -> tuple[Optional[str], List[dict]]:
@@ -712,7 +757,7 @@ def convert_jsonl_to_npz(
     samples: Optional[List[dict]] = None,
     task_name: Optional[str] = None,
 ) -> Path:
-    """Convert a JSONL/JSON trace file to a compressed NPZ archive."""
+    """Convert a JSONL/JSON trace file to an NPZ archive (no repair)."""
     input_path = Path(input_path)
     output_path = Path(output_path or input_path.with_suffix(".npz"))
 
@@ -726,6 +771,172 @@ def convert_jsonl_to_npz(
         loaded_samples,
         output_path,
         task_name=task_name if task_name is not None else loaded_task,
+    )
+
+
+@dataclass
+class RepairedPackResult:
+    """Result of repair+pack without writing an intermediate repaired JSONL."""
+
+    path: Path
+    n_samples: int
+    task_name: Optional[str]
+    repairs: list[str] = field(default_factory=list)
+    # Sample index -> repaired dict for round-trip spot checks (not full file).
+    roundtrip_samples: Dict[int, dict] = field(default_factory=dict)
+
+
+def pack_repaired_jsonl_to_npz(
+    input_path: Union[str, Path],
+    output_path: Union[str, Path],
+    *,
+    task_name: Optional[str] = None,
+    roundtrip_check_samples: int = 3,
+    is_fdm: Optional[bool] = None,
+    workers: int = 1,
+) -> RepairedPackResult:
+    """Repair while packing JSONL → NPZ (no intermediate repaired JSONL).
+
+    Two streaming passes via ``iter_repaired_jsonl``:
+    1) measure post-repair shape / dedup count
+    2) pack into preallocated arrays; stash a few samples for round-trip
+    """
+    from traces.trace_checks import _roundtrip_indices, iter_repaired_jsonl
+
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+    header_task = read_jsonl_task_name(input_path)
+    task = task_name if task_name is not None else header_task
+
+    t0 = time.perf_counter()
+    n_samples = 0
+    removed = 0
+    gen_lengths: set[int] = set()
+    max_steps = 0
+    max_prompt_len = 0
+    max_final_len = 0
+    repair_msgs: list[str] = []
+
+    for kind, payload in iter_repaired_jsonl(
+        input_path, is_fdm=is_fdm, workers=workers
+    ):
+        if kind == "comment":
+            continue
+        if kind == "duplicate":
+            removed += 1
+            continue
+        fixed, reps = payload
+        step_traces = fixed.get("step_traces") or []
+        if not step_traces:
+            raise ValueError(f"sample {n_samples}: repaired trace has no step_traces")
+        max_steps = max(max_steps, len(step_traces))
+        gen_lengths.add(_sample_gen_length(fixed))
+        prompt_tokens = _token_ids_from_field(fixed.get("prompt"))
+        if prompt_tokens:
+            max_prompt_len = max(max_prompt_len, len(prompt_tokens))
+        final_tokens = _token_ids_from_field(fixed.get("final_sequence"))
+        if final_tokens:
+            max_final_len = max(max_final_len, len(final_tokens))
+        for rep in reps:
+            if len(repair_msgs) < 40:
+                repair_msgs.append(f"sample {n_samples}: {rep}")
+        n_samples += 1
+        if n_samples == 1 or n_samples % 50 == 0:
+            logger.info(
+                "repair+pack scan: %d kept (%d dupes dropped) %.1fs",
+                n_samples,
+                removed,
+                time.perf_counter() - t0,
+            )
+
+    if n_samples == 0:
+        raise ValueError(f"No samples to pack after repair in {input_path}")
+    gen_lengths.discard(0)
+    if len(gen_lengths) != 1:
+        raise ValueError(f"Mixed gen_length after repair in {input_path}: {sorted(gen_lengths)}")
+
+    shape = JsonlTraceShape(
+        task_name=task,
+        n_samples=n_samples,
+        gen_length=next(iter(gen_lengths)),
+        max_steps=max_steps,
+        max_prompt_len=max_prompt_len,
+        max_final_len=max_final_len,
+    )
+    logger.info(
+        "repair+pack scan done: n=%d max_steps=%d gen=%d (%.1fs)%s",
+        shape.n_samples,
+        shape.max_steps,
+        shape.gen_length,
+        time.perf_counter() - t0,
+        f", dropped {removed} dupes" if removed else "",
+    )
+    if removed:
+        repair_msgs.insert(
+            0,
+            f"removed {removed} duplicate trace(s) by prompt ({n_samples} kept)",
+        )
+
+    wanted = set(_roundtrip_indices(n_samples, check_samples=roundtrip_check_samples))
+    stacked = _preallocate_stacked(
+        n_samples=shape.n_samples,
+        gen_length=shape.gen_length,
+        max_steps=shape.max_steps,
+        max_prompt_len=shape.max_prompt_len,
+        max_final_len=shape.max_final_len,
+    )
+    sidecar_offsets = np.zeros(shape.n_samples + 1, dtype=np.int64)
+    sidecar_data = bytearray()
+    roundtrip_samples: Dict[int, dict] = {}
+    idx = 0
+    t1 = time.perf_counter()
+    for kind, payload in iter_repaired_jsonl(
+        input_path, is_fdm=is_fdm, workers=workers
+    ):
+        if kind != "sample":
+            continue
+        fixed, _reps = payload
+        if idx in wanted:
+            # Deep copy so packing helpers cannot mutate the round-trip reference.
+            roundtrip_samples[idx] = copy.deepcopy(fixed)
+        _append_sample_to_stacked(
+            idx,
+            fixed,
+            gen_length=shape.gen_length,
+            stacked=stacked,
+            sidecar_offsets=sidecar_offsets,
+            sidecar_data=sidecar_data,
+        )
+        idx += 1
+        if idx == 1 or idx == n_samples or idx % 50 == 0:
+            logger.info(
+                "repair+pack write: %d/%d samples (%.1fs)",
+                idx,
+                n_samples,
+                time.perf_counter() - t1,
+            )
+        if idx % 32 == 0:
+            gc.collect()
+
+    sidecar_offsets[n_samples] = len(sidecar_data)
+    _write_npz_archive(
+        output_path,
+        stacked,
+        sidecar_offsets,
+        bytes(sidecar_data),
+        task_name=task,
+    )
+    logger.info(
+        "repair+pack total %.1fs -> %s",
+        time.perf_counter() - t0,
+        output_path.name,
+    )
+    return RepairedPackResult(
+        path=output_path,
+        n_samples=n_samples,
+        task_name=task,
+        repairs=repair_msgs,
+        roundtrip_samples=roundtrip_samples,
     )
 
 

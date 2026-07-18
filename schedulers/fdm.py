@@ -14,10 +14,12 @@ from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT
 from schedulers.utils import add_gumbel_noise, check_eos_stop_condition, check_all_generated_unmasked, mask_eos_eot_logits
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
-    from traces.trace_wrapper import trace_scheduler
+    from traces.trace_wrapper import suppress_step_recording, trace_scheduler
 else:
     def trace_scheduler(*args, **kwargs):
         return lambda x: x
+
+    from contextlib import nullcontext as suppress_step_recording
 
 
 @torch.no_grad()
@@ -38,7 +40,9 @@ def _global_confidence_expected_logp(model, x_hyp, attention_mask, mask_id,
       c_global: [B_h] (float)  — average expected log-prob over masked positions in block.
     """
     device = x_hyp.device
-    logits = model(x_hyp, attention_mask=attention_mask).logits  # [B_h, L, V]
+    # Nested hyp forwards must not open traced steps (would inflate n_steps vs budget).
+    with suppress_step_recording():
+        logits = model(x_hyp, attention_mask=attention_mask).logits  # [B_h, L, V]
 
     if confidence_eos_eot_inf and eos_id is not None:
         mask_eos_eot_logits(logits, False, True, eos_id, eot_id)

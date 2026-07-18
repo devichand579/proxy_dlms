@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -82,6 +82,55 @@ def trace_run_stem(model: str, task: str, scheduler: str, *, steps: int | None =
     if steps is not None:
         parts.append(f"s{int(steps)}")
     return "_".join(p for p in parts if p)
+
+
+_TRACE_STEPS_BUDGET_RE = re.compile(r"_s(?P<steps>\d+)$", re.IGNORECASE)
+# Scheduler token ``fdm`` as its own path segment (e.g. ``…_fdm_s128``, ``pcfg_fdm_s128``).
+_TRACE_FDM_RE = re.compile(r"(^|[_-])fdm([_-]|$)", re.IGNORECASE)
+
+
+def parse_trace_step_budget(name: str | Path | None) -> Optional[int]:
+    """Parse step budget ``N`` from a trace stem/path ending in ``_s{N}``.
+
+    Examples: ``llada_gsm8k_pd_s512.jsonl`` → 512,
+    ``llada-100m-pcfg-pcfg_dus_s128.npz`` → 128.
+    """
+    if name is None:
+        return None
+    stem = Path(str(name)).stem
+    m = _TRACE_STEPS_BUDGET_RE.search(stem)
+    return int(m.group("steps")) if m else None
+
+
+def is_fdm_trace_name(name: str | Path | None) -> bool:
+    """True when the stem encodes the FDM scheduler (e.g. ``…_fdm_s128``)."""
+    if name is None:
+        return False
+    return bool(_TRACE_FDM_RE.search(Path(str(name)).stem))
+
+
+def squeeze_to_1d(data) -> np.ndarray:
+    """Peel leading dims until 1D: (1, G) / nested list → length-G vector."""
+    arr = np.asarray(data)
+    while arr.ndim > 1:
+        arr = arr[0]
+    return np.asarray(arr).reshape(-1)
+
+
+def squeeze_len(data) -> Optional[int]:
+    if data is None:
+        return None
+    return int(squeeze_to_1d(data).shape[0])
+
+
+def as_gen_vec(data, *, gen_length: int, dtype=np.bool_) -> Optional[np.ndarray]:
+    """Squeeze a step field to length ``gen_length``, or None if missing/wrong length."""
+    if data is None or gen_length <= 0:
+        return None
+    arr = squeeze_to_1d(data)
+    if arr.shape[0] != gen_length:
+        return None
+    return arr.astype(dtype, copy=False)
 
 
 def _is_tensor_like(obj):

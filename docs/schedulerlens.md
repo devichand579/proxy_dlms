@@ -1,6 +1,6 @@
 # SchedulerLens
 
-SchedulerLens analyzes **masked diffusion schedulers** from generation traces produced by the eval harness. It reports M̂/Ĵ caps and their sub-proxies, each with **entropy-weighted** and **uniform-step** aggregates plus per-step trends.
+SchedulerLens analyzes **masked diffusion schedulers** from generation traces. It reports M̂/Ĵ caps and sub-proxies, commit / oracle perplexity, optional oracle–proxy correlations (PCFG), and comparison plots across runs.
 
 | Proxy | Role | Lower is better? |
 | ----- | ---- | ---------------- |
@@ -11,7 +11,7 @@ SchedulerLens analyzes **masked diffusion schedulers** from generation traces pr
 | **instability** | Argmax flips on `S_t` | Yes |
 | **rank_volatility** | Confidence rank shuffling over gen region | Yes |
 
-Top-level `M_hat` / `J_hat` are aliases for entropy-weighted `M_hat_t` / `J_hat_t` caps.
+Top-level `M_hat` / `J_hat` are entropy-weighted caps of `M_hat_t` / `J_hat_t`.
 
 ---
 
@@ -19,120 +19,161 @@ Top-level `M_hat` / `J_hat` are aliases for entropy-weighted `M_hat_t` / `J_hat_
 
 | Requirement | Why |
 | ----------- | --- |
-| **Trace file** (`.jsonl` or `.json`) | One sample per line (JSONL) or a single trace / `samples` list (JSON) |
-| **Gen-only step fields** | `mask_index`, `predictions`, `confidences`, `entropies`, `selected_positions`, `selected_tokens` |
-
-Traces come from `GenerationTrace` in `traces/trace_generator.py`, usually under `trace_outputs/` after eval with tracing enabled. See [evaluation.md](evaluation.md).
+| **Trace archive** (`.npz` only) | From `traces/trace_npz.py` (convert JSONL via `trace_audit.py convert`) |
+| **Gen-only step fields** | `mask_index`, `predictions`, `confidences`, `entropies`; `selected_positions` / `selected_tokens` or inferrable from consecutive masks |
 
 ---
 
-## Quick start
+## Fail-hard rules
+
+- Missing / inconsistent required fields → **`TraceProxyError`**; the run aborts (no silent zeros, no skipping samples).
+- Proxies and oracle call **`validate_trace_for_metrics`** first. They do **not** silently repair. Unrepaired issues raise hard errors, including:
+  - missing `mask_index` / `predictions` / `confidences` / `entropies` (or wrong lengths)
+  - `selected_positions` vs mask-diff set/count mismatch (DUS remask / incomplete hooks)
+  - missing `selected_*` when mask-diff has unmasks
+  - FDM **phantom extra steps** (nested hyp forwards)
+  - **untrimmed trailing step** (`schedulerlens_trimmed_tail` missing) — repair drops the last step for **all** schedulers
+- On the **last kept step** after trim, `selected_*` is trusted (no next mask to compare).
+- Empty selection on non-last steps is valid only when that step’s mask-diff is also empty.
+- Repair traces first (`trace_audit.py convert` / `repair-npz`), then run SchedulerLens.
+- When **no tokens are unmasked** at a step (`n_selected == 0`), **all** step proxies are **0** (`M_hat_t`, `J_hat_t`, and every sub-quantity).
+
+---
+
+## CLI (single entrypoint)
+
+All commands go through `python -m schedulerlens.run` (or `python -m schedulerlens`):
+
+| Subcommand | Role |
+| ---------- | ---- |
+| `file` | One local NPZ → metrics + plots |
+| `inventory` | List Hub NPZs (no download) |
+| `analyze` | One Hub NPZ (download→analyze→delete) or `--local` |
+| `compare` | Batch Hub/local → CSV + plots (`analyze-all` alias) |
+| `pos` | POS-stratified unmask analysis |
 
 ```bash
-python -m schedulerlens.run trace_outputs/your_run.jsonl -o outputs/schedulerlens/run1
-python -m schedulerlens.run trace_outputs/your_run.jsonl -o outputs/schedulerlens/run1 --bucket-size 16
+# Local NPZ
+python -m schedulerlens.run file trace_outputs/your_run.npz -o outputs/schedulerlens/run1
+python -m schedulerlens.run file path/to/llada-100m-pcfg_pd_s128.npz -o out/ \
+  --replay-oracle --model-path /path/to/pcfg/ckpt
+
+# Hub inventory / one file / batch
+python -m schedulerlens.run inventory --repo schedulerlens-npz --pcfg-only
+python -m schedulerlens.run analyze llada-300m-pcfg_pd_s128.npz \
+  --repo schedulerlens-npz -o outputs/schedulerlens/one \
+  --replay-oracle --model-path checkpoints/llada-300m-pcfg-1B/checkpoint-best_val
+# Lazy-load each stem's model from HF (llada-100m-pcfg-pcfg_bd_s128 → org/llada-100m-pcfg),
+# unload previous weights when the model changes:
+python -m schedulerlens.run compare \
+  --repo llada_pcfg_traces --namespace YOUR_ORG --pattern '*-pcfg_*.npz' --pcfg-only \
+  -o outputs/schedulerlens/pcfg_compare \
+  --replay-oracle
+# (--namespace applies to both the dataset repo and lazy oracle models:
+#  stem llada-100m-pcfg-pcfg_bd_s128 → YOUR_ORG/llada-100m-pcfg)
+# Omit --namespace to use TRACE_HF_NAMESPACE / HF whoami (token from repo defaults).
+
+# Or pin one model for all traces:
+#   --replay-oracle --hf-model YOUR_ORG/llada-300m-pcfg
+# Local checkpoint:
+#   --replay-oracle --model-path checkpoints/llada-300m-pcfg-1B/checkpoint-best_val
+
+# Offline batch
+python -m schedulerlens.run compare --local-dir ./npz_traces -o out/compare --pcfg-only
+
+# POS
+python -m schedulerlens.run pos trace.npz -o out/pos --bucket-size 16
 ```
 
-Flags:
+Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp download → stream NPZ samples → metrics → **delete temp**. Batch jobs purge stale HF cache at start.
 
 | Flag | Description |
 | ---- | ----------- |
-| `-o`, `--output-dir` | Output directory (required) |
-| `--max-samples N` | Process only the first N samples |
-| `--bucket-size N` | Bucket steps in groups of N; adds bucket trends + plots |
-| `-q`, `--quiet` | Less logging |
+| `-o` | Output directory |
+| `--max-samples N` | First N samples only |
+| `--bucket-size N` | Bucketed trends + plots |
+| `--no-perplexity` | Skip PPL (`file` only) |
+| `--replay-oracle` | Exact Mt/Jt (PCFG; needs `--model-path`) |
+| `--pcfg` | Force PCFG oracle gating |
+| `--model-path DIR` | PCFG checkpoint for Mt/Jt replay |
 
----
-
-## Output
-
-Written to `--output-dir`:
-
-| File | Contents |
-| ---- | -------- |
-| `metrics.json` | Caps and per-step trends under `proxies` |
-| `{stem}_M_trends.png` | M̂_t (main), mean regret, cascade gain |
-| `{stem}_J_trends.png` | Ĵ_t (main), instability, rank volatility |
-| `{stem}_unmasked_count_trend.png` | Mean tokens unmasked per step |
-
-Each M/J PNG has three stacked subplots: **main proxy on top** (bold), two sub-proxies below.
-
-With `--bucket-size N`:
+### Outputs (`file`)
 
 | File | Contents |
 | ---- | -------- |
-| `{stem}_bucket{N}_all_trends.png` | All 6 proxy trends, one subplot each |
-| `{stem}_bucket{N}_unmasked.png` | Mean tokens unmasked per bucket |
-
-Bucket value at index `b` = mean over steps `[b*N, (b+1)*N)` (per sample, then mean across samples).
-
-When `--bucket-size` is set, the CLI summary prints a table of bucket values after the main caps.
-
-### `metrics.json` structure
-
-Each entry under `proxies` has:
-
-- `entropy`, `uniform` — task-level caps (mean over samples)
-- `trend` — per-step mean across samples
-- `bucket_trend` — present when `--bucket-size N` is set
-- `sample_entropy`, `sample_uniform` — per-sample caps
-
-Proxy names: `M_hat_t`, `mean_regret`, `cascade_gain`, `J_hat_t`, `instability`, `rank_volatility`.
-
-Top-level keys: `M_hat`, `J_hat`, `M_hat_uniform`, `J_hat_uniform`, `n_samples`, `n_steps`, `n_unmasked_trend`, `mean_unmasked_per_step`, and `proxies`.
+| `metrics.json` | Caps, trends, meta, optional perplexity / correlations |
+| `metrics.csv` | One unified row (same schema as compare) |
+| `perplexity.json` | Model commit / oracle PPL (and Mt/Jt when replayed) |
+| `{stem}_M_trends.png` / `_J_trends.png` | Per-step proxy panels |
+| `compare_surfaces.png` | Step × token heatmaps (confidence, entropy) |
 
 ---
 
-## Metrics
+## Hub / compare flags
 
-### Per-step notation (gen region only)
+| Flag | Description |
+| ---- | ----------- |
+| `--repo` / `--local-dir` | Source (mutually exclusive) |
+| `--pattern` | Filename glob against Hub/local names (default `*.npz`). Example: `*-pcfg_*.npz` keeps only PCFG-looking files by name |
+| `--pcfg-only` | After discovery, keep only stems parsed as PCFG (`-pcfg_` / `pcfg_` in the name). Stricter than pattern alone |
+| `--model` / `--scheduler` / `--steps` | Extra filters from parsed stem |
+| `--pcfg` | Force PCFG oracle gating even if the filename is not PCFG-like |
+| `--replay-oracle` | Exact Mt/Jt + M↔M̂ / J↔Ĵ correlations for PCFG |
+| `--oracle-workers N` | Parallel samples in oracle replay (shared model + engine pool; default 1) |
+| `--oracle-step-workers N` | Parallel PCFG Mt/Jt across steps within a sample (default `min(8, CPUs)`) |
+| `--oracle-forward-batch B` | Batched model forwards over precomputed step inputs (default 8) |
+| `--namespace` | HF user/org for short `--repo` names **and** per-stem oracle models (`{ns}/{llada-100m-pcfg}`). Default: `TRACE_HF_NAMESPACE` / whoami |
+| `--hf-model` | Pin one HF model for all traces (disables per-stem switch) |
+| `--model-path` | Local checkpoint dir (or HF id if path does not exist) |
+| `--limit N` | Cap number of files |
+| `--resume` | Skip stems already in output CSV |
+| `--no-purge-cache` | Skip Hub cache purge at batch start |
+
+**Oracle gating:** exact Mt/Jt and proxy correlations run only when the trace is PCFG (`-pcfg_` / `pcfg_` in the name, or `--pcfg`) **and** `--replay-oracle` is set. Non-PCFG runs still get M̂/Ĵ + model commit PPL + overview/surface plots.
+
+NPZ samples are streamed via `traces.trace_npz.iter_npz_traces` (one sample in RAM at a time for proxies).
+
+### Compare outputs
+
+| File | Contents |
+| ---- | -------- |
+| `schedulerlens_metrics.csv` | All runs, unified columns |
+| `compare_summary.json` | Same rows as JSON |
+| `compare_overview.png` | Scheduler × model bars for M̂, Ĵ, PPL |
+| `compare_ppl.png` | Model vs oracle PPL (when oracle present) |
+| `compare_proxy_corr.png` | Mean ρ by early/mid/late block |
+| `compare_proxy_fidelity.png` | Scatter Mt vs M̂_t, Jt vs Ĵ_t |
+| `compare_surfaces.png` | Step × token heatmaps |
+
+### CSV schema (unified)
+
+Identity: `repo`, `filename`, `model`, `scheduler`, `task`, `steps`, `is_pcfg`, `n_samples`, `n_steps`
+
+Caps: `M_hat`, `J_hat`, `M_hat_uniform`, `J_hat_uniform`, plus `*_entropy` / `*_uniform` for sub-proxies
+
+PPL / oracle: `model_commit_ppl`, `oracle_ppl`, `Mt_total`, `Jt_total`
+
+Correlations (PCFG+replay, else empty): `corr_M_{full,early,mid,late}`, `corr_J_{full,early,mid,late}`, `corr_ppl`
+
+Trajectory blocks are equal thirds of `n_steps`.
+
+---
+
+## Metrics (per step, gen region)
 
 | Symbol | Trace field | Meaning |
 | ------ | ----------- | ------- |
-| `S_t` | `selected_positions` | Unmasked at step `t` |
-| `C_t` | `~mask_index` at step start | Committed before step `t` |
-| `S̄_t` | `mask_index & ~selected_positions` | Still masked after step `t` |
-| `w_t` | sum of `entropies[S_t]` | Entropy-drop weight |
+| `S_t` | selected (or inferred) | Unmasked at step `t` |
+| `C_t` | `~mask_index` | Committed before step `t` |
+| `S̄_t` | still masked after | Remaining masked |
+| `w_t` | `sum(entropies[S_t])` | Entropy weight |
 
-### M-side
+**M-side:** `M̂_t = mean_regret / (1 + max(0, cascade_gain))`  
+**J-side:** `Ĵ_t = instability × rank_volatility`
 
-1. **mean_regret** — mean positive post-commit regret over `C_t`.
-2. **cascade_gain** — mean Δ confidence on `S̄_t` from step `t-1` to `t`.
-3. **M̂_t** = mean_regret / `(1 + max(0, cascade_gain))`.
+Sample caps: over steps with `n_selected > 0` — entropy-weighted `Σ w_t x_t / Σ w_t` and uniform `mean(x_t)`. Task caps: mean over samples.
 
-### J-side
-
-1. **instability** — fraction of `S_t` whose argmax changed since `t-1`.
-2. **rank_volatility** — `1 - (τ + 1) / 2` over all gen positions (Kendall τ of confidence ranks).
-3. **Ĵ_t** = instability × rank_volatility.
-
-### Aggregation
-
-| Level | Entropy-weighted | Uniform-step |
-| ----- | ---------------- | ------------ |
-| Sample cap | `sum(w_t * x_t) / sum(w_t)` | `mean(x_t)` |
-| Task cap | mean over samples | mean over samples |
-| Trend at step `t` | mean of raw `x_t` across samples | same (step-level, not re-weighted) |
-
-Every proxy series (`x_t`) gets both cap variants and a trend.
-
----
-
-## Python API
-
-```python
-from schedulerlens import compute_task_metrics, save_trend_plots
-from schedulerlens.run import run_schedulerlens
-
-result = run_schedulerlens("trace_outputs/run.jsonl", "outputs/schedulerlens/run1")
-print(result["M_t_plot"], result["J_t_plot"])
-
-metrics = compute_task_metrics("trace_outputs/run.jsonl")
-print(metrics.summary())
-regret = metrics.proxies["mean_regret"]
-print(regret.entropy, regret.uniform, regret.trend)
-save_trend_plots(metrics, "outputs/schedulerlens/run1", prefix="run")
-```
+**PCFG oracle (with `--replay-oracle`):** left-padded eval layout; teacher-forced reference prefix (`n_visible`); gen index → content via `n_visible + gen_pos`; Mt = Σ KL(q‖p) and Jt = joint-entropy gap on the **pre-step** committed set. Steps are precomputed from the unmask schedule (independent teacher-forced states), then **batched model forwards** + **parallel PCFG** (engine pool), with optional **multi-sample** workers.
 
 ---
 
@@ -140,60 +181,29 @@ save_trend_plots(metrics, "outputs/schedulerlens/run1", prefix="run")
 
 | Module | Role |
 | ------ | ---- |
-| `schedulerlens/proxies.py` | Per-step proxies and sample caps |
-| `schedulerlens/metrics.py` | Trace I/O and task-level aggregation |
-| `schedulerlens/plots.py` | Trend PNGs |
-| `schedulerlens/run.py` | CLI and `run_schedulerlens()` |
-| `schedulerlens/pos_analysis.py` | POS tagging and unmask timing |
-| `schedulerlens/pos_plots.py` | POS analysis plots |
-| `schedulerlens/pos_run.py` | POS analysis CLI |
-| `schedulerlens/tokenizer_utils.py` | Model/tokenizer resolution from trace path |
+| `proxies.py` | Per-step M̂/Ĵ proxies |
+| `metrics.py` | Aggregation, stem meta, CSV, correlations, row builder |
+| `oracle.py` | Commit NLL, PCFG Mt/Jt replay, task perplexity |
+| `hub.py` | Hub inventory / download→analyze→delete / batch compare |
+| `run.py` | **Single CLI** (`file` / `inventory` / `analyze` / `compare` / `pos`) |
+| `pos.py` | POS analysis library |
+| `plots/viz.py` | All M/J/compare/quad/eval-join/surface plots |
+| `plots/pos.py` | POS unmask timing plots |
 
----
+Compare also writes:
 
-## Notes
+| File | Contents |
+| ---- | -------- |
+| `compare_quad_bars.png` | Faceted bars: M̂/Ĵ by scheduler, hue = step budget |
+| `compare_quad_heat_M.png` / `_J.png` | Heatmaps scheduler × steps per (model, task) |
+| `compare_accuracy_vs_proxy.png` | Accuracy vs M̂/Ĵ (from strace_metrics) |
+| `compare_nfe_pareto.png` | NFE vs accuracy colored by M̂/Ĵ |
+| `compare_budget_curves.png` | Proxies / accuracy / NFE vs steps when multiple budgets exist |
 
-- All arrays are **gen-only** (`gen_length`); prompt tokens are excluded.
-- Samples that fail during proxy computation are skipped with a warning.
-- Shorter traces count equally in task caps; late trend steps only include samples that ran that long.
+Join key: NPZ stem == strace `name` (fallback: model+task+steps+mode). Override path with `--strace-metrics`.
 
 ---
 
 ## POS unmasking analysis
 
-Separate from M̂/Ĵ proxies: tag unmasked tokens with NLTK POS, report when each tag is committed, and list top-k tokens per step. No ρ_sem metric.
-
-```bash
-python -m schedulerlens.pos_run trace_outputs/llada_humaneval_pure_diffusion_s256.jsonl -o outputs/schedulerlens/pos1
-python -m schedulerlens.pos_run trace_outputs/llada_humaneval_pure_diffusion_s256.jsonl -o outputs/schedulerlens/pos1 --bucket-size 16 --top-k 10
-```
-
-| Flag | Description |
-| ---- | ----------- |
-| `--top-k N` | Top N (token, POS) pairs per step by count across samples (default 10) |
-| `--model-path DIR` | Override tokenizer model dir (default: infer `llada` / `llada1_5` / `dream` from trace filename stem) |
-| `--models-root DIR` | Root containing model subdirs (default `./models`) |
-
-**Tokenizer:** Trace basenames follow `{model}_{task}_{mode}_s{steps}` from `hydra_runners/launch_eval.py`. The CLI loads `AutoTokenizer` from `./models/{model}` via `load_model.load_tokenizer`.
-
-**Unmask events:** Uses `selected_positions` / `selected_tokens` when present; otherwise reconstructs from consecutive `mask_index` diffs (same idea as `visualization_json.track_unmasking_order`).
-
-### Output
-
-| File | Contents |
-| ---- | -------- |
-| `pos_metrics.json` | Mean normalized unmask step by POS, per-step POS trends, top-k tokens per step, `mean_unmask_step_by_pos_bucket` when bucketed |
-| `{stem}_pos_mean_unmask_step.png` | Bar chart: mean t/T by POS tag |
-| `{stem}_pos_bucket{N}_mean_unmask_step.png` | With `--bucket-size N`: per-bucket bar panels (8 earliest POS tags by mean step within each bucket) |
-| `{stem}_pos_unmask_count_trend.png` | Top POS tags unmasked per step |
-| `{stem}_pos_bucket{N}_unmask_trend.png` | With `--bucket-size N`: unmask counts per bucket |
-
-### Python API
-
-```python
-from schedulerlens import compute_pos_metrics, save_pos_plots
-
-metrics = compute_pos_metrics("trace_outputs/run.jsonl", bucket_size=16, top_k=10)
-print(metrics.summary())
-save_pos_plots(metrics, "outputs/schedulerlens/pos1", prefix="run")
-```
+Separate from M̂/Ĵ: `python -m schedulerlens.run pos TRACE.npz -o OUT/`.

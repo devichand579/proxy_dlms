@@ -364,7 +364,7 @@ Checkpoints include model weights, config, tokenizer, and `pcfg_vocab.txt`.
 | Train / val | `masked_ce_loss`, `masked_ppl` | LLaDA Eq. (3) on independently masked tokens |
 | Suffix eval | `exact_match` | Generated suffix (content+eos) matches reference |
 | Suffix eval | `structural_accuracy` | Syntax token match rate on suffix (excludes `id`/`fld`/`num`/`flt`) |
-| Traces (SchedulerLens) | `M_hat`, `J_hat`, oracle `Mt`/`Jt` | Post-hoc via `schedulerlens.run --replay-oracle` |
+| Traces (SchedulerLens) | `M_hat`, `J_hat`, oracle `Mt`/`Jt` | Post-hoc via `schedulerlens.run … --replay-oracle` |
 
 Validation holds out a **random 5%** of the train corpus (`--val-fraction`, default 0.05) with deterministic masking per example index. Validation is **masked CE loss only** — schedulers are not run during training. Best checkpoint by validation loss: `checkpoint-best_val/`.
 
@@ -401,15 +401,23 @@ Outputs (per scheduler, `run_name = {model}-pcfg_{scheduler}_s{steps}`):
 - `eval_outputs/pcfg/{run_name}/checkpoint.jsonl` — resumable sample checkpoint (when `--resumable`)
 - `eval_outputs/pcfg/{run_name}/trace_outputs/{run_name}.jsonl` — traces for SchedulerLens
 
-Analyze traces (proxies + perplexity + oracle Mt/Jt):
+Analyze traces (proxies + perplexity + oracle Mt/Jt) — single CLI:
 
 ```bash
-python -m schedulerlens.run \
-  eval_outputs/pcfg/llada-100m-pcfg-pcfg_pd_s128/trace_outputs/llada-100m-pcfg-pcfg_pd_s128.jsonl \
-  -o outputs/schedulerlens/pcfg_pd --replay-oracle
+# Local NPZ
+python -m schedulerlens.run file \
+  eval_outputs/pcfg/llada-100m-pcfg-pcfg_pd_s128/trace_outputs/llada-100m-pcfg_pd_s128.npz \
+  -o outputs/schedulerlens/pcfg_pd --replay-oracle --model-path /path/to/llada-100m-pcfg
+
+# Hub: inventory → download→analyze→delete → CSV + plots
+python -m schedulerlens.run inventory --repo schedulerlens-npz --pcfg-only
+python -m schedulerlens.run compare \
+  --repo schedulerlens-npz --pattern '*-pcfg_*.npz' \
+  -o outputs/schedulerlens/pcfg_compare \
+  --replay-oracle --model-path /path/to/llada-100m-pcfg
 ```
 
-`perplexity.json` includes `model_commit_ppl` (from trace confidences) and `oracle_ppl` (exact PCFG marginals). With `--replay-oracle`, exact `Mt`/`Jt` are computed by re-forwarding the model at each trace step.
+`perplexity.json` / `schedulerlens_metrics.csv` include `model_commit_ppl` and `oracle_ppl`. With `--replay-oracle` + `--model-path`, exact `Mt`/`Jt` and M↔M̂ / J↔Ĵ correlations (full / early / mid / late) are written. See [schedulerlens.md](schedulerlens.md).
 
 PCFG metrics are computed by `pcfg_eval.py` and `schedulerlens` — not the lm-eval trace audit pipeline. PCFG traces (`pcfg_*` / `*-pcfg_*`) get hook/structure checks in `trace_audit.py`. **Sample count** is compared to the **`pcfg-code` Hub test split** (override with `--pcfg-dataset` / `--pcfg-namespace`; lm-eval / W&B accuracy is still skipped).
 

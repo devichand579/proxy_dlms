@@ -10,15 +10,16 @@ Enable tracing in eval: `--tracing_enabled True` (see [evaluation.md](evaluation
 
 | Module | Role |
 | ------ | ---- |
-| `traces/trace_generator.py` | `StepTrace`, `GenerationTrace`, `record_transfer` |
-| `traces/trace_wrapper.py` | `@trace_scheduler`, hook implementation |
-| `traces/trace_checks.py` | Field validation, duplicate-prompt dedup, mask-diff repair, NPZ round-trip |
-| `traces/trace_metrics.py` | Compare trace aggregates vs `strace_metrics.csv` |
-| `traces/trace_pipeline.py` | One-file audit and convert orchestration |
-| `traces/trace_audit.py` | CLI (`inventory`, `audit`, `audit-all`, `convert`, `convert-all`) |
-| `traces/trace_npz.py` | JSONL -> NPZ (lossless: prompt, final_sequence, step extras) |
-| `traces/hf_trace_upload.py` | Hub upload/download/delete, cache cleanup, NPZ convert CLI |
-| `tests/test_tracing.py` | 3 models × 8 schedulers tracing smoke test with audit |
+| `traces/trace_generator.py` | `StepTrace`, `GenerationTrace`, `record_transfer` (OR-accumulate) |
+| `traces/trace_wrapper.py` | `@trace_scheduler`, `suppress_step_recording` (FDM hyp) |
+| `traces/utils.py` | Path helpers, gen-region vector squeeze, setitem utils |
+| `traces/trace_checks.py` | Validate, repair (`iter_repaired_jsonl`), NPZ round-trip |
+| `traces/trace_npz.py` | JSONL ↔ NPZ; `pack_repaired_jsonl_to_npz` |
+| `traces/trace_pipeline.py` | Hub audit / convert / repair-npz orchestration |
+| `traces/trace_audit.py` | CLI (`inventory`, `audit*`, `convert*`, `repair-npz*`) |
+| `traces/trace_metrics.py` | Compare vs `strace_metrics.csv` / PCFG split |
+| `traces/hf_trace_upload.py` | Hub upload/download/delete, cache cleanup |
+| `tests/test_tracing.py` | 3 models × 8 schedulers tracing smoke |
 
 ---
 
@@ -85,6 +86,9 @@ Accuracy uses lm-eval task definitions. Samples are matched to eval instances by
 Audit checks:
 - Required step fields present, correct lengths
 - Null `selected_positions` / transfer hook status (`explicit_all`, `inferrable`, `missing_transfer`, …)
+- **Selection vs mask-diff counts** — when `selected_positions` is present, its True-count must match the mask-index unmask count for that step (steps with a next mask only); mismatches are flagged `SELECTION_MASK_MISMATCH` (repairable; common on DUS when per-position writes overwrite the transfer hook)
+- **Phantom extra steps** — FDM only (filename encodes `_fdm_`). Flagged when there are more steps than permanent-unmask plateaus (flag `PHANTOM_STEPS`; hyps or empty-growth runs). Repair keeps the **first** step of each plateau and rebuilds `selected_*` from plateau growth. Non-FDM schedulers are not collapsed (their empty-growth steps stay).
+- **Untrimmed trailing step** — every scheduler’s last `step_trace` has no next `mask_index`, so mask-diff cannot validate it (flag `UNTRIMMED_TAIL`). Repair **drops that last step** after phantom collapse (all schedulers), marks `metadata.schedulerlens_trimmed_tail`, and trusts `selected_*` on the new last step.
 - **Duplicate prompts** — same `prompt` token ids; column `removable_duplicates` (= `n_samples - unique_prompts`)
 - Missing `unmasking_order` when inferrable from hooks or mask diffs
 - `metric_trace` vs `metric_wandb` (pass@1, exact_match, strict-match per task)
@@ -107,18 +111,33 @@ python traces/trace_audit.py convert-all --output-repo schedulerlens-npz
 Per file:
 1. Download JSONL
 2. Stream-audit content (one sample in RAM at a time)
-3. **Repair** when needed via streaming rewrite (dedup, hooks, `unmasking_order`). Conversion is **blocked** if repair is required but disabled (`--no-repair`), or if issues remain after repair (`status: repair_blocked`).
-4. Stream-convert JSONL to NPZ in **RAM-aware batches** (two passes; batch size from free memory)
-5. Validate NPZ round-trip against source (spot-check indices only)
-6. Upload NPZ to Hub (`--output-repo` for a separate destination repo)
-7. Optionally delete JSONL from Hub (`--delete-jsonl-on-hub`) after validation
-8. Delete local cache
+3. **Repair+pack** (default on): two streaming passes over the source JSONL (no intermediate repaired JSONL). Dedup, collapse FDM plateaus (keep first of each; from `_fdm_` in the filename), align `selected_*` to mask diffs, **drop the trailing step (all schedulers)**, rebuild `unmasking_order`, write NPZ. Use `--workers N` to repair samples in a process pool. Conversion is **blocked** if repair is required but disabled (`--no-repair`), or if issues remain after repair (`status: repair_blocked`).
+4. Stream-audit the NPZ, spot-check round-trip on a few repaired samples, upload, optional JSONL delete, cleanup.
 
-Disable repair with `--no-repair` on convert commands (blocks conversion when repair would be needed).
+Stage timings log at INFO (`download`, `repair+pack`, `post-repair audit`, `roundtrip`, `upload`). NPZ write uses deflate level `TRACE_NPZ_COMPRESSLEVEL` (default `1`, faster than numpy’s old default); set `TRACE_NPZ_COMPRESS=0` for uncompressed (fastest, larger).
+
+Disable repair with `--no-repair` on convert commands (blocks conversion when repair would be needed; falls back to plain pack).
 
 `convert-all` resume (default) skips `status=ok` rows but **automatically retries** `repair_blocked`, `roundtrip_failed`, and `convert_failed` rows. Use `--no-retry-errors` to keep failed rows skipped.
 
+### 4. Repair existing NPZs (NPZ → NPZ)
+
+For archives already on Hub (or local) that need the selection/mask-diff alignment:
+
+```bash
+# Local
+python traces/trace_audit.py repair-npz-local path/to/file.npz -o path/to/fixed.npz
+
+# Hub (re-upload to same or --output-repo)
+python traces/trace_audit.py repair-npz llada-100m-pcfg-pcfg_dus_s128.npz --repo llada-pcfg-traces
+python traces/trace_audit.py repair-npz-all --repo llada-pcfg-traces -o fetch_evals/trace_repair_npz.csv
+```
+
+Skips clean files unless `--force`. Writes `fetch_evals/trace_repair_npz.csv` for batch runs.
+
 ---
+
+FDM nested hypothesis forwards use `suppress_step_recording()` so they do not open extra `step_traces` (live fix; archive repair still collapses any older phantom plateaus).
 
 ## Testing (hooks)
 
@@ -149,4 +168,5 @@ JSONL pack batching (convert): `TRACE_PACK_MEMORY_FRACTION` (default `0.25` of f
 
 ## SchedulerLens
 
-See [schedulerlens.md](schedulerlens.md). Traces with complete `selected_positions` give accurate M̂/Ĵ caps. Repaired or inferrable traces work after NPZ conversion.
+See [schedulerlens.md](schedulerlens.md). SchedulerLens reads `.npz` archives only (single-run or HF compare). Traces with complete `selected_positions` give accurate M̂/Ĵ caps; missing selection is inferrable from mask diffs, otherwise the run fails hard.
+

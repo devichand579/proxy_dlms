@@ -9,7 +9,7 @@ Suffix eval (test split, lm-eval-style prefix + masked suffix):
   - suffix_exact_match, suffix_structural_accuracy
   - build_prompt_suffix_eval_plan / build_prompt_suffix_batch
 
-Trace/oracle metrics (Mt, Jt, commit NLL) live in schedulerlens.pcfg_oracle.
+Trace/oracle metrics (Mt, Jt, commit NLL) live in schedulerlens.oracle.
 """
 from __future__ import annotations
 

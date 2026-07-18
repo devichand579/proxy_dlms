@@ -11,7 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .pos_analysis import PosTaskMetrics
+from schedulerlens.pos import PosTaskMetrics
 
 PosPlotPaths = Tuple[Path, Path, Optional[Path], Optional[Path]]
 

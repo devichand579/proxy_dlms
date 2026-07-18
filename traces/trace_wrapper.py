@@ -14,6 +14,28 @@ from traces.utils import is_negative_inf, was_position_masked, was_positions_mas
 # When set by eval.py, sample traces are appended here and written as one file per task. No per-sample save/upload.
 _task_trace_list_ctx: contextvars.ContextVar[Optional[List]] = contextvars.ContextVar("task_trace_list", default=None)
 
+# When True, model.forward still runs but does not open a new traced step.
+# Used by FDM (and similar) nested hypothesis forwards so they do not inflate n_steps.
+_suppress_step_trace_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "suppress_step_trace", default=False
+)
+
+
+class suppress_step_recording:
+    """Skip traced step opens for nested model forwards (e.g. FDM hypotheses).
+
+    Nestable via ContextVar tokens. The forward still runs; only step recording
+    and ``_last_x`` / ``_last_logits`` updates are suppressed.
+    """
+
+    def __enter__(self):
+        self._token = _suppress_step_trace_ctx.set(True)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        _suppress_step_trace_ctx.reset(self._token)
+        return False
+
 
 class ModelTracer:
     """Wraps a scheduler to record generation traces."""
@@ -58,6 +80,11 @@ class ModelTracer:
         
         def traced_forward(*args, **kwargs):
             output = original_forward(*args, **kwargs)
+
+            # Nested hyp / probe forwards (e.g. FDM) must not open steps or clobber
+            # _last_x / _last_logits used for transfer detection on the real decode step.
+            if _suppress_step_trace_ctx.get():
+                return output
 
             if len(args) > 0:
                 x = args[0] if _is_tensor_like(args[0]) else None

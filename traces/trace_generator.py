@@ -466,11 +466,18 @@ class TracingContext:
         x0_gen = x0[:, gen_region_slice(pl, pl + gl)]
 
         step_trace = self.trace.step_traces[-1]
-        step_trace.selected_positions = transfer_gen.clone()
-
-        selected_tokens = torch.zeros_like(x0_gen)
-        selected_tokens[transfer_gen] = x0_gen[transfer_gen]
-        step_trace.selected_tokens = selected_tokens.clone()
+        # DUS (and similar) write x[b, pos] in a loop — each write hits this hook.
+        # OR into the step's selection instead of replacing, or only the last pos is kept.
+        if step_trace.selected_positions is None:
+            step_trace.selected_positions = transfer_gen.clone()
+            selected_tokens = torch.zeros_like(x0_gen)
+            selected_tokens[transfer_gen] = x0_gen[transfer_gen]
+            step_trace.selected_tokens = selected_tokens.clone()
+        else:
+            step_trace.selected_positions = step_trace.selected_positions | transfer_gen
+            if step_trace.selected_tokens is None:
+                step_trace.selected_tokens = torch.zeros_like(x0_gen)
+            step_trace.selected_tokens[transfer_gen] = x0_gen[transfer_gen]
 
         positions = torch.nonzero(transfer_gen[0], as_tuple=False).squeeze(-1)
         if positions.dim() == 0:

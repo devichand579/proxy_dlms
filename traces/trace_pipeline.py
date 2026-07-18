@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -30,8 +31,10 @@ from traces.trace_checks import (
     conversion_repair_blockers,
     deduplicate_prompt_traces,
     stream_repair_jsonl,
+    stream_repair_npz,
     trace_needs_repair,
     validate_npz_roundtrip,
+    validate_npz_roundtrip_indexed,
 )
 from traces.trace_metrics import (
     compare_pcfg_metrics_row,
@@ -45,14 +48,28 @@ from traces.trace_npz import (
     compression_ratio,
     convert_jsonl_to_npz,
     load_trace_samples,
+    pack_repaired_jsonl_to_npz,
     read_jsonl_task_name,
+    read_npz_task_name,
 )
 
 logger = logging.getLogger(__name__)
 
+
+def _stage(label: str, t0: float, **extra: Any) -> float:
+    """Log elapsed seconds for a pipeline stage; return duration."""
+    dt = time.perf_counter() - t0
+    extras = " ".join(f"{k}={v}" for k, v in extra.items() if v is not None)
+    if extras:
+        logger.info("%s done in %.1fs (%s)", label, dt, extras)
+    else:
+        logger.info("%s done in %.1fs", label, dt)
+    return dt
+
 DEFAULT_METRICS_CSV = Path(__file__).resolve().parent.parent / "fetch_evals/strace_metrics.csv"
 DEFAULT_AUDIT_CSV = Path(__file__).resolve().parent.parent / "fetch_evals/trace_audit_flagged.csv"
 DEFAULT_CONVERT_CSV = Path(__file__).resolve().parent.parent / "fetch_evals/trace_convert.csv"
+DEFAULT_REPAIR_NPZ_CSV = Path(__file__).resolve().parent.parent / "fetch_evals/trace_repair_npz.csv"
 
 _CODE_EVAL_TASKS = frozenset({"humaneval", "openai_humaneval", "mbpp"})
 _METRIC_DELTA_FLAG_THRESHOLD = 0.02
@@ -124,6 +141,10 @@ def _load_done_names(csv_path: Path, name_field: str = "name") -> set[str]:
 
 def _should_retry_convert_row(row: dict[str, Any]) -> bool:
     return str(row.get("status") or "") != "ok"
+
+
+def _should_retry_repair_npz_row(row: dict[str, Any]) -> bool:
+    return str(row.get("status") or "") not in ("ok", "skipped_clean")
 
 
 def _load_existing_convert_rows(
@@ -256,6 +277,25 @@ def compute_audit_flags(row: dict[str, Any]) -> tuple[str, bool]:
         flags.append("AUDIT_FAILED")
     if row.get("transfer_status") == "missing_transfer":
         flags.append("MISSING_TRANSFER")
+    try:
+        if int(row.get("samples_selection_mask_mismatch") or 0) > 0:
+            flags.append("SELECTION_MASK_MISMATCH")
+    except (TypeError, ValueError):
+        pass
+    if "selection/mask-diff count mismatch" in issues:
+        if "SELECTION_MASK_MISMATCH" not in flags:
+            flags.append("SELECTION_MASK_MISMATCH")
+    try:
+        if int(row.get("samples_phantom_steps") or 0) > 0:
+            flags.append("PHANTOM_STEPS")
+        if int(row.get("samples_untrimmed_tail") or 0) > 0:
+            flags.append("UNTRIMMED_TAIL")
+    except (TypeError, ValueError):
+        pass
+    if "phantom extra steps" in issues and "PHANTOM_STEPS" not in flags:
+        flags.append("PHANTOM_STEPS")
+    if "untrimmed trailing step" in issues and "UNTRIMMED_TAIL" not in flags:
+        flags.append("UNTRIMMED_TAIL")
 
     sample_delta = _sample_count_delta_value(row)
     if sample_delta not in (None, 0):
@@ -332,6 +372,9 @@ AUDIT_CSV_FIELDS = [
     "samples_with_any_selected",
     "samples_with_all_selected",
     "samples_missing_required",
+    "samples_selection_mask_mismatch",
+    "samples_phantom_steps",
+    "samples_untrimmed_tail",
     "unique_prompts",
     "duplicate_traces",
     "removable_duplicates",
@@ -366,6 +409,21 @@ CONVERT_CSV_FIELDS = [
     "compression_ratio",
     "roundtrip_ok",
     "jsonl_deleted_on_hub",
+    "issues",
+]
+
+REPAIR_NPZ_CSV_FIELDS = [
+    "name",
+    "npz_filename",
+    "source_repo",
+    "output_repo",
+    "status",
+    "transfer_status",
+    "repaired",
+    "n_samples",
+    "npz_bytes_in",
+    "npz_bytes_out",
+    "roundtrip_ok",
     "issues",
 ]
 
@@ -455,16 +513,27 @@ def audit_one_hub_file(
         meta = load_metrics_lookup(metrics_csv).get(name, {})
     except FileNotFoundError:
         pass
+    t_all = time.perf_counter()
+    logger.info("audit %s (%s) from %s", filename, source_format, full_repo)
+    t0 = time.perf_counter()
     sizes = file_sizes([filename], repo_id=full_repo, revision=rev, token=token)
+    _stage("hub size lookup", t0)
 
     temp_dir: Path | None = None
     try:
+        t0 = time.perf_counter()
         path, temp_dir = download_file_to_temp(
             filename, repo_id=full_repo, revision=rev, token=token
+        )
+        _stage(
+            "download",
+            t0,
+            mb=f"{path.stat().st_size / 1e6:.1f}",
         )
         name_is_pcfg = is_pcfg_trace(name, first_metadata=None)
         need_full_samples = compute_accuracy and not name_is_pcfg
 
+        t0 = time.perf_counter()
         if source_format == "jsonl":
             check = check_trace_jsonl_streaming(
                 path,
@@ -485,11 +554,24 @@ def audit_one_hub_file(
                 name_is_pcfg = is_pcfg_trace(name, first_metadata=check.first_metadata)
             if name_is_pcfg or not compute_accuracy:
                 need_full_samples = False
+        _stage(
+            "stream check",
+            t0,
+            n=check.n_samples,
+            checked=check.samples_checked,
+            transfer=check.transfer_status,
+            sel_mm=check.samples_selection_mask_mismatch,
+            phantom=check.samples_phantom_steps,
+            untrimmed=check.samples_untrimmed_tail,
+        )
 
         samples: list[dict] | None = None
         if need_full_samples:
+            t0 = time.perf_counter()
             _, samples = load_trace_samples(path)
+            _stage("load samples for accuracy", t0, n=len(samples) if samples else 0)
 
+        t0 = time.perf_counter()
         metrics_cmp = _metrics_for_audit(
             name=name,
             check=check,
@@ -500,6 +582,12 @@ def audit_one_hub_file(
             pcfg_hf_dataset=pcfg_hf_dataset,
             pcfg_hf_namespace=pcfg_hf_namespace,
             token=token,
+        )
+        _stage(
+            "metrics",
+            t0,
+            pcfg=name_is_pcfg,
+            accuracy=compute_accuracy and not name_is_pcfg,
         )
     finally:
         if temp_dir is not None:
@@ -517,7 +605,16 @@ def audit_one_hub_file(
         "steps_cfg": meta.get("steps", ""),
         **metrics_cmp,
     })
-    return annotate_audit_row(row)
+    annotated = annotate_audit_row(row)
+    logger.info(
+        "audit %s: transfer=%s is_bad=%s flags=%s total=%.1fs",
+        filename,
+        annotated.get("transfer_status"),
+        annotated.get("is_bad"),
+        annotated.get("audit_flags") or "",
+        time.perf_counter() - t_all,
+    )
+    return annotated
 
 
 def run_audit_all(
@@ -572,6 +669,15 @@ def run_audit_all(
     else:
         rows, done = [], set()
 
+    logger.info(
+        "audit-all: %d files on %s (jsonl=%s npz=%s accuracy=%s)",
+        len(filenames),
+        inv["repo"],
+        include_jsonl,
+        include_npz,
+        compute_accuracy,
+    )
+    t_batch = time.perf_counter()
     for i, filename in enumerate(filenames):
         if filename in done:
             continue
@@ -607,6 +713,14 @@ def run_audit_all(
             })
         rows.append(row)
         _write_csv_rows(rows, output_csv, AUDIT_CSV_FIELDS)
+    n_bad = sum(1 for r in rows if r.get("is_bad") in (True, "True", "true", "1"))
+    logger.info(
+        "audit-all done: rows=%d bad=%d total=%.1fs -> %s",
+        len(rows),
+        n_bad,
+        time.perf_counter() - t_batch,
+        output_csv,
+    )
     return rows
 
 
@@ -620,10 +734,11 @@ def convert_one_hub_file(
     revision: Optional[str] = None,
     repair: bool = True,
     delete_jsonl_on_hub: bool = False,
+    workers: int = 1,
     token: bool | str | None = True,
 ) -> dict[str, Any]:
     """
-    Download JSONL -> audit -> optional repair -> NPZ -> validate -> upload NPZ -> cleanup.
+    Download JSONL -> repair+pack (default) -> validate -> upload NPZ -> cleanup.
     Optionally delete JSONL from the source Hub after successful validation.
     """
     source_repo = resolve_repo(repo_id, namespace)
@@ -637,69 +752,145 @@ def convert_one_hub_file(
     name = _stem(filename)
     npz_name = f"{name}.npz"
     issues: list[str] = []
+    t_all = time.perf_counter()
 
     temp_dir: Path | None = None
     try:
+        logger.info("convert %s: download from %s", filename, source_repo)
+        t0 = time.perf_counter()
         path, temp_dir = download_file_to_temp(
             filename, repo_id=source_repo, revision=rev, token=token
         )
         jsonl_bytes = path.stat().st_size
-        check = check_trace_jsonl_streaming(path, max_samples=3)
+        _stage("download", t0, mb=f"{jsonl_bytes / 1e6:.1f}")
+
         task_name = read_jsonl_task_name(path)
-        convert_path = path
         repaired = False
         ratio = 0.0
         npz_bytes = 0
         jsonl_deleted = False
+        check: TraceCheck
 
         with tempfile.TemporaryDirectory(prefix="trace_npz_") as tmp:
             work = Path(tmp)
+            npz_local = work / npz_name
 
-            if repair and trace_needs_repair(check, None):
-                jsonl_work = work / filename
-                _, repairs, repaired_task = stream_repair_jsonl(path, jsonl_work)
-                if repairs:
-                    repaired = True
-                    issues.extend(repairs[:20])
-                    if len(repairs) > 20:
-                        issues.append(f"... and {len(repairs) - 20} more repairs")
-                convert_path = jsonl_work
-                if repaired_task is not None:
-                    task_name = repaired_task
-                check = check_trace_jsonl_streaming(convert_path, max_samples=3)
+            if repair:
+                # Repair while packing — no intermediate repaired JSONL rewrite.
+                t0 = time.perf_counter()
+                packed = pack_repaired_jsonl_to_npz(
+                    path,
+                    npz_local,
+                    task_name=task_name,
+                    workers=workers,
+                )
+                _stage(
+                    "repair+pack",
+                    t0,
+                    n=packed.n_samples,
+                    repairs=len(packed.repairs),
+                )
+                repaired = bool(packed.repairs)
+                if packed.repairs:
+                    issues.extend(packed.repairs[:20])
+                    if len(packed.repairs) > 20:
+                        issues.append(f"... and {len(packed.repairs) - 20} more repairs")
+                if packed.task_name is not None:
+                    task_name = packed.task_name
+                npz_bytes = npz_local.stat().st_size
+                ratio = compression_ratio(path, npz_local)
 
-            repair_blockers = conversion_repair_blockers(
-                check,
-                None,
-                repair_enabled=repair,
-            )
-            if repair_blockers:
-                issues.extend(repair_blockers)
-                return _convert_failure_row(
-                    name=name,
-                    filename=filename,
-                    npz_name=npz_name,
-                    source_repo=source_repo,
-                    output_repo=output_repo,
-                    status="repair_blocked",
-                    check=check,
-                    repaired=repaired,
-                    n_samples=check.n_samples,
-                    jsonl_bytes=jsonl_bytes,
-                    issues=issues,
+                t0 = time.perf_counter()
+                check = check_trace_npz_streaming(npz_local, max_samples=3)
+                _stage(
+                    "post-repair audit",
+                    t0,
+                    transfer=check.transfer_status,
+                    phantom=check.samples_phantom_steps,
+                    untrimmed=check.samples_untrimmed_tail,
                 )
 
-            npz_local = work / npz_name
-            convert_jsonl_to_npz(convert_path, npz_local, task_name=task_name)
-            ratio = compression_ratio(convert_path, npz_local)
-            npz_bytes = npz_local.stat().st_size
+                repair_blockers = conversion_repair_blockers(
+                    check,
+                    None,
+                    repair_enabled=True,
+                )
+                if repair_blockers:
+                    issues.extend(repair_blockers)
+                    logger.warning(
+                        "convert %s: repair_blocked (%s)",
+                        filename,
+                        "; ".join(repair_blockers),
+                    )
+                    return _convert_failure_row(
+                        name=name,
+                        filename=filename,
+                        npz_name=npz_name,
+                        source_repo=source_repo,
+                        output_repo=output_repo,
+                        status="repair_blocked",
+                        check=check,
+                        repaired=repaired,
+                        n_samples=check.n_samples,
+                        jsonl_bytes=jsonl_bytes,
+                        npz_bytes=npz_bytes,
+                        compression_ratio=f"{ratio:.2f}",
+                        issues=issues,
+                    )
 
-            roundtrip_issues = validate_npz_roundtrip(convert_path, npz_local)
+                t0 = time.perf_counter()
+                roundtrip_issues = validate_npz_roundtrip_indexed(
+                    packed.roundtrip_samples,
+                    npz_local,
+                    n_samples=packed.n_samples,
+                )
+            else:
+                t0 = time.perf_counter()
+                check = check_trace_jsonl_streaming(path, max_samples=3)
+                _stage("pre-pack audit", t0, transfer=check.transfer_status)
+
+                repair_blockers = conversion_repair_blockers(
+                    check,
+                    None,
+                    repair_enabled=False,
+                )
+                if repair_blockers:
+                    issues.extend(repair_blockers)
+                    return _convert_failure_row(
+                        name=name,
+                        filename=filename,
+                        npz_name=npz_name,
+                        source_repo=source_repo,
+                        output_repo=output_repo,
+                        status="repair_blocked",
+                        check=check,
+                        repaired=False,
+                        n_samples=check.n_samples,
+                        jsonl_bytes=jsonl_bytes,
+                        issues=issues,
+                    )
+
+                t0 = time.perf_counter()
+                convert_jsonl_to_npz(path, npz_local, task_name=task_name)
+                _stage("pack", t0, n=check.n_samples)
+                ratio = compression_ratio(path, npz_local)
+                npz_bytes = npz_local.stat().st_size
+
+                t0 = time.perf_counter()
+                roundtrip_issues = validate_npz_roundtrip(path, npz_local)
+
             roundtrip_ok = not roundtrip_issues
+            _stage(
+                "roundtrip",
+                t0,
+                ok=roundtrip_ok,
+                issues=len(roundtrip_issues),
+            )
             if roundtrip_issues:
                 issues.extend(roundtrip_issues)
 
             if not roundtrip_ok:
+                logger.warning("convert %s: roundtrip_failed", filename)
                 return _convert_failure_row(
                     name=name,
                     filename=filename,
@@ -723,6 +914,7 @@ def convert_one_hub_file(
                     private=trace_hf_dataset_private(),
                 )
 
+            t0 = time.perf_counter()
             upload_file(
                 npz_local,
                 npz_name,
@@ -731,8 +923,10 @@ def convert_one_hub_file(
                 token=token,
                 commit_message=f"NPZ trace {npz_name} ({npz_bytes} bytes)",
             )
+            _stage("upload", t0, mb=f"{npz_bytes / 1e6:.1f}", repo=output_repo)
 
             if delete_jsonl_on_hub:
+                t0 = time.perf_counter()
                 delete_file(
                     filename,
                     repo_id=source_repo,
@@ -741,7 +935,15 @@ def convert_one_hub_file(
                     commit_message=f"remove JSONL after NPZ validated: {filename}",
                 )
                 jsonl_deleted = True
+                _stage("delete-jsonl", t0)
 
+        logger.info(
+            "convert %s: ok n=%d ratio=%s total=%.1fs",
+            filename,
+            check.n_samples,
+            f"{ratio:.2f}",
+            time.perf_counter() - t_all,
+        )
         return {
             "name": name,
             "jsonl_filename": filename,
@@ -778,6 +980,7 @@ def run_convert_all(
     limit: Optional[int] = None,
     resume: bool = True,
     retry_errors: bool = True,
+    workers: int = 1,
     token: bool | str | None = True,
 ) -> list[dict[str, Any]]:
     inv = hub_inventory(repo_id=repo_id, namespace=namespace, revision=revision, token=token)
@@ -808,14 +1011,26 @@ def run_convert_all(
     else:
         rows, done = [], set()
 
+    logger.info(
+        "convert-all: %d jsonl on %s -> %s (resume=%s repair=%s)",
+        len(filenames),
+        inv["repo"],
+        output_repo,
+        resume,
+        repair,
+    )
+    t_batch = time.perf_counter()
+    n_ok = n_fail = n_skip = 0
     for i, filename in enumerate(filenames):
         name = _stem(filename)
         if name in done:
+            n_skip += 1
             continue
         if resume and retry_errors:
             rows = [row for row in rows if row.get("name") != name]
         if skip_existing_npz and f"{name}.npz" in present_npz:
             logger.info("skip %s (npz already on %s)", name, output_repo)
+            n_skip += 1
             continue
         logger.info("[%d/%d] convert %s -> %s", i + 1, len(filenames), filename, output_repo)
         try:
@@ -827,6 +1042,7 @@ def run_convert_all(
                 output_namespace=output_namespace,
                 repair=repair,
                 delete_jsonl_on_hub=delete_jsonl_on_hub,
+                workers=workers,
                 token=token,
             )
         except Exception as exc:
@@ -848,8 +1064,21 @@ def run_convert_all(
                 "jsonl_deleted_on_hub": False,
                 "issues": f"convert failed: {exc}",
             }
+        if row.get("status") == "ok":
+            n_ok += 1
+        else:
+            n_fail += 1
         rows.append(row)
         _write_csv_rows(rows, output_csv, CONVERT_CSV_FIELDS)
+    logger.info(
+        "convert-all done: ok=%d fail=%d skip=%d rows=%d total=%.1fs -> %s",
+        n_ok,
+        n_fail,
+        n_skip,
+        len(rows),
+        time.perf_counter() - t_batch,
+        output_csv,
+    )
     return rows
 
 
@@ -877,16 +1106,275 @@ def print_inventory(report: dict[str, Any]) -> int:
     return 0 if complete else 2
 
 
+def repair_one_hub_npz(
+    filename: str,
+    *,
+    repo_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    output_repo_id: Optional[str] = None,
+    output_namespace: Optional[str] = None,
+    revision: Optional[str] = None,
+    force: bool = False,
+    workers: int = 1,
+    token: bool | str | None = True,
+) -> dict[str, Any]:
+    """Download NPZ → repair (phantoms/mask-diff/trim) → validate → re-upload."""
+    source_repo = resolve_repo(repo_id, namespace)
+    output_repo = _resolve_output_repo(
+        repo_id=repo_id,
+        namespace=namespace,
+        output_repo_id=output_repo_id,
+        output_namespace=output_namespace,
+    )
+    rev = revision if revision is not None else trace_hf_revision()
+    name = _stem(filename)
+    if not filename.endswith(".npz"):
+        filename = f"{name}.npz"
+    issues: list[str] = []
+    t_all = time.perf_counter()
+    temp_dir: Path | None = None
+    try:
+        logger.info("repair-npz %s from %s", filename, source_repo)
+        t0 = time.perf_counter()
+        path, temp_dir = download_file_to_temp(
+            filename, repo_id=source_repo, revision=rev, token=token
+        )
+        npz_bytes_in = path.stat().st_size
+        _stage("download", t0, mb=f"{npz_bytes_in / 1e6:.1f}")
+        t0 = time.perf_counter()
+        check = check_trace_npz_streaming(path, max_samples=3)
+        _stage(
+            "pre-repair audit",
+            t0,
+            transfer=check.transfer_status,
+            needs_repair=trace_needs_repair(check, None),
+        )
+        if not force and not trace_needs_repair(check, None):
+            logger.info("repair-npz %s: skipped_clean (%.1fs)", filename, time.perf_counter() - t_all)
+            return {
+                "name": name,
+                "npz_filename": filename,
+                "source_repo": source_repo,
+                "output_repo": output_repo,
+                "status": "skipped_clean",
+                "transfer_status": check.transfer_status,
+                "repaired": False,
+                "n_samples": check.n_samples,
+                "npz_bytes_in": npz_bytes_in,
+                "npz_bytes_out": npz_bytes_in,
+                "roundtrip_ok": True,
+                "issues": "",
+            }
+
+        with tempfile.TemporaryDirectory(prefix="trace_repair_npz_") as tmp:
+            work = Path(tmp)
+            out_local = work / filename
+            t0 = time.perf_counter()
+            n_samples, repairs, _task_name, repaired_samples = stream_repair_npz(
+                path,
+                out_local,
+                task_name=read_npz_task_name(path),
+                workers=workers,
+            )
+            _stage("repair+repack", t0, n=n_samples, repairs=len(repairs))
+            if repairs:
+                issues.extend(repairs[:20])
+                if len(repairs) > 20:
+                    issues.append(f"... and {len(repairs) - 20} more repairs")
+
+            t0 = time.perf_counter()
+            check_after = check_trace_npz_streaming(out_local, max_samples=3)
+            _stage("post-repair audit", t0, transfer=check_after.transfer_status)
+            blockers = conversion_repair_blockers(
+                check_after, None, repair_enabled=True
+            )
+            if blockers:
+                issues.extend(blockers)
+                logger.warning("repair-npz %s: repair_blocked", filename)
+                return {
+                    "name": name,
+                    "npz_filename": filename,
+                    "source_repo": source_repo,
+                    "output_repo": output_repo,
+                    "status": "repair_blocked",
+                    "transfer_status": check_after.transfer_status,
+                    "repaired": bool(repairs),
+                    "n_samples": n_samples,
+                    "npz_bytes_in": npz_bytes_in,
+                    "npz_bytes_out": out_local.stat().st_size,
+                    "roundtrip_ok": False,
+                    "issues": "; ".join(issues) if issues else "",
+                }
+
+            t0 = time.perf_counter()
+            roundtrip_issues = validate_npz_roundtrip(repaired_samples, out_local)
+            roundtrip_ok = not roundtrip_issues
+            _stage("roundtrip", t0, ok=roundtrip_ok)
+            if roundtrip_issues:
+                issues.extend(roundtrip_issues[:20])
+                return {
+                    "name": name,
+                    "npz_filename": filename,
+                    "source_repo": source_repo,
+                    "output_repo": output_repo,
+                    "status": "roundtrip_failed",
+                    "transfer_status": check_after.transfer_status,
+                    "repaired": True,
+                    "n_samples": n_samples,
+                    "npz_bytes_in": npz_bytes_in,
+                    "npz_bytes_out": out_local.stat().st_size,
+                    "roundtrip_ok": False,
+                    "issues": "; ".join(issues) if issues else "",
+                }
+
+            if output_repo != source_repo:
+                ensure_dataset_repo(
+                    output_repo,
+                    token=token,
+                    private=trace_hf_dataset_private(),
+                )
+            t0 = time.perf_counter()
+            upload_file(
+                out_local,
+                filename,
+                repo_id=output_repo,
+                revision=rev,
+                token=token,
+                commit_message=f"NPZ repair {filename} (selection/mask-diff align)",
+            )
+            out_bytes = out_local.stat().st_size
+            _stage("upload", t0, mb=f"{out_bytes / 1e6:.1f}", repo=output_repo)
+            logger.info(
+                "repair-npz %s: ok n=%d total=%.1fs",
+                filename,
+                n_samples,
+                time.perf_counter() - t_all,
+            )
+            return {
+                "name": name,
+                "npz_filename": filename,
+                "source_repo": source_repo,
+                "output_repo": output_repo,
+                "status": "ok",
+                "transfer_status": check_after.transfer_status,
+                "repaired": True,
+                "n_samples": n_samples,
+                "npz_bytes_in": npz_bytes_in,
+                "npz_bytes_out": out_bytes,
+                "roundtrip_ok": roundtrip_ok,
+                "issues": "; ".join(issues) if issues else "",
+            }
+    finally:
+        if temp_dir is not None:
+            remove_temp_download(temp_dir)
+
+
+def run_repair_npz_all(
+    *,
+    repo_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    output_repo_id: Optional[str] = None,
+    output_namespace: Optional[str] = None,
+    revision: Optional[str] = None,
+    output_csv: str | Path | None = None,
+    force: bool = False,
+    limit: Optional[int] = None,
+    resume: bool = True,
+    retry_errors: bool = True,
+    workers: int = 1,
+    token: bool | str | None = True,
+) -> list[dict[str, Any]]:
+    """Repair Hub NPZs that need repair (or ``--force`` all)."""
+    inv = hub_inventory(repo_id=repo_id, namespace=namespace, revision=revision, token=token)
+    cleanup_repo_cache(inv["repo"], revision=inv["revision"])
+    output_repo = _resolve_output_repo(
+        repo_id=repo_id,
+        namespace=namespace,
+        output_repo_id=output_repo_id,
+        output_namespace=output_namespace,
+    )
+    filenames = list(inv["npz_files"])
+    if limit is not None:
+        filenames = filenames[:limit]
+
+    output_csv = Path(output_csv or DEFAULT_REPAIR_NPZ_CSV)
+    if resume and output_csv.is_file():
+        with open(output_csv, newline="", encoding="utf-8") as f:
+            rows = [dict(row) for row in csv.DictReader(f)]
+        done = {
+            row["name"]
+            for row in rows
+            if row.get("name") and not (retry_errors and _should_retry_repair_npz_row(row))
+        }
+    else:
+        rows, done = [], set()
+
+    for i, filename in enumerate(filenames):
+        name = _stem(filename)
+        if name in done:
+            continue
+        if resume and retry_errors:
+            rows = [row for row in rows if row.get("name") != name]
+        logger.info("[%d/%d] repair-npz %s -> %s", i + 1, len(filenames), filename, output_repo)
+        try:
+            row = repair_one_hub_npz(
+                filename,
+                repo_id=inv["repo"],
+                revision=inv["revision"],
+                output_repo_id=output_repo_id,
+                output_namespace=output_namespace,
+                force=force,
+                workers=workers,
+                token=token,
+            )
+        except Exception as exc:
+            logger.error("[%d/%d] FAILED %s: %s", i + 1, len(filenames), filename, exc)
+            row = {
+                "name": name,
+                "npz_filename": filename if filename.endswith(".npz") else f"{name}.npz",
+                "source_repo": inv["repo"],
+                "output_repo": output_repo,
+                "status": "repair_failed",
+                "transfer_status": "",
+                "repaired": False,
+                "n_samples": 0,
+                "npz_bytes_in": 0,
+                "npz_bytes_out": 0,
+                "roundtrip_ok": False,
+                "issues": f"repair failed: {exc}",
+            }
+        rows.append(row)
+        _write_csv_rows(rows, output_csv, REPAIR_NPZ_CSV_FIELDS)
+    return rows
+
+
 def print_check(check: TraceCheck) -> None:
     print(f"path: {check.path}")
     print(f"format: {check.format}")
     print(f"size: {check.size_bytes / 1e6:.2f} MB")
     print(f"samples: {check.n_samples} (checked {check.samples_checked})")
     print(f"transfer_status: {check.transfer_status} hooks_ok={check.hooks_ok}")
+    if check.any_selection_mask_mismatch:
+        print(
+            f"selection_mask_mismatch: {check.samples_selection_mask_mismatch} "
+            "checked sample(s) (repairable)"
+        )
+    if check.any_phantom_steps:
+        print(
+            f"phantom_steps: {check.samples_phantom_steps} "
+            "checked sample(s) (repairable)"
+        )
+    if check.any_untrimmed_tail:
+        print(
+            f"untrimmed_tail: {check.samples_untrimmed_tail} "
+            "checked sample(s) (repairable; all schedulers)"
+        )
     for s in check.sample_checks:
         print(
             f"  sample {s.index}: steps={s.n_steps} sel_steps={s.steps_with_selected} "
-            f"inferred={s.inferred_unmasks} proxy_ready={s.proxy_ready}"
+            f"inferred={s.inferred_unmasks} sel_mismatch={s.selection_mask_mismatches} "
+            f"phantom_extra={s.phantom_extra_steps} tail_trimmed={s.tail_trimmed} "
+            f"proxy_ready={s.proxy_ready}"
         )
         if s.issues:
             print(f"    issues: {'; '.join(s.issues)}")

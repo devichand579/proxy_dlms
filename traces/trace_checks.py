@@ -1,13 +1,16 @@
-"""Trace content validation, repair, and NPZ round-trip checks."""
+"""Trace validation, repair (mask-diff / phantoms / trim), and NPZ round-trip checks."""
 
 from __future__ import annotations
 
 import copy
 import json
+import logging
+import time
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, Literal, Optional
 
 import numpy as np
 
@@ -17,9 +20,28 @@ from traces.trace_npz import (
     load_trace_samples,
     read_jsonl_sample_at_index,
 )
+from traces.utils import as_gen_vec, is_fdm_trace_name, squeeze_len, squeeze_to_1d
+
+logger = logging.getLogger(__name__)
 
 STEP_FIELDS_REQUIRED = ("mask_index", "predictions", "confidences", "entropies")
 STEP_FIELDS_OPTIONAL = ("selected_positions", "selected_tokens")
+# Survives NPZ via sample metadata sidecar; set after repair drops the trailing step.
+TRIMMED_TAIL_KEY = "schedulerlens_trimmed_tail"
+
+
+def sample_tail_trimmed(sample: dict) -> bool:
+    if bool(sample.get(TRIMMED_TAIL_KEY)):
+        return True
+    meta = sample.get("metadata") or {}
+    return bool(meta.get(TRIMMED_TAIL_KEY))
+
+
+def mark_sample_tail_trimmed(sample: dict) -> None:
+    sample[TRIMMED_TAIL_KEY] = True
+    meta = dict(sample.get("metadata") or {})
+    meta[TRIMMED_TAIL_KEY] = True
+    sample["metadata"] = meta
 
 
 @dataclass
@@ -32,6 +54,9 @@ class SampleCheck:
     steps_null_optional: int = 0
     steps_with_selected: int = 0
     inferred_unmasks: int = 0
+    selection_mask_mismatches: int = 0
+    phantom_extra_steps: int = 0
+    tail_trimmed: bool = False
     proxy_ready: bool = False
     inferrable: bool = False
     has_final_sequence: bool = False
@@ -56,6 +81,9 @@ class TraceCheck:
     removable_duplicates: int = 0
     ambiguous_duplicate_prompts: int = 0
     any_missing_unmasking_order: bool = False
+    samples_selection_mask_mismatch: int = 0
+    samples_phantom_steps: int = 0
+    samples_untrimmed_tail: int = 0
     first_metadata: Optional[dict] = None
     pcfg_sample_indices: Optional[list[int]] = None
     issues: list[str] = field(default_factory=list)
@@ -80,27 +108,125 @@ class TraceCheck:
     def hooks_ok(self) -> bool:
         return self.transfer_status in ("explicit_all", "explicit_partial", "inferrable")
 
+    @property
+    def any_selection_mask_mismatch(self) -> bool:
+        return self.samples_selection_mask_mismatch > 0
 
-def _squeeze_len(data) -> Optional[int]:
-    if data is None:
+    @property
+    def any_phantom_steps(self) -> bool:
+        return self.samples_phantom_steps > 0
+
+    @property
+    def any_untrimmed_tail(self) -> bool:
+        return self.samples_untrimmed_tail > 0
+
+
+# Back-compat aliases for internal call sites / tests.
+_squeeze_len = squeeze_len
+_gen_vec = as_gen_vec
+
+
+def mask_diff_selection(steps: list[dict], t: int, *, gen_length: int) -> Optional[np.ndarray]:
+    """Boolean length-G mask of positions unmasked between step t and t+1."""
+    if t < 0 or t + 1 >= len(steps) or gen_length <= 0:
         return None
-    arr = np.asarray(data)
-    while arr.ndim > 1:
-        arr = arr[0]
-    return int(arr.shape[0])
+    mask0 = as_gen_vec(steps[t].get("mask_index"), gen_length=gen_length, dtype=np.bool_)
+    mask1 = as_gen_vec(steps[t + 1].get("mask_index"), gen_length=gen_length, dtype=np.bool_)
+    if mask0 is None or mask1 is None:
+        return None
+    return mask0 & ~mask1
+
+
+def _unmasked_frozenset(step: dict, *, gen_length: int) -> Optional[frozenset[int]]:
+    mask = as_gen_vec(step.get("mask_index"), gen_length=gen_length, dtype=np.bool_)
+    if mask is None:
+        return None
+    return frozenset(int(p) for p in np.where(~mask)[0].tolist())
+
+
+def permanent_still_sets(steps: list[dict], *, gen_length: int) -> list[Optional[frozenset[int]]]:
+    """``still[t]`` = positions unmasked at t and at every later step (permanent from t)."""
+    us = [_unmasked_frozenset(st, gen_length=gen_length) for st in steps]
+    t_max = len(us)
+    if t_max == 0:
+        return []
+    still: list[Optional[frozenset[int]]] = [None] * t_max
+    still[-1] = us[-1] if us[-1] is not None else frozenset()
+    for t in range(t_max - 2, -1, -1):
+        cur = us[t] if us[t] is not None else frozenset()
+        nxt = still[t + 1] if still[t + 1] is not None else frozenset()
+        still[t] = cur & nxt
+    return still
+
+
+def count_phantom_extra_steps(
+    steps: list[dict],
+    *,
+    gen_length: int,
+    is_fdm: bool = False,
+) -> int:
+    """Extra traced steps beyond permanent-unmask plateaus (FDM only).
+
+    Non-FDM traces can have genuine no-unmask steps that share a ``still`` value;
+    those are not counted as phantoms.
+    """
+    if not is_fdm or gen_length <= 0 or len(steps) < 2:
+        return 0
+    still = permanent_still_sets(steps, gen_length=gen_length)
+    if not still:
+        return 0
+    n_plateaus = 1 + sum(1 for t in range(1, len(still)) if still[t] != still[t - 1])
+    return max(0, len(steps) - n_plateaus)
 
 
 def count_inferred_unmasks(steps: list[dict]) -> int:
     total = 0
+    gen_length = 0
+    for st in steps:
+        ln = _squeeze_len(st.get("mask_index"))
+        if ln:
+            gen_length = ln
+            break
     for t in range(len(steps) - 1):
-        m0 = steps[t].get("mask_index")
-        m1 = steps[t + 1].get("mask_index")
-        if m0 is None or m1 is None:
+        sel = mask_diff_selection(steps, t, gen_length=gen_length) if gen_length else None
+        if sel is None:
             continue
-        a0 = np.asarray(m0[0], dtype=bool)
-        a1 = np.asarray(m1[0], dtype=bool)
-        total += int(np.sum(a0 & ~a1))
+        total += int(np.sum(sel))
     return total
+
+
+def count_selection_mask_mismatches(steps: list[dict], *, gen_length: int) -> list[str]:
+    """Steps where selected_positions count disagrees with the mask-diff unmask count.
+
+    Only steps with a next mask are checked. The final step is dropped during repair
+    (no mask_diff), so it is not flagged here.
+    """
+    issues: list[str] = []
+    if gen_length <= 0:
+        return issues
+    for t in range(len(steps) - 1):
+        diff = mask_diff_selection(steps, t, gen_length=gen_length)
+        if diff is None:
+            continue
+        n_diff = int(np.sum(diff))
+        sel = as_gen_vec(
+            steps[t].get("selected_positions"), gen_length=gen_length, dtype=np.bool_
+        )
+        if sel is None:
+            if n_diff > 0:
+                step_id = steps[t].get("step", t)
+                issues.append(
+                    f"step {step_id}: missing selected_positions but mask_diff {n_diff} "
+                    "(repairable)"
+                )
+            continue
+        n_sel = int(np.sum(sel))
+        if n_sel != n_diff:
+            step_id = steps[t].get("step", t)
+            issues.append(
+                f"step {step_id}: selected_count {n_sel} != mask_diff {n_diff} (repairable)"
+            )
+    return issues
 
 
 def prompt_key(sample: dict) -> Optional[tuple[int, ...]]:
@@ -117,8 +243,9 @@ def _step_field_equal(a, b, *, field: str) -> bool:
         return True
     if a is None or b is None:
         return False
-    aa = np.asarray(a[0] if isinstance(a, list) else a)
-    bb = np.asarray(b[0] if isinstance(b, list) else b)
+    # JSONL may store G or (1, G); NPZ unpack returns (1, G) ndarrays.
+    aa = squeeze_to_1d(a)
+    bb = squeeze_to_1d(b)
     if field in ("confidences", "entropies"):
         return bool(np.allclose(aa, bb, rtol=1e-5, atol=1e-5, equal_nan=True))
     return bool(np.array_equal(aa, bb))
@@ -198,6 +325,22 @@ def _build_trace_check(
         if s.n_steps > 0 and s.steps_with_selected == s.n_steps
     )
     missing_req = sum(1 for s in sample_checks if s.steps_missing_required > 0)
+    sel_mismatch = sum(1 for s in sample_checks if s.selection_mask_mismatches > 0)
+    phantom = sum(1 for s in sample_checks if s.phantom_extra_steps > 0)
+    untrimmed = sum(1 for s in sample_checks if not s.tail_trimmed)
+    if sel_mismatch:
+        issues.append(
+            f"selection/mask-diff count mismatch on {sel_mismatch} checked sample(s) (repairable)"
+        )
+    if phantom:
+        issues.append(
+            f"phantom extra steps on {phantom} checked sample(s) (repairable; e.g. FDM hyp forwards)"
+        )
+    if untrimmed:
+        issues.append(
+            f"untrimmed trailing step on {untrimmed} checked sample(s) "
+            "(repairable; all schedulers)"
+        )
 
     return TraceCheck(
         path=path,
@@ -216,6 +359,9 @@ def _build_trace_check(
         removable_duplicates=dup["removable_duplicates"],
         ambiguous_duplicate_prompts=dup["ambiguous_duplicate_prompts"],
         any_missing_unmasking_order=any_missing_unmasking_order,
+        samples_selection_mask_mismatch=sel_mismatch,
+        samples_phantom_steps=phantom,
+        samples_untrimmed_tail=untrimmed,
         first_metadata=first_metadata,
         pcfg_sample_indices=pcfg_sample_indices,
         issues=issues,
@@ -251,11 +397,8 @@ def infer_unmasking_order(steps: list[dict], *, gen_length: int) -> dict[int, in
     """Gen index -> first unmask step, from selected_positions or mask_index diffs."""
     order: dict[int, int] = {}
     for t, step in enumerate(steps):
-        sel = step.get("selected_positions")
-        if sel is None:
-            continue
-        arr = np.asarray(sel[0], dtype=bool)
-        if arr.shape[0] != gen_length:
+        arr = _gen_vec(step.get("selected_positions"), gen_length=gen_length, dtype=np.bool_)
+        if arr is None:
             continue
         for pos in np.nonzero(arr)[0].tolist():
             p = int(pos)
@@ -266,15 +409,10 @@ def infer_unmasking_order(steps: list[dict], *, gen_length: int) -> dict[int, in
         return order
 
     for t in range(len(steps) - 1):
-        m0 = steps[t].get("mask_index")
-        m1 = steps[t + 1].get("mask_index")
-        if m0 is None or m1 is None:
+        sel = mask_diff_selection(steps, t, gen_length=gen_length)
+        if sel is None:
             continue
-        mask0 = np.asarray(m0[0], dtype=bool)
-        mask1 = np.asarray(m1[0], dtype=bool)
-        if mask0.shape[0] != gen_length or mask1.shape[0] != gen_length:
-            continue
-        for pos in np.nonzero(mask0 & ~mask1)[0].tolist():
+        for pos in np.nonzero(sel)[0].tolist():
             p = int(pos)
             if p not in order:
                 order[p] = t
@@ -303,7 +441,12 @@ def _maybe_repair_unmasking_order(
         repairs.append(f"filled {len(missing)} missing unmasking_order entries")
 
 
-def check_sample(trace_dict: dict, index: int = 0) -> SampleCheck:
+def check_sample(
+    trace_dict: dict,
+    index: int = 0,
+    *,
+    is_fdm: bool = False,
+) -> SampleCheck:
     issues: list[str] = []
     steps = trace_dict.get("step_traces") or []
     gen_length = int(trace_dict.get("gen_length") or 0)
@@ -338,7 +481,28 @@ def check_sample(trace_dict: dict, index: int = 0) -> SampleCheck:
                 break
 
     inferred = count_inferred_unmasks(steps)
-    proxy_ready = steps_with_sel > 0 and steps_missing == 0
+    mismatch_issues = count_selection_mask_mismatches(steps, gen_length=gen_length)
+    issues.extend(mismatch_issues)
+    phantom_extra = count_phantom_extra_steps(
+        steps, gen_length=gen_length, is_fdm=is_fdm
+    )
+    if phantom_extra:
+        issues.append(
+            f"{phantom_extra} FDM phantom extra steps vs permanent-unmask plateaus "
+            f"(repairable; keep first of each plateau)"
+        )
+    tail_trimmed = sample_tail_trimmed(trace_dict)
+    if steps and not tail_trimmed:
+        issues.append(
+            "trailing step not trimmed (repairable; drop last step for all schedulers)"
+        )
+    proxy_ready = (
+        steps_with_sel > 0
+        and steps_missing == 0
+        and not mismatch_issues
+        and phantom_extra == 0
+        and tail_trimmed
+    )
     inferrable = (
         steps_with_sel == 0
         and steps_missing == 0
@@ -363,6 +527,9 @@ def check_sample(trace_dict: dict, index: int = 0) -> SampleCheck:
         steps_null_optional=steps_null_opt,
         steps_with_selected=steps_with_sel,
         inferred_unmasks=inferred,
+        selection_mask_mismatches=len(mismatch_issues),
+        phantom_extra_steps=phantom_extra,
+        tail_trimmed=tail_trimmed,
         proxy_ready=proxy_ready,
         inferrable=inferrable,
         has_final_sequence=trace_dict.get("final_sequence") is not None,
@@ -379,15 +546,19 @@ def check_trace_samples(
     max_samples: Optional[int] = None,
     check_last: bool = True,
     collect_pcfg_audit: bool = False,
+    is_fdm: Optional[bool] = None,
 ) -> TraceCheck:
     n = len(samples)
+    fdm = is_fdm_trace_name(path) if is_fdm is None else bool(is_fdm)
 
     indices: list[int] = list(range(n)) if max_samples is None else list(range(min(max_samples, n)))
     if check_last and n > 0 and (n - 1) not in indices:
         indices.append(n - 1)
     indices = sorted(set(indices))
 
-    sample_checks = [check_sample(samples[i], index=i) for i in indices]
+    sample_checks = [
+        check_sample(samples[i], index=i, is_fdm=fdm) for i in indices
+    ]
     dup = duplicate_prompt_stats(samples)
     first_metadata = (samples[0].get("metadata") or {}) if samples else None
     pcfg_indices = _deduped_pcfg_sample_indices(samples) if collect_pcfg_audit and samples else None
@@ -412,6 +583,7 @@ def _stream_trace_check(
     *,
     max_samples: Optional[int],
     collect_pcfg_audit: bool,
+    is_fdm: bool = False,
 ) -> tuple[
     int,
     Optional[int],
@@ -445,7 +617,9 @@ def _stream_trace_check(
         if sample.get("step_traces") and not sample.get("unmasking_order"):
             any_missing_unmasking_order = True
         if n_samples in indices_to_check:
-            sample_checks.append(check_sample(sample, index=n_samples))
+            sample_checks.append(
+                check_sample(sample, index=n_samples, is_fdm=is_fdm)
+            )
         if collect_pcfg_audit and pcfg_indices is not None:
             if key is not None and key in seen_prompts:
                 pass
@@ -482,11 +656,13 @@ def check_trace_jsonl_streaming(
     max_samples: Optional[int] = 3,
     check_last: bool = True,
     collect_pcfg_audit: bool = False,
+    is_fdm: Optional[bool] = None,
 ) -> TraceCheck:
     """Stream a JSONL trace file: one sample in memory at a time."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)
+    fdm = is_fdm_trace_name(path) if is_fdm is None else bool(is_fdm)
 
     (
         n_samples,
@@ -501,6 +677,7 @@ def check_trace_jsonl_streaming(
         iter_jsonl_trace_samples(path),
         max_samples=max_samples,
         collect_pcfg_audit=collect_pcfg_audit,
+        is_fdm=fdm,
     )
 
     if check_last and last_index is not None and last_index not in {
@@ -508,7 +685,9 @@ def check_trace_jsonl_streaming(
     }:
         if last_sample is None:
             last_sample = read_jsonl_sample_at_index(path, last_index)
-        sample_checks.append(check_sample(last_sample, index=last_index))
+        sample_checks.append(
+            check_sample(last_sample, index=last_index, is_fdm=fdm)
+        )
 
     dup = duplicate_prompt_stats_from_counter(prompt_counts)
     return _build_trace_check(
@@ -530,11 +709,13 @@ def check_trace_npz_streaming(
     max_samples: Optional[int] = 3,
     check_last: bool = True,
     collect_pcfg_audit: bool = False,
+    is_fdm: Optional[bool] = None,
 ) -> TraceCheck:
     """Stream an NPZ trace file: one sample in memory at a time."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)
+    fdm = is_fdm_trace_name(path) if is_fdm is None else bool(is_fdm)
 
     (
         n_samples,
@@ -549,12 +730,15 @@ def check_trace_npz_streaming(
         iter_npz_traces(path),
         max_samples=max_samples,
         collect_pcfg_audit=collect_pcfg_audit,
+        is_fdm=fdm,
     )
 
     if check_last and last_index is not None and last_sample is not None and last_index not in {
         sc.index for sc in sample_checks
     }:
-        sample_checks.append(check_sample(last_sample, index=last_index))
+        sample_checks.append(
+            check_sample(last_sample, index=last_index, is_fdm=fdm)
+        )
 
     dup = duplicate_prompt_stats_from_counter(prompt_counts)
     return _build_trace_check(
@@ -570,56 +754,206 @@ def check_trace_npz_streaming(
     )
 
 
-def stream_repair_jsonl(
-    input_path: str | Path,
-    output_path: str | Path,
-) -> tuple[int, list[str], Optional[str]]:
-    """Stream-repair JSONL traces; keeps at most one sample in memory."""
-    input_path = Path(input_path)
-    output_path = Path(output_path)
-    repairs: list[str] = []
-    task_name: Optional[str] = None
-    seen: set[tuple[int, ...]] = set()
-    n_out = 0
-    removed = 0
+def _repair_sample_worker(
+    payload: tuple[dict, bool],
+) -> tuple[dict, list[str]]:
+    """Picklable worker entry for :func:`repair_samples_parallel`."""
+    sample, is_fdm = payload
+    return repair_sample_from_mask_diff(sample, is_fdm=is_fdm)
 
-    with open(input_path, "r", encoding="utf-8") as fin, open(
-        output_path, "w", encoding="utf-8"
-    ) as fout:
+
+def repair_samples_parallel(
+    samples: list[dict],
+    *,
+    is_fdm: bool = False,
+    workers: int = 1,
+) -> list[tuple[dict, list[str]]]:
+    """Repair many samples; use a process pool when ``workers > 1``."""
+    if not samples:
+        return []
+    n_workers = max(1, int(workers))
+    if n_workers == 1 or len(samples) == 1:
+        return [
+            repair_sample_from_mask_diff(s, is_fdm=is_fdm) for s in samples
+        ]
+    payloads = [(s, is_fdm) for s in samples]
+    chunksize = max(1, len(samples) // (n_workers * 4))
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        return list(pool.map(_repair_sample_worker, payloads, chunksize=chunksize))
+
+
+def iter_repaired_jsonl(
+    path: str | Path,
+    *,
+    is_fdm: Optional[bool] = None,
+    workers: int = 1,
+    batch_size: int = 32,
+) -> Iterator[tuple[Literal["comment", "duplicate", "sample"], Any]]:
+    """Stream JSONL with per-sample repair + prompt dedup.
+
+    Yields:
+      ``("comment", line)`` — `#` header/comment lines (including ``# task=``)
+      ``("duplicate", None)`` — skipped duplicate prompt
+      ``("sample", (fixed_dict, repair_msgs))`` — kept repaired sample
+
+    When ``workers > 1``, samples are repaired in batches via a process pool.
+    """
+    path = Path(path)
+    fdm = is_fdm_trace_name(path) if is_fdm is None else bool(is_fdm)
+    n_workers = max(1, int(workers))
+    batch_n = max(1, int(batch_size))
+    seen: set[tuple[int, ...]] = set()
+    batch: list[dict] = []
+
+    def _flush_batch() -> Iterator[tuple[Literal["sample"], tuple[dict, list[str]]]]:
+        nonlocal batch
+        if not batch:
+            return
+        for fixed, reps in repair_samples_parallel(
+            batch, is_fdm=fdm, workers=n_workers
+        ):
+            yield "sample", (fixed, reps)
+        batch = []
+
+    with open(path, "r", encoding="utf-8") as fin:
         for line in fin:
             stripped = line.strip()
             if not stripped:
                 continue
             if stripped.startswith("#"):
-                if stripped.startswith("# task="):
-                    payload = stripped.split("=", 1)[1].strip()
-                    try:
-                        task_name = json.loads(payload)
-                    except json.JSONDecodeError:
-                        task_name = payload
-                fout.write(line if line.endswith("\n") else f"{line}\n")
+                yield "comment", line if line.endswith("\n") else f"{line}\n"
                 continue
 
             sample = json.loads(stripped)
             key = prompt_key(sample)
             if key is not None and key in seen:
-                removed += 1
+                yield "duplicate", None
                 continue
             if key is not None:
                 seen.add(key)
 
-            fixed, reps = repair_sample_from_mask_diff(sample)
+            if n_workers <= 1:
+                fixed, reps = repair_sample_from_mask_diff(sample, is_fdm=fdm)
+                yield "sample", (fixed, reps)
+            else:
+                batch.append(sample)
+                if len(batch) >= batch_n:
+                    yield from _flush_batch()
+
+    if batch:
+        yield from _flush_batch()
+
+
+def stream_repair_jsonl(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    is_fdm: Optional[bool] = None,
+    workers: int = 1,
+) -> tuple[int, list[str], Optional[str]]:
+    """Write a repaired JSONL (dedup + mask-diff/phantom/trim). One sample in RAM."""
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+    repairs: list[str] = []
+    task_name: Optional[str] = None
+    n_out = 0
+    removed = 0
+    t0 = time.perf_counter()
+
+    with open(output_path, "w", encoding="utf-8") as fout:
+        for kind, payload in iter_repaired_jsonl(
+            input_path, is_fdm=is_fdm, workers=workers
+        ):
+            if kind == "comment":
+                line = str(payload)
+                fout.write(line)
+                stripped = line.strip()
+                if stripped.startswith("# task="):
+                    raw = stripped.split("=", 1)[1].strip()
+                    try:
+                        task_name = json.loads(raw)
+                    except json.JSONDecodeError:
+                        task_name = raw
+                continue
+            if kind == "duplicate":
+                removed += 1
+                continue
+            fixed, reps = payload
             for rep in reps:
                 repairs.append(f"sample {n_out}: {rep}")
             fout.write(json.dumps(fixed, ensure_ascii=False) + "\n")
             n_out += 1
+            if n_out == 1 or n_out % 50 == 0:
+                logger.info(
+                    "stream_repair_jsonl: %d kept (%d dupes) %.1fs",
+                    n_out,
+                    removed,
+                    time.perf_counter() - t0,
+                )
 
     if removed:
         repairs.insert(
             0,
             f"removed {removed} duplicate trace(s) by prompt ({n_out} kept)",
         )
+    logger.info(
+        "stream_repair_jsonl done: %d samples, %d repair msgs, %.1fs -> %s",
+        n_out,
+        len(repairs),
+        time.perf_counter() - t0,
+        output_path.name,
+    )
     return n_out, repairs, task_name
+
+
+def stream_repair_npz(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    task_name: Optional[str] = None,
+    is_fdm: Optional[bool] = None,
+    workers: int = 1,
+) -> tuple[int, list[str], Optional[str], list[dict]]:
+    """Unpack NPZ → repair (phantoms, mask-diff, drop last step) → repack NPZ."""
+    from traces.trace_npz import iter_npz_traces, pack_samples_to_npz, read_npz_task_name
+
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+    repairs: list[str] = []
+    resolved_task = task_name if task_name is not None else read_npz_task_name(input_path)
+    fdm = is_fdm_trace_name(input_path) if is_fdm is None else bool(is_fdm)
+    seen: set[tuple[int, ...]] = set()
+    raw_samples: list[dict] = []
+    removed = 0
+
+    for sample in iter_npz_traces(input_path):
+        key = prompt_key(sample)
+        if key is not None and key in seen:
+            removed += 1
+            continue
+        if key is not None:
+            seen.add(key)
+        raw_samples.append(sample)
+
+    if not raw_samples:
+        raise ValueError(f"no samples to repair in {input_path}")
+
+    repaired = repair_samples_parallel(
+        raw_samples, is_fdm=fdm, workers=workers
+    )
+    samples: list[dict] = []
+    for i, (fixed, reps) in enumerate(repaired):
+        for rep in reps:
+            repairs.append(f"sample {i}: {rep}")
+        samples.append(fixed)
+
+    pack_samples_to_npz(samples, output_path, task_name=resolved_task)
+    if removed:
+        repairs.insert(
+            0,
+            f"removed {removed} duplicate trace(s) by prompt ({len(samples)} kept)",
+        )
+    return len(samples), repairs, resolved_task, samples
 
 
 def trace_needs_repair(check: TraceCheck, samples: list[dict] | None = None) -> bool:
@@ -630,7 +964,22 @@ def trace_needs_repair(check: TraceCheck, samples: list[dict] | None = None) -> 
             sample.get("step_traces") and not sample.get("unmasking_order") for sample in samples
         )
     needs_dedup = check.removable_duplicates > 0
-    return needs_hook_repair or needs_order_repair or needs_dedup
+    needs_sel_align = check.any_selection_mask_mismatch
+    needs_phantom = check.any_phantom_steps
+    needs_tail = check.any_untrimmed_tail
+    if samples:
+        needs_tail = needs_tail or any(
+            (sample.get("step_traces") and not sample_tail_trimmed(sample))
+            for sample in samples
+        )
+    return (
+        needs_hook_repair
+        or needs_order_repair
+        or needs_dedup
+        or needs_sel_align
+        or needs_phantom
+        or needs_tail
+    )
 
 
 def conversion_repair_blockers(
@@ -666,6 +1015,15 @@ def conversion_repair_blockers(
         )
     if missing_order and check.transfer_status != "missing_transfer":
         blockers.append("missing unmasking_order after repair")
+
+    if check.any_selection_mask_mismatch:
+        blockers.append("selection/mask-diff count mismatch remains after repair")
+
+    if check.any_phantom_steps:
+        blockers.append("phantom extra steps remain after repair")
+
+    if check.any_untrimmed_tail:
+        blockers.append("trailing step not trimmed after repair")
 
     return blockers
 
@@ -706,38 +1064,213 @@ def check_trace_file(
     )
 
 
-def repair_sample_from_mask_diff(sample: dict) -> tuple[dict, list[str]]:
-    """Fill missing selected_positions/tokens from mask_index diffs + predictions."""
+def _write_selection_fields(
+    step: dict,
+    sel: np.ndarray,
+    *,
+    predictions,
+    gen_length: int,
+) -> None:
+    """Set selected_positions / selected_tokens from a boolean mask + predictions."""
+    pred = _gen_vec(predictions, gen_length=gen_length, dtype=np.int32)
+    if pred is None:
+        pred = np.zeros(gen_length, dtype=np.int32)
+    sel_tokens = np.zeros(gen_length, dtype=np.int32)
+    sel_tokens[sel] = pred[sel]
+    step["selected_positions"] = sel.astype(bool).reshape(1, gen_length).tolist()
+    step["selected_tokens"] = sel_tokens.reshape(1, gen_length).tolist()
+
+
+def _plateau_ranges(still: list[Optional[frozenset[int]]]) -> list[tuple[int, int]]:
+    """Inclusive ``(lo, hi)`` index ranges where ``still`` is constant."""
+    ranges: list[tuple[int, int]] = []
+    t = 0
+    while t < len(still):
+        j = t
+        while j + 1 < len(still) and still[j + 1] == still[t]:
+            j += 1
+        ranges.append((t, j))
+        t = j + 1
+    return ranges
+
+
+def repair_collapse_phantom_steps(
+    sample: dict,
+    *,
+    is_fdm: bool = False,
+) -> tuple[dict, list[str]]:
+    """Drop FDM phantom / empty-growth plateau extras (FDM filename only).
+
+    Detect FDM from the trace stem (``…_fdm_…``). For each permanent-unmask
+    plateau keep the **first** step (outer ``model(x)`` before hyps; Hub checks
+    show neighbor/mask continuity ties across the plateau). Rebuild ``selected_*``
+    from permanent-set growth. Non-FDM schedulers are left unchanged.
+    """
     out = copy.deepcopy(sample)
     steps = out.get("step_traces") or []
     gen_length = int(out.get("gen_length") or 0)
     repairs: list[str] = []
+    if not is_fdm or gen_length <= 0 or len(steps) < 2:
+        return out, repairs
+
+    extras = count_phantom_extra_steps(steps, gen_length=gen_length, is_fdm=True)
+    if extras <= 0:
+        return out, repairs
+
+    still = permanent_still_sets(steps, gen_length=gen_length)
+    plateaus = _plateau_ranges(still)
+    # Always keep the first step of each plateau.
+    keep_indices = [lo for lo, _hi in plateaus]
+
+    new_steps: list[dict] = []
+    for i, keep_i in enumerate(keep_indices):
+        step = copy.deepcopy(steps[keep_i])
+        step["step"] = i
+        if i + 1 < len(keep_indices):
+            lo_i, _hi_i = plateaus[i]
+            lo_next, _ = plateaus[i + 1]
+            prev_set = still[lo_i] or frozenset()
+            next_set = still[lo_next] or frozenset()
+            newly = next_set - prev_set
+            sel = np.zeros(gen_length, dtype=bool)
+            for pos in newly:
+                if 0 <= pos < gen_length:
+                    sel[pos] = True
+            _write_selection_fields(
+                step,
+                sel,
+                predictions=steps[keep_i].get("predictions"),
+                gen_length=gen_length,
+            )
+        else:
+            step["selected_positions"] = None
+            step["selected_tokens"] = None
+        new_steps.append(step)
+
+    out["step_traces"] = new_steps
+    inferred = infer_unmasking_order(new_steps, gen_length=gen_length)
+    if inferred:
+        out["unmasking_order"] = inferred
+    repairs.append(
+        f"collapsed {len(steps)} -> {len(new_steps)} steps "
+        f"(dropped {len(steps) - len(new_steps)} FDM plateau extras; keep first)"
+    )
+    return out, repairs
+
+
+def repair_drop_last_step(sample: dict) -> tuple[dict, list[str]]:
+    """Drop the final step_trace (no next mask → mask_diff cannot validate it).
+
+    Applies to **all** schedulers (not FDM-only). Run after phantom plateau collapse
+    so FDM's last kept plateau is what gets dropped. Idempotent via
+    ``schedulerlens_trimmed_tail`` in sample metadata (survives NPZ).
+
+    After the drop, the new last step keeps mask-diff–aligned ``selected_*`` from
+    the transition into the removed step; metrics trust that selection.
+    """
+    out = copy.deepcopy(sample)
+    repairs: list[str] = []
+    if sample_tail_trimmed(out):
+        return out, repairs
+
+    steps = out.get("step_traces") or []
+    if len(steps) <= 1:
+        mark_sample_tail_trimmed(out)
+        repairs.append("marked trimmed_tail (single-step; nothing dropped)")
+        return out, repairs
+
+    dropped = steps[-1]
+    dropped_sel = _gen_vec(
+        dropped.get("selected_positions"),
+        gen_length=int(out.get("gen_length") or 0),
+        dtype=np.bool_,
+    )
+    n_sel = int(np.sum(dropped_sel)) if dropped_sel is not None else 0
+    out["step_traces"] = steps[:-1]
+    for i, st in enumerate(out["step_traces"]):
+        st["step"] = i
+    mark_sample_tail_trimmed(out)
+    repairs.append(
+        f"dropped last step (all schedulers; no mask_diff to validate; "
+        f"selected_count was {n_sel})"
+    )
+    gen_length = int(out.get("gen_length") or 0)
+    inferred = infer_unmasking_order(out["step_traces"], gen_length=gen_length)
+    if inferred:
+        out["unmasking_order"] = inferred
+    return out, repairs
+
+
+def repair_sample_from_mask_diff(
+    sample: dict,
+    *,
+    is_fdm: bool = False,
+) -> tuple[dict, list[str]]:
+    """Repair one sample for SchedulerLens-ready step fields.
+
+    Order:
+    1. Collapse FDM plateaus (filename encodes FDM) — keep first of each plateau.
+    2. Align ``selected_*`` to mask_diff on every step that has a next mask.
+    3. Drop the final step entirely (cannot validate without a next ``mask_index``).
+    """
+    out, repairs = repair_collapse_phantom_steps(sample, is_fdm=is_fdm)
+    steps = out.get("step_traces") or []
+    gen_length = int(out.get("gen_length") or 0)
+    selection_changed = bool(repairs)
 
     for t in range(len(steps) - 1):
-        if steps[t].get("selected_positions") is not None:
+        if gen_length <= 0:
+            break
+        sel_diff = mask_diff_selection(steps, t, gen_length=gen_length)
+        if sel_diff is None:
             continue
-        m0 = steps[t].get("mask_index")
-        m1 = steps[t + 1].get("mask_index")
-        preds = steps[t].get("predictions")
-        if m0 is None or m1 is None or preds is None or gen_length <= 0:
+        n_diff = int(np.sum(sel_diff))
+        existing = steps[t].get("selected_positions")
+        if existing is None:
+            if n_diff == 0:
+                continue
+            _write_selection_fields(
+                steps[t],
+                sel_diff,
+                predictions=steps[t].get("predictions"),
+                gen_length=gen_length,
+            )
+            selection_changed = True
+            repairs.append(f"sample step {t}: inferred {n_diff} unmasks")
             continue
 
-        mask0 = np.asarray(m0[0], dtype=bool)
-        mask1 = np.asarray(m1[0], dtype=bool)
-        if mask0.shape[0] != gen_length or mask1.shape[0] != gen_length:
-            continue
-        sel = mask0 & ~mask1
-        if not np.any(sel):
+        sel_vec = _gen_vec(existing, gen_length=gen_length, dtype=np.bool_)
+        n_sel = int(np.sum(sel_vec)) if sel_vec is not None else -1
+        if n_sel == n_diff:
             continue
 
-        pred = np.asarray(preds[0], dtype=np.int32)
-        sel_tokens = np.zeros(gen_length, dtype=np.int32)
-        sel_tokens[sel] = pred[sel]
-        steps[t]["selected_positions"] = sel.reshape(1, gen_length).tolist()
-        steps[t]["selected_tokens"] = sel_tokens.reshape(1, gen_length).tolist()
-        repairs.append(f"sample step {t}: inferred {int(sel.sum())} unmasks")
+        _write_selection_fields(
+            steps[t],
+            sel_diff,
+            predictions=steps[t].get("predictions"),
+            gen_length=gen_length,
+        )
+        selection_changed = True
+        repairs.append(
+            f"sample step {t}: replaced selected_count {n_sel} with mask_diff {n_diff}"
+        )
 
-    _maybe_repair_unmasking_order(out, steps, gen_length, repairs)
+    # Drop last step for every scheduler (after plateau collapse + mask-diff align).
+    out["step_traces"] = steps
+    dropped, drop_reps = repair_drop_last_step(out)
+    if drop_reps:
+        out = dropped
+        repairs.extend(drop_reps)
+        selection_changed = True
+        steps = out.get("step_traces") or []
+
+    if selection_changed:
+        inferred = infer_unmasking_order(steps, gen_length=gen_length)
+        if inferred:
+            out["unmasking_order"] = inferred
+            repairs.append("rebuilt unmasking_order after selection/mask-diff repair")
+    else:
+        _maybe_repair_unmasking_order(out, steps, gen_length, repairs)
     return out, repairs
 
 
@@ -769,7 +1302,15 @@ def _compare_roundtrip_samples(orig: dict, recon: dict, *, sample_index: int) ->
     issues: list[str] = []
     i = sample_index
     for field in ("prompt_len", "gen_length", "gen_only"):
-        if not _scalar_equal(orig.get(field), recon.get(field)):
+        ov = orig.get(field)
+        rv = recon.get(field)
+        # Pack defaults missing gen_only to True.
+        if field == "gen_only":
+            if ov is None:
+                ov = True
+            if rv is None:
+                rv = True
+        if not _scalar_equal(ov, rv):
             issues.append(f"sample {i}: {field} mismatch")
     for field in ("start_time", "end_time"):
         if not _scalar_equal(orig.get(field), recon.get(field)):
@@ -797,7 +1338,15 @@ def _compare_roundtrip_samples(orig: dict, recon: dict, *, sample_index: int) ->
                 issues.append(f"sample {i} step {t}: {fname} mismatch")
                 break
         for fname in ("intervention_applied", "intervention_type"):
-            if not _scalar_equal(ost.get(fname), rst.get(fname)):
+            ov = ost.get(fname)
+            rv = rst.get(fname)
+            # Sidecar defaults missing intervention_applied to False.
+            if fname == "intervention_applied":
+                if ov is None:
+                    ov = False
+                if rv is None:
+                    rv = False
+            if not _scalar_equal(ov, rv):
                 issues.append(f"sample {i} step {t}: {fname} mismatch")
                 break
         if (ost.get("metadata") or {}) != (rst.get("metadata") or {}):
@@ -818,7 +1367,7 @@ def validate_npz_roundtrip(
     *,
     check_samples: int = 3,
 ) -> list[str]:
-    """Verify NPZ unpack matches source samples (full JSONL fidelity)."""
+    """Verify NPZ unpack matches source samples (spot-check; full field fidelity)."""
     npz_path = Path(npz_path)
     if isinstance(samples, (str, Path)) and Path(samples).suffix.lower() == ".jsonl":
         return _validate_npz_roundtrip_jsonl(Path(samples), npz_path, check_samples=check_samples)
@@ -841,6 +1390,41 @@ def validate_npz_roundtrip(
 
     for i in sorted(wanted):
         issues.extend(_compare_roundtrip_samples(sample_list[i], recon_by_index[i], sample_index=i))
+    return issues
+
+
+def validate_npz_roundtrip_indexed(
+    samples_by_index: dict[int, dict],
+    npz_path: str | Path,
+    *,
+    n_samples: int,
+) -> list[str]:
+    """Round-trip check using a sparse map of expected repaired samples by index."""
+    npz_path = Path(npz_path)
+    issues: list[str] = []
+    with np.load(npz_path, allow_pickle=False) as data:
+        n_npz = int(data["n_samples"])
+    if n_npz != n_samples:
+        issues.append(f"n_samples mismatch: expected={n_samples} npz={n_npz}")
+        return issues
+    if not samples_by_index:
+        return issues
+
+    wanted = set(samples_by_index)
+    recon_by_index: dict[int, dict] = {}
+    for i, recon in enumerate(iter_npz_traces(npz_path)):
+        if i in wanted:
+            recon_by_index[i] = recon
+        if i >= max(wanted):
+            break
+
+    for i in sorted(wanted):
+        if i not in recon_by_index:
+            issues.append(f"sample {i}: missing from NPZ during round-trip")
+            continue
+        issues.extend(
+            _compare_roundtrip_samples(samples_by_index[i], recon_by_index[i], sample_index=i)
+        )
     return issues
 
 
@@ -887,6 +1471,9 @@ def check_to_row(check: TraceCheck, *, extra: Optional[dict[str, Any]] = None) -
         "samples_with_any_selected": check.samples_with_any_selected,
         "samples_with_all_selected": check.samples_with_all_selected,
         "samples_missing_required": check.samples_missing_required,
+        "samples_selection_mask_mismatch": check.samples_selection_mask_mismatch,
+        "samples_phantom_steps": check.samples_phantom_steps,
+        "samples_untrimmed_tail": check.samples_untrimmed_tail,
         "unique_prompts": check.unique_prompts,
         "duplicate_traces": check.duplicate_traces,
         "removable_duplicates": check.removable_duplicates,

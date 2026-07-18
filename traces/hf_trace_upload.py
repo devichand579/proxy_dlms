@@ -1,4 +1,4 @@
-"""HF Hub upload/download for eval traces (default repo: SchedulerLens)."""
+"""HF Hub upload/download/delete for eval traces (JSONL/NPZ datasets)."""
 
 from __future__ import annotations
 
