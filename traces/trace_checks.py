@@ -250,10 +250,11 @@ def count_inferred_unmasks(steps: list[dict]) -> int:
 
 
 def count_selection_mask_mismatches(steps: list[dict], *, gen_length: int) -> list[str]:
-    """Steps where selected_positions count disagrees with the mask-diff unmask count.
+    """Steps where selected_positions disagrees with the mask-diff unmask set.
 
     Only steps with a next mask are checked. The final step is dropped during repair
-    (no mask_diff), so it is not flagged here.
+    (no mask_diff), so it is not flagged here. Compares the full boolean set (not
+    just counts) so DUS-style same-count / wrong-position cases are caught.
     """
     issues: list[str] = []
     if gen_length <= 0:
@@ -275,10 +276,17 @@ def count_selection_mask_mismatches(steps: list[dict], *, gen_length: int) -> li
                 )
             continue
         n_sel = int(np.sum(sel))
+        if np.array_equal(sel, diff):
+            continue
+        step_id = steps[t].get("step", t)
         if n_sel != n_diff:
-            step_id = steps[t].get("step", t)
             issues.append(
                 f"step {step_id}: selected_count {n_sel} != mask_diff {n_diff} (repairable)"
+            )
+        else:
+            issues.append(
+                f"step {step_id}: selected set != mask_diff "
+                f"(count={n_diff} but positions differ; repairable)"
             )
     return issues
 
@@ -1460,7 +1468,9 @@ def repair_sample_from_mask_diff(
 
         sel_vec = _gen_vec(existing, gen_length=gen_length, dtype=np.bool_)
         n_sel = int(np.sum(sel_vec)) if sel_vec is not None else -1
-        if n_sel == n_diff:
+        # Align on set equality, not just counts (DUS can disagree on positions
+        # while n_sel == n_diff).
+        if sel_vec is not None and np.array_equal(sel_vec, sel_diff):
             continue
 
         _write_selection_fields(
@@ -1470,9 +1480,15 @@ def repair_sample_from_mask_diff(
             gen_length=gen_length,
         )
         selection_changed = True
-        repairs.append(
-            f"sample step {t}: replaced selected_count {n_sel} with mask_diff {n_diff}"
-        )
+        if n_sel == n_diff:
+            repairs.append(
+                f"sample step {t}: replaced selected set "
+                f"(count matched mask_diff {n_diff} but positions differed)"
+            )
+        else:
+            repairs.append(
+                f"sample step {t}: replaced selected_count {n_sel} with mask_diff {n_diff}"
+            )
 
     # Drop last step for every scheduler (after plateau collapse + mask-diff align).
     out["step_traces"] = steps

@@ -8,6 +8,8 @@ import io
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -24,6 +26,8 @@ DEFAULT_PACK_MEMORY_FRACTION = 0.25
 DEFAULT_PACK_JSON_EXPANSION = 2.5
 # Deflate level for NPZ (1=fast, 9=small). Uncompressed via TRACE_NPZ_COMPRESS=0.
 DEFAULT_NPZ_COMPRESSLEVEL = 1
+# NPZ read mode: TRACE_NPZ_MMAP=auto|1|0 (auto = mmap when uncompressed size
+# exceeds free-RAM budget, same spirit as TRACE_PACK_MEMORY_FRACTION).
 STEP_FIELDS = (
     "mask_index",
     "predictions",
@@ -954,52 +958,189 @@ def _sidecar_blob_for_sample(
     return bytes(sidecar_bytes[start:end])
 
 
-def iter_npz_traces(path: Union[str, Path]) -> Iterator[dict]:
-    """Yield one trace dict per sample from an NPZ trace archive."""
-    path = Path(path)
-    with np.load(path, allow_pickle=False) as data:
-        n_samples = int(data["n_samples"])
-        gen_length = int(data["gen_length"])
-        n_steps = data["n_steps"]
-        prompt_len = data["prompt_len"]
-        arrays = {field: data[field] for field in STEP_FIELDS}
-        for field in OPTIONAL_STEP_FIELDS:
-            key = f"{field}_present"
-            if key in data:
-                arrays[key] = data[key]
-        arrays["unmask_step_at_pos"] = data["unmask_step_at_pos"]
+def _available_npz_read_budget_bytes() -> int:
+    """Bytes allowed for eagerly loading a full NPZ into RAM.
 
-        prompt_tokens = data["prompt_tokens"] if "prompt_tokens" in data else None
-        prompt_token_len = data["prompt_token_len"] if "prompt_token_len" in data else None
-        final_sequence_tokens = (
-            data["final_sequence_tokens"] if "final_sequence_tokens" in data else None
+    Reuses the pack memory knobs when NPZ-specific ones are unset:
+    ``TRACE_NPZ_MEMORY_BYTES`` / ``TRACE_NPZ_MEMORY_FRACTION``, else
+    ``TRACE_PACK_MEMORY_BYTES`` / ``TRACE_PACK_MEMORY_FRACTION`` (default 0.25
+    of ``psutil`` available RAM).
+    """
+    cap = os.environ.get("TRACE_NPZ_MEMORY_BYTES", "").strip()
+    if not cap:
+        cap = os.environ.get("TRACE_PACK_MEMORY_BYTES", "").strip()
+    if cap:
+        return max(0, int(cap))
+    try:
+        import psutil
+
+        available = psutil.virtual_memory().available
+    except Exception:
+        available = 512 * 1024 * 1024
+    frac_raw = os.environ.get("TRACE_NPZ_MEMORY_FRACTION", "").strip()
+    if not frac_raw:
+        frac_raw = os.environ.get(
+            "TRACE_PACK_MEMORY_FRACTION", str(DEFAULT_PACK_MEMORY_FRACTION)
         )
-        final_sequence_len = data["final_sequence_len"] if "final_sequence_len" in data else None
-        gen_only = data["gen_only"] if "gen_only" in data else None
-        start_time = data["start_time"] if "start_time" in data else None
-        end_time = data["end_time"] if "end_time" in data else None
-        sidecar_bytes = data["sidecar_bytes"] if "sidecar_bytes" in data else None
-        sidecar_offsets = data["sidecar_offsets"] if "sidecar_offsets" in data else None
+    return max(0, int(available * float(frac_raw)))
 
-        for i in range(n_samples):
-            sidecar_blob = None
-            if sidecar_bytes is not None and sidecar_offsets is not None:
-                sidecar_blob = _sidecar_blob_for_sample(sidecar_bytes, sidecar_offsets, i)
-            yield arrays_to_trace_dict(
-                gen_length=gen_length,
-                n_steps=int(n_steps[i]),
-                prompt_len=int(prompt_len[i]),
-                arrays=arrays,
-                sample_index=i,
-                prompt_tokens=prompt_tokens,
-                prompt_token_len=prompt_token_len,
-                final_sequence_tokens=final_sequence_tokens,
-                final_sequence_len=final_sequence_len,
-                gen_only=gen_only,
-                start_time=start_time,
-                end_time=end_time,
-                sidecar_blob=sidecar_blob,
-            )
+
+def _estimate_npz_uncompressed_bytes(path: Path) -> int:
+    """Sum uncompressed ``.npy`` member sizes from the NPZ zip central directory."""
+    total = 0
+    with zipfile.ZipFile(path, "r") as zf:
+        for info in zf.infolist():
+            if info.filename.endswith(".npy"):
+                total += int(info.file_size)
+    return total
+
+
+def _should_mmap_npz(path: Path) -> bool:
+    """Choose mmap vs eager load from env and free-RAM budget (like pack batching).
+
+    ``TRACE_NPZ_MMAP``:
+      - ``auto`` (default): mmap when uncompressed NPZ size > read budget
+      - ``1`` / ``true``: always mmap
+      - ``0`` / ``false``: always eager
+    """
+    raw = os.environ.get("TRACE_NPZ_MMAP", "auto").strip().lower()
+    if raw in ("0", "false", "no", "off", "eager"):
+        return False
+    if raw in ("1", "true", "yes", "on", "always", "mmap"):
+        return True
+    # auto
+    need = _estimate_npz_uncompressed_bytes(path)
+    budget = _available_npz_read_budget_bytes()
+    use_mmap = need > budget
+    logger.info(
+        "NPZ read %s: uncompressed≈%.1f MiB budget=%.1f MiB -> %s",
+        path.name,
+        need / (1024 * 1024),
+        budget / (1024 * 1024),
+        "mmap" if use_mmap else "eager",
+    )
+    return use_mmap
+
+
+class _NpzMmapStore:
+    """Decompress an NPZ into a temp directory and expose memory-mapped arrays.
+
+    Hub NPZs are ZIP-deflated by default, so ``np.load(..., mmap_mode='r')`` cannot
+    page them directly. Extracting once to disk lets us keep only the active
+    sample's slices in RAM while iterating (same idea as JSONL streaming).
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._tmpdir: Optional[str] = None
+        self._arrays: Dict[str, np.ndarray] = {}
+
+    def __enter__(self) -> "_NpzMmapStore":
+        self._tmpdir = tempfile.mkdtemp(prefix="strace_npz_mmap_")
+        t0 = time.perf_counter()
+        nbytes = 0
+        with zipfile.ZipFile(self.path, "r") as zf:
+            for info in zf.infolist():
+                name = info.filename
+                if not name.endswith(".npy"):
+                    continue
+                key = name[:-4]
+                dest = Path(self._tmpdir) / Path(name).name
+                with zf.open(name) as src, open(dest, "wb") as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+                arr = np.load(dest, mmap_mode="r", allow_pickle=False)
+                self._arrays[key] = arr
+                nbytes += int(getattr(arr, "nbytes", 0) or 0)
+        logger.info(
+            "NPZ mmap %s: %d arrays (%.1f MiB addressable) extracted in %.1fs",
+            self.path.name,
+            len(self._arrays),
+            nbytes / (1024 * 1024),
+            time.perf_counter() - t0,
+        )
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self._arrays.clear()
+        if self._tmpdir is not None:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+            self._tmpdir = None
+        return False
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._arrays
+
+    def __getitem__(self, key: str) -> np.ndarray:
+        return self._arrays[key]
+
+
+def _iter_npz_traces_from_mapping(data) -> Iterator[dict]:
+    """Yield samples from a dict-like NPZ mapping (eager NpzFile or mmap store)."""
+    n_samples = int(np.asarray(data["n_samples"]).reshape(()))
+    gen_length = int(np.asarray(data["gen_length"]).reshape(()))
+    n_steps = data["n_steps"]
+    prompt_len = data["prompt_len"]
+    arrays = {field: data[field] for field in STEP_FIELDS}
+    for field in OPTIONAL_STEP_FIELDS:
+        key = f"{field}_present"
+        if key in data:
+            arrays[key] = data[key]
+    arrays["unmask_step_at_pos"] = data["unmask_step_at_pos"]
+
+    prompt_tokens = data["prompt_tokens"] if "prompt_tokens" in data else None
+    prompt_token_len = data["prompt_token_len"] if "prompt_token_len" in data else None
+    final_sequence_tokens = (
+        data["final_sequence_tokens"] if "final_sequence_tokens" in data else None
+    )
+    final_sequence_len = (
+        data["final_sequence_len"] if "final_sequence_len" in data else None
+    )
+    gen_only = data["gen_only"] if "gen_only" in data else None
+    start_time = data["start_time"] if "start_time" in data else None
+    end_time = data["end_time"] if "end_time" in data else None
+    sidecar_bytes = data["sidecar_bytes"] if "sidecar_bytes" in data else None
+    sidecar_offsets = data["sidecar_offsets"] if "sidecar_offsets" in data else None
+
+    for i in range(n_samples):
+        sidecar_blob = None
+        if sidecar_bytes is not None and sidecar_offsets is not None:
+            sidecar_blob = _sidecar_blob_for_sample(sidecar_bytes, sidecar_offsets, i)
+        yield arrays_to_trace_dict(
+            gen_length=gen_length,
+            n_steps=int(n_steps[i]),
+            prompt_len=int(prompt_len[i]),
+            arrays=arrays,
+            sample_index=i,
+            prompt_tokens=prompt_tokens,
+            prompt_token_len=prompt_token_len,
+            final_sequence_tokens=final_sequence_tokens,
+            final_sequence_len=final_sequence_len,
+            gen_only=gen_only,
+            start_time=start_time,
+            end_time=end_time,
+            sidecar_blob=sidecar_blob,
+        )
+
+
+def iter_npz_traces(path: Union[str, Path]) -> Iterator[dict]:
+    """Yield one trace dict per sample from an NPZ trace archive.
+
+    Read mode follows free RAM (same idea as JSONL pack batching):
+
+    - ``TRACE_NPZ_MMAP=auto`` (default): if uncompressed size exceeds
+      ``TRACE_NPZ_MEMORY_FRACTION`` (or ``TRACE_PACK_MEMORY_FRACTION``, default
+      0.25) of available RAM, decompress to a temp dir and memmap; otherwise
+      load eagerly.
+    - ``TRACE_NPZ_MMAP=1``: always memmap.
+    - ``TRACE_NPZ_MMAP=0``: always eager.
+    """
+    path = Path(path)
+    if _should_mmap_npz(path):
+        with _NpzMmapStore(path) as data:
+            yield from _iter_npz_traces_from_mapping(data)
+        return
+    with np.load(path, allow_pickle=False) as data:
+        yield from _iter_npz_traces_from_mapping(data)
 
 
 def compression_ratio(input_path: Union[str, Path], output_path: Union[str, Path]) -> float:

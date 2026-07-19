@@ -116,6 +116,8 @@ Per file:
 
 Stage timings log at INFO (`download`, `repair+pack`, `post-repair audit`, `roundtrip`, `upload`). NPZ write uses deflate level `TRACE_NPZ_COMPRESSLEVEL` (default `1`, faster than numpy’s old default); set `TRACE_NPZ_COMPRESS=0` for uncompressed (fastest, larger).
 
+NPZ **reads** (SchedulerLens proxies/oracle, `repair-npz`, audits) pick mmap vs eager from free RAM, like pack batching: `TRACE_NPZ_MMAP=auto` (default) memmaps when uncompressed size exceeds `TRACE_NPZ_MEMORY_FRACTION` / `TRACE_PACK_MEMORY_FRACTION` (default 0.25) of available RAM; `=1` always mmap, `=0` always eager.
+
 Disable repair with `--no-repair` on convert commands (blocks conversion when repair would be needed; falls back to plain pack).
 
 `convert-all` resume (default) skips `status=ok` rows but **automatically retries** `repair_blocked`, `roundtrip_failed`, and `convert_failed` rows. Use `--no-retry-errors` to keep failed rows skipped.
