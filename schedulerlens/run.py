@@ -146,13 +146,19 @@ def run_schedulerlens(
             json.dump(ppl.to_dict(), f, indent=2)
         result["perplexity"] = ppl
         result["perplexity_path"] = str(ppl_path.resolve())
-        if do_replay and any(s is not None for s in ppl.sample_oracle):
+        tables = getattr(ppl, "oracle_tables", None) or {}
+        if do_replay and (
+            tables.get("step_sample_idx")
+            or any(s is not None for s in ppl.sample_oracle)
+        ):
             oracle_path = save_oracle_artifacts(
                 output_dir / "plot_artifacts" / meta.stem / "oracle.npz",
                 ppl,
                 stem=meta.stem,
             )
             result["oracle_artifacts_path"] = str(oracle_path.resolve())
+            ppl.oracle_tables = {}
+            ppl.sample_oracle = []
 
         if do_replay and ppl.mt_trend and ppl.jt_trend:
             m_hat = metrics.proxies["M_hat_t"].trend

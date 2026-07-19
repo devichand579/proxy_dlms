@@ -11,7 +11,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -758,6 +758,10 @@ def replay_oracle_mt_jt(
             for fut in as_completed(pending):
                 fut.result()
     finally:
+        # Drop cloned step inputs promptly (can be large for long traces).
+        for job in jobs:
+            job.input_ids = None  # type: ignore[assignment]
+            job.attention = None  # type: ignore[assignment]
         if owns_pool and engine is not None and hasattr(engine, "clear_cache"):
             engine.clear_cache()
 
@@ -816,12 +820,16 @@ class TaskPerplexity:
     sample_Jt: List[float] = field(default_factory=list)
     mt_trend: List[float] = field(default_factory=list)
     jt_trend: List[float] = field(default_factory=list)
-    # Per-sample OracleSampleMetrics from replay (token-level detail retained).
+    # Optional in-memory sample objects (usually empty; flat tables preferred).
     sample_oracle: List[Optional[OracleSampleMetrics]] = field(default_factory=list)
+    # Flat oracle tables accumulated during replay (compact; for oracle.npz).
+    oracle_tables: Dict[str, list] = field(default_factory=dict)
     jt_exact_max: int = 0
     jt_markov_order: int = 0
 
     def to_dict(self) -> dict:
+        n_tok = len(self.oracle_tables.get("tok_sample_idx") or [])
+        n_step = len(self.oracle_tables.get("step_sample_idx") or [])
         return {
             "model_commit_nll": self.model_commit_nll,
             "model_commit_ppl": self.model_commit_ppl,
@@ -838,8 +846,8 @@ class TaskPerplexity:
             "jt_trend": self.jt_trend,
             "jt_exact_max": self.jt_exact_max,
             "jt_markov_order": self.jt_markov_order,
-            # Omit full token tables from JSON (use oracle.npz); keep counts.
-            "n_oracle_samples": sum(1 for s in self.sample_oracle if s is not None),
+            "n_oracle_steps": n_step,
+            "n_oracle_tokens": n_tok,
         }
 
 
@@ -979,8 +987,26 @@ def compute_task_perplexity(
             engine = None
             vocab = None
 
-    # Indexed by NPZ sample order (filled as results arrive; may be sparse until done).
-    by_sample: dict[int, tuple[SamplePerplexity, Optional[OracleSampleMetrics]]] = {}
+    # Indexed by NPZ sample order (scalars only; token detail → oracle_tables).
+    by_sample: dict[int, SamplePerplexity] = {}
+    oracle_tables: Dict[str, list] = {
+        "step_sample_idx": [],
+        "step": [],
+        "step_Mt": [],
+        "step_Jt": [],
+        "step_oracle_nll": [],
+        "step_model_nll": [],
+        "step_n_selected": [],
+        "tok_sample_idx": [],
+        "tok_step": [],
+        "tok_gen_pos": [],
+        "tok_content_pos": [],
+        "tok_sel": [],
+        "tok_ref": [],
+        "tok_mt_kl": [],
+        "tok_oracle_nll": [],
+        "tok_model_nll": [],
+    }
     mt_sum: List[float] = []
     mt_count: List[int] = []
     jt_sum: List[float] = []
@@ -1006,8 +1032,9 @@ def compute_task_perplexity(
         n_trace_steps: int,
     ) -> None:
         with trend_lock:
-            by_sample[int(sample_idx)] = (sp, oracle)
+            by_sample[int(sample_idx)] = sp
             if oracle is not None:
+                si = int(sample_idx)
                 for sm in oracle.steps:
                     t = int(sm.step)
                     _ensure_trend_len(t + 1)
@@ -1017,6 +1044,25 @@ def compute_task_perplexity(
                     if math.isfinite(sm.Jt):
                         jt_sum[t] += float(sm.Jt)
                         jt_count[t] += 1
+                    oracle_tables["step_sample_idx"].append(si)
+                    oracle_tables["step"].append(t)
+                    oracle_tables["step_Mt"].append(float(sm.Mt))
+                    oracle_tables["step_Jt"].append(float(sm.Jt))
+                    oracle_tables["step_oracle_nll"].append(float(sm.oracle_nll))
+                    oracle_tables["step_model_nll"].append(float(sm.model_nll))
+                    oracle_tables["step_n_selected"].append(int(sm.n_selected))
+                    for tok in sm.tokens:
+                        oracle_tables["tok_sample_idx"].append(si)
+                        oracle_tables["tok_step"].append(t)
+                        oracle_tables["tok_gen_pos"].append(int(tok.gen_pos))
+                        oracle_tables["tok_content_pos"].append(int(tok.content_pos))
+                        oracle_tables["tok_sel"].append(int(tok.sel_tok))
+                        oracle_tables["tok_ref"].append(int(tok.ref_tok))
+                        oracle_tables["tok_mt_kl"].append(float(tok.mt_kl))
+                        oracle_tables["tok_oracle_nll"].append(float(tok.oracle_nll))
+                        oracle_tables["tok_model_nll"].append(float(tok.model_nll))
+                # Drop heavy per-step objects; flat tables keep the detail.
+                oracle.steps.clear()
             else:
                 _ensure_trend_len(n_trace_steps)
 
@@ -1118,11 +1164,10 @@ def compute_task_perplexity(
         ]
 
     ordered_idx = sorted(by_sample)
-    model_nlls = [by_sample[i][0].model_commit_nll for i in ordered_idx]
-    oracle_nlls = [by_sample[i][0].oracle_nll for i in ordered_idx]
-    sample_Mt = [by_sample[i][0].Mt_total for i in ordered_idx]
-    sample_Jt = [by_sample[i][0].Jt_total for i in ordered_idx]
-    sample_oracle = [by_sample[i][1] for i in ordered_idx]
+    model_nlls = [by_sample[i].model_commit_nll for i in ordered_idx]
+    oracle_nlls = [by_sample[i].oracle_nll for i in ordered_idx]
+    sample_Mt = [by_sample[i].Mt_total for i in ordered_idx]
+    sample_Jt = [by_sample[i].Jt_total for i in ordered_idx]
 
     model_mean = _mean([x for x in model_nlls if math.isfinite(x)])
     oracle_mean = _mean([x for x in oracle_nlls if math.isfinite(x)])
@@ -1140,7 +1185,8 @@ def compute_task_perplexity(
         sample_Jt=sample_Jt,
         mt_trend=mt_trend,
         jt_trend=jt_trend,
-        sample_oracle=sample_oracle,
+        sample_oracle=[],
+        oracle_tables=oracle_tables if do_replay else {},
         jt_exact_max=k_exact if do_replay else 0,
         jt_markov_order=min(m_order, k_exact - 1) if do_replay else 0,
     )
@@ -1173,45 +1219,48 @@ def save_oracle_artifacts(
         [nll_to_ppl(float(x)) for x in sample_model_nll], dtype=np.float64
     )
 
-    step_sample: list[int] = []
-    step_id: list[int] = []
-    step_Mt: list[float] = []
-    step_Jt: list[float] = []
-    step_onll: list[float] = []
-    step_mnll: list[float] = []
-    step_n_sel: list[int] = []
-
-    tok_sample: list[int] = []
-    tok_step: list[int] = []
-    tok_gen: list[int] = []
-    tok_cpos: list[int] = []
-    tok_sel: list[int] = []
-    tok_ref: list[int] = []
-    tok_mt: list[float] = []
-    tok_onll: list[float] = []
-    tok_mnll: list[float] = []
-
-    for si, oracle in enumerate(ppl.sample_oracle):
-        if oracle is None:
-            continue
-        for sm in oracle.steps:
-            step_sample.append(si)
-            step_id.append(int(sm.step))
-            step_Mt.append(float(sm.Mt))
-            step_Jt.append(float(sm.Jt))
-            step_onll.append(float(sm.oracle_nll))
-            step_mnll.append(float(sm.model_nll))
-            step_n_sel.append(int(sm.n_selected))
-            for t in sm.tokens:
-                tok_sample.append(si)
-                tok_step.append(int(sm.step))
-                tok_gen.append(int(t.gen_pos))
-                tok_cpos.append(int(t.content_pos))
-                tok_sel.append(int(t.sel_tok))
-                tok_ref.append(int(t.ref_tok))
-                tok_mt.append(float(t.mt_kl))
-                tok_onll.append(float(t.oracle_nll))
-                tok_mnll.append(float(t.model_nll))
+    tables = ppl.oracle_tables or {}
+    # Fallback: rebuild from sample_oracle objects if tables were not filled.
+    if not tables.get("step_sample_idx") and ppl.sample_oracle:
+        tables = {
+            "step_sample_idx": [],
+            "step": [],
+            "step_Mt": [],
+            "step_Jt": [],
+            "step_oracle_nll": [],
+            "step_model_nll": [],
+            "step_n_selected": [],
+            "tok_sample_idx": [],
+            "tok_step": [],
+            "tok_gen_pos": [],
+            "tok_content_pos": [],
+            "tok_sel": [],
+            "tok_ref": [],
+            "tok_mt_kl": [],
+            "tok_oracle_nll": [],
+            "tok_model_nll": [],
+        }
+        for si, oracle in enumerate(ppl.sample_oracle):
+            if oracle is None:
+                continue
+            for sm in oracle.steps:
+                tables["step_sample_idx"].append(si)
+                tables["step"].append(int(sm.step))
+                tables["step_Mt"].append(float(sm.Mt))
+                tables["step_Jt"].append(float(sm.Jt))
+                tables["step_oracle_nll"].append(float(sm.oracle_nll))
+                tables["step_model_nll"].append(float(sm.model_nll))
+                tables["step_n_selected"].append(int(sm.n_selected))
+                for t in sm.tokens:
+                    tables["tok_sample_idx"].append(si)
+                    tables["tok_step"].append(int(sm.step))
+                    tables["tok_gen_pos"].append(int(t.gen_pos))
+                    tables["tok_content_pos"].append(int(t.content_pos))
+                    tables["tok_sel"].append(int(t.sel_tok))
+                    tables["tok_ref"].append(int(t.ref_tok))
+                    tables["tok_mt_kl"].append(float(t.mt_kl))
+                    tables["tok_oracle_nll"].append(float(t.oracle_nll))
+                    tables["tok_model_nll"].append(float(t.model_nll))
 
     np.savez_compressed(
         path,
@@ -1219,41 +1268,36 @@ def save_oracle_artifacts(
         n_samples=np.asarray(n, dtype=np.int64),
         jt_exact_max=np.asarray(int(ppl.jt_exact_max), dtype=np.int64),
         jt_markov_order=np.asarray(int(ppl.jt_markov_order), dtype=np.int64),
-        # Task means (also in CSV)
         oracle_nll=np.asarray(ppl.oracle_nll, dtype=np.float64),
         oracle_ppl=np.asarray(ppl.oracle_ppl, dtype=np.float64),
         model_commit_nll=np.asarray(ppl.model_commit_nll, dtype=np.float64),
         model_commit_ppl=np.asarray(ppl.model_commit_ppl, dtype=np.float64),
         Mt_total=np.asarray(ppl.Mt_total, dtype=np.float64),
         Jt_total=np.asarray(ppl.Jt_total, dtype=np.float64),
-        # Per-sample
         sample_oracle_nll=sample_oracle_nll,
         sample_model_nll=sample_model_nll,
         sample_oracle_ppl=sample_oracle_ppl,
         sample_model_ppl=sample_model_ppl,
         sample_Mt=sample_Mt,
         sample_Jt=sample_Jt,
-        # Mean-over-samples step trends (for fidelity plots)
         mt_trend=np.asarray(ppl.mt_trend, dtype=np.float64),
         jt_trend=np.asarray(ppl.jt_trend, dtype=np.float64),
-        # Per-sample × step
-        step_sample_idx=np.asarray(step_sample, dtype=np.int32),
-        step=np.asarray(step_id, dtype=np.int32),
-        step_Mt=np.asarray(step_Mt, dtype=np.float64),
-        step_Jt=np.asarray(step_Jt, dtype=np.float64),
-        step_oracle_nll=np.asarray(step_onll, dtype=np.float64),
-        step_model_nll=np.asarray(step_mnll, dtype=np.float64),
-        step_n_selected=np.asarray(step_n_sel, dtype=np.int32),
-        # Per-token commits
-        tok_sample_idx=np.asarray(tok_sample, dtype=np.int32),
-        tok_step=np.asarray(tok_step, dtype=np.int32),
-        tok_gen_pos=np.asarray(tok_gen, dtype=np.int32),
-        tok_content_pos=np.asarray(tok_cpos, dtype=np.int32),
-        tok_sel=np.asarray(tok_sel, dtype=np.int32),
-        tok_ref=np.asarray(tok_ref, dtype=np.int32),
-        tok_mt_kl=np.asarray(tok_mt, dtype=np.float64),
-        tok_oracle_nll=np.asarray(tok_onll, dtype=np.float64),
-        tok_model_nll=np.asarray(tok_mnll, dtype=np.float64),
+        step_sample_idx=np.asarray(tables.get("step_sample_idx", []), dtype=np.int32),
+        step=np.asarray(tables.get("step", []), dtype=np.int32),
+        step_Mt=np.asarray(tables.get("step_Mt", []), dtype=np.float64),
+        step_Jt=np.asarray(tables.get("step_Jt", []), dtype=np.float64),
+        step_oracle_nll=np.asarray(tables.get("step_oracle_nll", []), dtype=np.float64),
+        step_model_nll=np.asarray(tables.get("step_model_nll", []), dtype=np.float64),
+        step_n_selected=np.asarray(tables.get("step_n_selected", []), dtype=np.int32),
+        tok_sample_idx=np.asarray(tables.get("tok_sample_idx", []), dtype=np.int32),
+        tok_step=np.asarray(tables.get("tok_step", []), dtype=np.int32),
+        tok_gen_pos=np.asarray(tables.get("tok_gen_pos", []), dtype=np.int32),
+        tok_content_pos=np.asarray(tables.get("tok_content_pos", []), dtype=np.int32),
+        tok_sel=np.asarray(tables.get("tok_sel", []), dtype=np.int32),
+        tok_ref=np.asarray(tables.get("tok_ref", []), dtype=np.int32),
+        tok_mt_kl=np.asarray(tables.get("tok_mt_kl", []), dtype=np.float64),
+        tok_oracle_nll=np.asarray(tables.get("tok_oracle_nll", []), dtype=np.float64),
+        tok_model_nll=np.asarray(tables.get("tok_model_nll", []), dtype=np.float64),
     )
     return path
 

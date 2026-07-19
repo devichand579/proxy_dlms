@@ -552,8 +552,13 @@ def _save_stem_plot_artifacts(
     """
     stem_dir = art_dir / stem
     stem_dir.mkdir(parents=True, exist_ok=True)
-    if perplexity is not None and getattr(perplexity, "sample_oracle", None):
-        if any(s is not None for s in perplexity.sample_oracle):
+    if perplexity is not None:
+        tables = getattr(perplexity, "oracle_tables", None) or {}
+        has_tables = bool(tables.get("step_sample_idx"))
+        has_objs = any(
+            s is not None for s in (getattr(perplexity, "sample_oracle", None) or [])
+        )
+        if has_tables or has_objs:
             save_oracle_artifacts(stem_dir / "oracle.npz", perplexity, stem=stem)
     if fidelity:
         np.savez_compressed(
@@ -905,8 +910,11 @@ def run_compare(
                 # Drop bulky payloads; batch compare reloads from plot_artifacts/.
                 result["surfaces"] = None
                 result["fidelity"] = None
-                if perplexity is not None and hasattr(perplexity, "sample_oracle"):
-                    perplexity.sample_oracle = []
+                if perplexity is not None:
+                    if hasattr(perplexity, "sample_oracle"):
+                        perplexity.sample_oracle = []
+                    if hasattr(perplexity, "oracle_tables"):
+                        perplexity.oracle_tables = {}
                 result["metrics"] = None
 
                 # Flush CSV + batch compare plots after each file.

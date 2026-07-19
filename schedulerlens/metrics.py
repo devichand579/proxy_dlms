@@ -228,33 +228,78 @@ def _iter_traces(path: Union[str, Path]):
     yield from iter_npz_traces(path)
 
 
+def _ensure_online_len(sums: List[float], counts: List[int], t_max: int) -> None:
+    if t_max <= len(sums):
+        return
+    pad = t_max - len(sums)
+    sums.extend([0.0] * pad)
+    counts.extend([0] * pad)
+
+
 def compute_task_metrics(
     trace_path: Union[str, Path],
     max_samples: Optional[int] = None,
     bucket_size: Optional[int] = None,
     verbose: bool = True,
 ) -> TaskMetrics:
-    """Compute task-level caps and per-step trends from a trace file."""
+    """Compute task-level caps and per-step trends from a trace file.
+
+    Streams samples when ``bucket_size`` is None (compare default) so large NPZs
+    do not retain every ``SampleProxies`` in RAM before oracle replay.
+    """
     trace_path = Path(trace_path)
     if not trace_path.exists():
         raise FileNotFoundError(f"Trace file not found: {trace_path}")
 
+    need_buckets = bucket_size is not None
+    if need_buckets and bucket_size <= 0:
+        raise ValueError(f"bucket_size must be positive, got {bucket_size}")
+
+    # Online path (no buckets): O(1) sample retention.
+    sample_entropy = {name: [] for name in PROXY_ATTRS}
+    sample_uniform = {name: [] for name in PROXY_ATTRS}
+    trend_sum = {name: [] for name in PROXY_ATTRS}
+    trend_count = {name: [] for name in PROXY_ATTRS}
+    n_unmasked_sum: List[float] = []
+    n_unmasked_count: List[int] = []
+
+    # Bucket path still materializes samples (uncommon for compare).
     all_sample_proxies: List[SampleProxies] = []
+    n_samples = 0
+    t_max = 0
 
     for i, trace_dict in enumerate(_iter_traces(trace_path)):
         if max_samples is not None and i >= max_samples:
             break
         try:
-            all_sample_proxies.append(
-                compute_sample_proxies(trace_dict, trace_name=trace_path)
-            )
+            sp = compute_sample_proxies(trace_dict, trace_name=trace_path)
         except TraceProxyError as e:
             raise TraceProxyError(f"sample {i}: {e}") from e
+
+        n_samples += 1
+        t_max = max(t_max, len(sp.step_proxies))
+
+        if need_buckets:
+            all_sample_proxies.append(sp)
+        else:
+            for name in PROXY_ATTRS:
+                sample_entropy[name].append(float(sp.caps[name].entropy))
+                sample_uniform[name].append(float(sp.caps[name].uniform))
+                _ensure_online_len(trend_sum[name], trend_count[name], t_max)
+            _ensure_online_len(n_unmasked_sum, n_unmasked_count, t_max)
+            for proxy in sp.step_proxies:
+                t = int(proxy.step)
+                if t >= t_max:
+                    continue
+                for name in PROXY_ATTRS:
+                    trend_sum[name][t] += float(getattr(proxy, name))
+                    trend_count[name][t] += 1
+                n_unmasked_sum[t] += float(proxy.n_selected)
+                n_unmasked_count[t] += 1
 
         if verbose and (i + 1) % 50 == 0:
             logger.info("Processed %d samples ...", i + 1)
 
-    n_samples = len(all_sample_proxies)
     if n_samples == 0:
         logger.warning("No valid samples found in %s", trace_path)
         empty = _empty_proxy_reports()
@@ -272,26 +317,47 @@ def compute_task_metrics(
     if verbose:
         logger.info("Processed %d samples total.", n_samples)
 
-    t_max = max(len(sp.step_proxies) for sp in all_sample_proxies)
     proxies = _empty_proxy_reports()
-
-    for name in PROXY_ATTRS:
-        rep = proxies[name]
-        rep.sample_entropy = [sp.caps[name].entropy for sp in all_sample_proxies]
-        rep.sample_uniform = [sp.caps[name].uniform for sp in all_sample_proxies]
-        rep.entropy = float(np.mean(rep.sample_entropy))
-        rep.uniform = float(np.mean(rep.sample_uniform))
-        rep.trend = _step_trends(all_sample_proxies, name, t_max)
-
-    n_unmasked_trend = _step_trends(all_sample_proxies, "n_selected", t_max)
-
     n_buckets = 0
     n_unmasked_bucket_trend = np.array([])
-    if bucket_size is not None:
-        if bucket_size <= 0:
-            raise ValueError(f"bucket_size must be positive, got {bucket_size}")
+
+    if need_buckets:
+        t_max = max(len(sp.step_proxies) for sp in all_sample_proxies)
+        for name in PROXY_ATTRS:
+            rep = proxies[name]
+            rep.sample_entropy = [sp.caps[name].entropy for sp in all_sample_proxies]
+            rep.sample_uniform = [sp.caps[name].uniform for sp in all_sample_proxies]
+            rep.entropy = float(np.mean(rep.sample_entropy))
+            rep.uniform = float(np.mean(rep.sample_uniform))
+            rep.trend = _step_trends(all_sample_proxies, name, t_max)
+        n_unmasked_trend = _step_trends(all_sample_proxies, "n_selected", t_max)
         n_buckets, n_unmasked_bucket_trend = _apply_bucket_trends(
-            all_sample_proxies, proxies, t_max, bucket_size
+            all_sample_proxies, proxies, t_max, int(bucket_size)
+        )
+        all_sample_proxies.clear()
+    else:
+        for name in PROXY_ATTRS:
+            rep = proxies[name]
+            rep.sample_entropy = sample_entropy[name]
+            rep.sample_uniform = sample_uniform[name]
+            rep.entropy = float(np.mean(rep.sample_entropy)) if rep.sample_entropy else 0.0
+            rep.uniform = float(np.mean(rep.sample_uniform)) if rep.sample_uniform else 0.0
+            sums, counts = trend_sum[name], trend_count[name]
+            rep.trend = np.array(
+                [
+                    (sums[t] / counts[t]) if counts[t] else float("nan")
+                    for t in range(t_max)
+                ],
+                dtype=np.float64,
+            )
+        n_unmasked_trend = np.array(
+            [
+                (n_unmasked_sum[t] / n_unmasked_count[t])
+                if n_unmasked_count[t]
+                else float("nan")
+                for t in range(t_max)
+            ],
+            dtype=np.float64,
         )
 
     return TaskMetrics(
