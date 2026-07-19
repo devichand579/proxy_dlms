@@ -37,6 +37,19 @@ def _ensure_pcfg_path() -> None:
 
 
 @dataclass
+class OracleTokenMetrics:
+    """Per-commit (token) oracle quantities within a step."""
+
+    gen_pos: int
+    content_pos: int
+    sel_tok: int
+    ref_tok: int
+    mt_kl: float  # KL(q‖p) contribution at this position
+    oracle_nll: float  # -log q(ref | committed)
+    model_nll: float  # -log p(sel | model logits)
+
+
+@dataclass
 class OracleStepMetrics:
     step: int
     Mt: float
@@ -44,6 +57,29 @@ class OracleStepMetrics:
     oracle_nll: float
     model_nll: float
     n_selected: int
+    tokens: list[OracleTokenMetrics] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "step": self.step,
+            "Mt": self.Mt,
+            "Jt": self.Jt,
+            "oracle_nll": self.oracle_nll,
+            "model_nll": self.model_nll,
+            "n_selected": self.n_selected,
+            "tokens": [
+                {
+                    "gen_pos": t.gen_pos,
+                    "content_pos": t.content_pos,
+                    "sel_tok": t.sel_tok,
+                    "ref_tok": t.ref_tok,
+                    "mt_kl": t.mt_kl,
+                    "oracle_nll": t.oracle_nll,
+                    "model_nll": t.model_nll,
+                }
+                for t in self.tokens
+            ],
+        }
 
 
 @dataclass
@@ -55,6 +91,17 @@ class OracleSampleMetrics:
     oracle_ppl: float
     model_ppl: float
     steps: list[OracleStepMetrics]
+
+    def to_dict(self) -> dict:
+        return {
+            "Mt_total": self.Mt_total,
+            "Jt_total": self.Jt_total,
+            "oracle_nll": self.oracle_nll,
+            "model_nll": self.model_nll,
+            "oracle_ppl": self.oracle_ppl,
+            "model_ppl": self.model_ppl,
+            "steps": [s.to_dict() for s in self.steps],
+        }
 
 
 def nll_to_ppl(nll: float) -> float:
@@ -453,27 +500,158 @@ def _batched_forward_logprobs(
     return _run()
 
 
-def _pcfg_metrics_for_step(engine, job: _StepJob, logps: dict[int, np.ndarray], kl) -> OracleStepMetrics:
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return int(default)
+    return int(raw)
+
+
+def default_jt_exact_max() -> int:
+    """Max |S| for exact Jt. Exact |S|=k chart RAM grows ~exponentially in k."""
+    return max(2, _env_int("SCHEDULERLENS_JT_EXACT_MAX", 3))
+
+
+def default_jt_markov_order() -> int:
+    """Markov order for large-|S| Jt (window size = order+1, capped by exact_max)."""
+    return max(1, _env_int("SCHEDULERLENS_JT_MARKOV_ORDER", 2))
+
+
+def default_jt_concurrency() -> int:
+    """Max concurrent exact CKY Jt calls (each can hold multi-GB chart caches)."""
+    return max(1, _env_int("SCHEDULERLENS_JT_CONCURRENCY", 2))
+
+
+_JT_SEM: Optional[threading.Semaphore] = None
+_JT_SEM_LOCK = threading.Lock()
+
+
+def _jt_semaphore() -> threading.Semaphore:
+    global _JT_SEM
+    with _JT_SEM_LOCK:
+        if _JT_SEM is None:
+            _JT_SEM = threading.Semaphore(default_jt_concurrency())
+        return _JT_SEM
+
+
+def _jt_exact(engine, n_content: int, committed: dict, positions: Sequence[int]) -> float:
+    """Exact multi-information Jt on ``positions``; clears engine chart cache after."""
+    S = sorted({int(p) for p in positions})
+    if len(S) < 2:
+        return 0.0
+    sem = _jt_semaphore()
+    sem.acquire()
+    try:
+        return float(engine.Jt(n_content, committed, S))
+    finally:
+        if hasattr(engine, "clear_cache"):
+            engine.clear_cache()
+        sem.release()
+
+
+def compute_jt(
+    engine,
+    n_content: int,
+    committed: dict,
+    S: Sequence[int],
+    *,
+    exact_max: Optional[int] = None,
+    markov_order: Optional[int] = None,
+) -> float:
+    """PCFG multi-information Jt = Σ H(X_i) − H(X_S) on the simultaneous set S.
+
+    Exact CKY joint entropy is exponential in |S| (≈35 GB peak at |S|=8 on
+    LLaDA-PCFG). For large parallel unmasks (DUS, EB, …) we use a Markov
+    chain-rule approximation of order ``markov_order``:
+
+        Jt(S) ≈ Σ_i [ Jt(S[i−m : i+1]) − Jt(S[i−m : i]) ]
+
+    with m = markov_order. Each term only needs exact joints of size ≤ m+1
+    (capped by ``exact_max``). When |S| ≤ exact_max this equals the exact Jt.
+    """
+    positions = sorted({int(p) for p in S})
+    if len(positions) < 2:
+        return 0.0
+
+    k_exact = max(2, int(exact_max if exact_max is not None else default_jt_exact_max()))
+    order = max(1, int(markov_order if markov_order is not None else default_jt_markov_order()))
+    # Never ask exact Jt for sets larger than k_exact.
+    order = min(order, k_exact - 1)
+
+    if len(positions) <= k_exact:
+        return _jt_exact(engine, n_content, committed, positions)
+
+    # Cache exact subset Jt within this call (left window often reappears).
+    cache: dict[tuple[int, ...], float] = {}
+
+    def _cached(subset: Sequence[int]) -> float:
+        key = tuple(subset)
+        if len(key) < 2:
+            return 0.0
+        if key not in cache:
+            cache[key] = _jt_exact(engine, n_content, committed, key)
+        return cache[key]
+
+    total = 0.0
+    for i in range(1, len(positions)):
+        lo = max(0, i - order)
+        left = positions[lo:i]
+        window = positions[lo : i + 1]
+        total += _cached(window) - _cached(left)
+    return float(total)
+
+
+def _pcfg_metrics_for_step(
+    engine,
+    job: _StepJob,
+    logps: dict[int, np.ndarray],
+    kl,
+    *,
+    jt_exact_max: Optional[int] = None,
+    jt_markov_order: Optional[int] = None,
+) -> OracleStepMetrics:
     """Mt / Jt / NLLs for one precomputed step (uses a private engine)."""
     q_batch = engine.marginals_batch(job.n_content, job.committed, job.S_content)
-    jt = float(engine.Jt(job.n_content, job.committed, job.S_content))
+    jt = compute_jt(
+        engine,
+        job.n_content,
+        job.committed,
+        job.S_content,
+        exact_max=jt_exact_max,
+        markov_order=jt_markov_order,
+    )
     if hasattr(engine, "clear_cache"):
         engine.clear_cache()
 
     step_mt = 0.0
     step_onll = 0.0
     step_mnll = 0.0
-    for i, (_gen_pos, cpos, sel_tok) in enumerate(job.content_events):
+    token_rows: list[OracleTokenMetrics] = []
+    for i, (gen_pos, cpos, sel_tok) in enumerate(job.content_events):
         model_pos = int(job.model_positions[i])
         q = q_batch.get(int(cpos), np.zeros(engine.V))
         p = np.exp(logps[int(model_pos)])
         if p.shape[0] != q.shape[0]:
             p = p[: q.shape[0]]
             p = p / max(float(p.sum()), EPS)
-        step_mt += kl(q, p)
-        ref_tid = job.tmap[job.tokens[cpos]]
-        step_onll += -math.log(float(q[ref_tid]) + EPS)
-        step_mnll += model_nll_at_commit(logps, model_pos, int(sel_tok))
+        mt_kl = float(kl(q, p))
+        ref_tid = int(job.tmap[job.tokens[cpos]])
+        onll = -math.log(float(q[ref_tid]) + EPS)
+        mnll = float(model_nll_at_commit(logps, model_pos, int(sel_tok)))
+        step_mt += mt_kl
+        step_onll += onll
+        step_mnll += mnll
+        token_rows.append(
+            OracleTokenMetrics(
+                gen_pos=int(gen_pos),
+                content_pos=int(cpos),
+                sel_tok=int(sel_tok),
+                ref_tok=ref_tid,
+                mt_kl=mt_kl,
+                oracle_nll=onll,
+                model_nll=mnll,
+            )
+        )
 
     n_ev = max(len(job.content_events), 1)
     return OracleStepMetrics(
@@ -483,6 +661,7 @@ def _pcfg_metrics_for_step(engine, job: _StepJob, logps: dict[int, np.ndarray], 
         oracle_nll=step_onll / n_ev,
         model_nll=step_mnll / n_ev,
         n_selected=len(job.content_events),
+        tokens=token_rows,
     )
 
 
@@ -498,6 +677,8 @@ def replay_oracle_mt_jt(
     engine_pool: Optional[_EnginePool] = None,
     model_lock: Optional[threading.Lock] = None,
     trace_name: Union[str, Path, None] = None,
+    jt_exact_max: Optional[int] = None,
+    jt_markov_order: Optional[int] = None,
 ) -> OracleSampleMetrics:
     """Re-forward model at each trace step; compute exact Mt and Jt vs PCFG oracle.
 
@@ -505,6 +686,9 @@ def replay_oracle_mt_jt(
     - Batched GPU/CPU model forwards over precomputed step inputs.
     - Thread pool over steps for PCFG Mt/Jt (each thread borrows an engine).
     - Pipeline: submit CPU work for chunk t while GPU runs chunk t+1.
+
+    Large simultaneous unmask sets (|S| > ``jt_exact_max``) use Markov Jt
+    (see :func:`compute_jt`) so DUS/EB-style steps do not OOM.
     """
     _ensure_pcfg_path()
     from pcfg_engine import kl
@@ -524,6 +708,17 @@ def replay_oracle_mt_jt(
             steps=[],
         )
 
+    k_exact = max(2, int(jt_exact_max if jt_exact_max is not None else default_jt_exact_max()))
+    m_order = max(1, int(jt_markov_order if jt_markov_order is not None else default_jt_markov_order()))
+    max_s = max((len(j.S_content) for j in jobs), default=0)
+    if max_s > k_exact:
+        logger.debug(
+            "Oracle Jt: max |S|=%d > exact_max=%d → Markov order=%d",
+            max_s,
+            k_exact,
+            min(m_order, k_exact - 1),
+        )
+
     n_workers = max(1, int(step_workers if step_workers is not None else _default_step_workers()))
     batch = max(1, int(forward_batch_size))
     owns_pool = engine_pool is None
@@ -534,7 +729,14 @@ def replay_oracle_mt_jt(
     def _run_pcfg(idx: int, logps: dict[int, np.ndarray]) -> None:
         eng = pool.borrow()
         try:
-            step_metrics[idx] = _pcfg_metrics_for_step(eng, jobs[idx], logps, kl)
+            step_metrics[idx] = _pcfg_metrics_for_step(
+                eng,
+                jobs[idx],
+                logps,
+                kl,
+                jt_exact_max=k_exact,
+                jt_markov_order=m_order,
+            )
         finally:
             pool.release(eng)
 
@@ -610,10 +812,14 @@ class TaskPerplexity:
     n_samples: int
     sample_model_nll: List[float] = field(default_factory=list)
     sample_oracle_nll: List[float] = field(default_factory=list)
+    sample_Mt: List[float] = field(default_factory=list)
+    sample_Jt: List[float] = field(default_factory=list)
     mt_trend: List[float] = field(default_factory=list)
     jt_trend: List[float] = field(default_factory=list)
-    # Per-sample step lists from replay (OracleStepMetrics).
-    sample_oracle_steps: List[list] = field(default_factory=list)
+    # Per-sample OracleSampleMetrics from replay (token-level detail retained).
+    sample_oracle: List[Optional[OracleSampleMetrics]] = field(default_factory=list)
+    jt_exact_max: int = 0
+    jt_markov_order: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -626,8 +832,14 @@ class TaskPerplexity:
             "n_samples": self.n_samples,
             "sample_model_nll": self.sample_model_nll,
             "sample_oracle_nll": self.sample_oracle_nll,
+            "sample_Mt": self.sample_Mt,
+            "sample_Jt": self.sample_Jt,
             "mt_trend": self.mt_trend,
             "jt_trend": self.jt_trend,
+            "jt_exact_max": self.jt_exact_max,
+            "jt_markov_order": self.jt_markov_order,
+            # Omit full token tables from JSON (use oracle.npz); keep counts.
+            "n_oracle_samples": sum(1 for s in self.sample_oracle if s is not None),
         }
 
 
@@ -644,6 +856,8 @@ def _compute_sample_perplexity_inner(
     engine_pool: Optional[_EnginePool] = None,
     model_lock: Optional[threading.Lock] = None,
     trace_name: Union[str, Path, None] = None,
+    jt_exact_max: Optional[int] = None,
+    jt_markov_order: Optional[int] = None,
 ):
     """Return (SamplePerplexity, optional OracleSampleMetrics)."""
     meta = trace_dict.get("metadata") or {}
@@ -664,6 +878,8 @@ def _compute_sample_perplexity_inner(
             engine_pool=engine_pool,
             model_lock=model_lock,
             trace_name=trace_name,
+            jt_exact_max=jt_exact_max,
+            jt_markov_order=jt_markov_order,
         )
         return SamplePerplexity(
             model_commit_nll=oracle.model_nll,
@@ -706,6 +922,8 @@ def compute_sample_perplexity(
     forward_batch_size: int = 8,
     step_workers: Optional[int] = None,
     trace_name: Union[str, Path, None] = None,
+    jt_exact_max: Optional[int] = None,
+    jt_markov_order: Optional[int] = None,
 ) -> SamplePerplexity:
     """Per-sample commit NLL/PPL; oracle fields when PCFG metadata + engine present."""
     sp, _oracle = _compute_sample_perplexity_inner(
@@ -718,6 +936,8 @@ def compute_sample_perplexity(
         forward_batch_size=forward_batch_size,
         step_workers=step_workers,
         trace_name=trace_name,
+        jt_exact_max=jt_exact_max,
+        jt_markov_order=jt_markov_order,
     )
     return sp
 
@@ -735,6 +955,8 @@ def compute_task_perplexity(
     oracle_workers: int = 1,
     step_workers: Optional[int] = None,
     forward_batch_size: int = 8,
+    jt_exact_max: Optional[int] = None,
+    jt_markov_order: Optional[int] = None,
 ) -> TaskPerplexity:
     """Aggregate perplexity / oracle metrics over a trace file.
 
@@ -742,6 +964,8 @@ def compute_task_perplexity(
     - ``forward_batch_size``: batched model forwards within a sample
     - ``step_workers``: parallel PCFG Mt/Jt across steps (engine pool)
     - ``oracle_workers``: parallel samples (shared model + lock; shared engine pool)
+
+    Large-|S| Jt uses Markov approximation (``jt_exact_max`` / ``jt_markov_order``).
     """
     from traces.trace_npz import iter_npz_traces
 
@@ -755,10 +979,8 @@ def compute_task_perplexity(
             engine = None
             vocab = None
 
-    model_nlls: List[float] = []
-    oracle_nlls: List[float] = []
-    mt_vals: List[float] = []
-    jt_vals: List[float] = []
+    # Indexed by NPZ sample order (filled as results arrive; may be sparse until done).
+    by_sample: dict[int, tuple[SamplePerplexity, Optional[OracleSampleMetrics]]] = {}
     mt_sum: List[float] = []
     mt_count: List[int] = []
     jt_sum: List[float] = []
@@ -777,16 +999,14 @@ def compute_task_perplexity(
         jt_count.extend([0] * pad)
         n_steps = t_max
 
-    def _fold(sp: SamplePerplexity, oracle, n_trace_steps: int) -> None:
+    def _fold(
+        sample_idx: int,
+        sp: SamplePerplexity,
+        oracle: Optional[OracleSampleMetrics],
+        n_trace_steps: int,
+    ) -> None:
         with trend_lock:
-            if math.isfinite(sp.model_commit_nll):
-                model_nlls.append(sp.model_commit_nll)
-            if math.isfinite(sp.oracle_nll):
-                oracle_nlls.append(sp.oracle_nll)
-            if math.isfinite(sp.Mt_total):
-                mt_vals.append(sp.Mt_total)
-            if math.isfinite(sp.Jt_total):
-                jt_vals.append(sp.Jt_total)
+            by_sample[int(sample_idx)] = (sp, oracle)
             if oracle is not None:
                 for sm in oracle.steps:
                     t = int(sm.step)
@@ -797,7 +1017,6 @@ def compute_task_perplexity(
                     if math.isfinite(sm.Jt):
                         jt_sum[t] += float(sm.Jt)
                         jt_count[t] += 1
-                oracle.steps.clear()
             else:
                 _ensure_trend_len(n_trace_steps)
 
@@ -812,21 +1031,26 @@ def compute_task_perplexity(
     do_replay = bool(replay_oracle and model is not None and vocab is not None)
     pool: Optional[_EnginePool] = None
     model_lock: Optional[threading.Lock] = None
+    k_exact = max(2, int(jt_exact_max if jt_exact_max is not None else default_jt_exact_max()))
+    m_order = max(1, int(jt_markov_order if jt_markov_order is not None else default_jt_markov_order()))
     if do_replay:
         pool_size = n_sample_workers * n_step_workers
         pool = _EnginePool(pool_size)
         model_lock = threading.Lock()
         if verbose:
             logger.info(
-                "Oracle replay: samples=%d step_workers=%d forward_batch=%d engine_pool=%d",
+                "Oracle replay: samples=%d step_workers=%d forward_batch=%d "
+                "engine_pool=%d jt_exact_max=%d jt_markov=%d",
                 n_sample_workers,
                 n_step_workers,
                 forward_batch_size,
                 pool_size,
+                k_exact,
+                min(m_order, k_exact - 1),
             )
 
-    def _process_one(tr: dict):
-        return _compute_sample_perplexity_inner(
+    def _process_one(sample_idx: int, tr: dict):
+        return sample_idx, _compute_sample_perplexity_inner(
             tr,
             engine=engine,
             vocab=vocab,
@@ -838,28 +1062,30 @@ def compute_task_perplexity(
             engine_pool=pool,
             model_lock=model_lock,
             trace_name=trace_path,
+            jt_exact_max=k_exact,
+            jt_markov_order=m_order,
         ), len(tr.get("step_traces") or [])
 
     n_done = 0
-    chunk: list[dict] = []
+    chunk: list[tuple[int, dict]] = []
 
-    def _flush_chunk(items: list[dict]) -> None:
+    def _flush_chunk(items: list[tuple[int, dict]]) -> None:
         nonlocal n_done
         if not items:
             return
         if n_sample_workers == 1 or not do_replay:
-            for tr in items:
-                (sp, oracle), n_ts = _process_one(tr)
-                _fold(sp, oracle, n_ts)
+            for si, tr in items:
+                sample_idx, (sp, oracle), n_ts = _process_one(si, tr)
+                _fold(sample_idx, sp, oracle, n_ts)
                 n_done += 1
                 if verbose and n_done % 10 == 0:
                     logger.info("Oracle replay: %d samples ...", n_done)
             return
         with ThreadPoolExecutor(max_workers=n_sample_workers) as ex:
-            futs = [ex.submit(_process_one, tr) for tr in items]
+            futs = [ex.submit(_process_one, si, tr) for si, tr in items]
             for fut in as_completed(futs):
-                (sp, oracle), n_ts = fut.result()
-                _fold(sp, oracle, n_ts)
+                sample_idx, (sp, oracle), n_ts = fut.result()
+                _fold(sample_idx, sp, oracle, n_ts)
                 n_done += 1
                 if verbose and n_done % 10 == 0:
                     logger.info("Oracle replay: %d samples ...", n_done)
@@ -867,7 +1093,7 @@ def compute_task_perplexity(
     for i, tr in enumerate(iter_npz_traces(trace_path)):
         if max_samples is not None and i >= max_samples:
             break
-        chunk.append(tr)
+        chunk.append((i, tr))
         if len(chunk) >= max(n_sample_workers, 1):
             _flush_chunk(chunk)
             chunk = []
@@ -891,20 +1117,150 @@ def compute_task_perplexity(
             for t in range(n_steps)
         ]
 
-    model_mean = _mean(model_nlls)
-    oracle_mean = _mean(oracle_nlls)
+    ordered_idx = sorted(by_sample)
+    model_nlls = [by_sample[i][0].model_commit_nll for i in ordered_idx]
+    oracle_nlls = [by_sample[i][0].oracle_nll for i in ordered_idx]
+    sample_Mt = [by_sample[i][0].Mt_total for i in ordered_idx]
+    sample_Jt = [by_sample[i][0].Jt_total for i in ordered_idx]
+    sample_oracle = [by_sample[i][1] for i in ordered_idx]
+
+    model_mean = _mean([x for x in model_nlls if math.isfinite(x)])
+    oracle_mean = _mean([x for x in oracle_nlls if math.isfinite(x)])
     return TaskPerplexity(
         model_commit_nll=model_mean,
         model_commit_ppl=nll_to_ppl(model_mean),
         oracle_nll=oracle_mean,
         oracle_ppl=nll_to_ppl(oracle_mean),
-        Mt_total=_mean(mt_vals),
-        Jt_total=_mean(jt_vals),
-        n_samples=len(model_nlls),
+        Mt_total=_mean([x for x in sample_Mt if math.isfinite(x)]),
+        Jt_total=_mean([x for x in sample_Jt if math.isfinite(x)]),
+        n_samples=len(ordered_idx),
         sample_model_nll=model_nlls,
         sample_oracle_nll=oracle_nlls,
+        sample_Mt=sample_Mt,
+        sample_Jt=sample_Jt,
         mt_trend=mt_trend,
         jt_trend=jt_trend,
-        sample_oracle_steps=[],
+        sample_oracle=sample_oracle,
+        jt_exact_max=k_exact if do_replay else 0,
+        jt_markov_order=min(m_order, k_exact - 1) if do_replay else 0,
     )
+
+
+def save_oracle_artifacts(
+    path: Union[str, Path],
+    ppl: TaskPerplexity,
+    *,
+    stem: str = "",
+) -> Path:
+    """Persist granular oracle replay results (sample / step / token) to NPZ.
+
+    Expensive oracle quantities are kept so plots and analyses can be redone
+    without replaying the PCFG model. Proxy M̂/Ĵ caps are intentionally omitted
+    (cheap to recompute from traces).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    n = int(ppl.n_samples)
+    sample_oracle_nll = np.asarray(ppl.sample_oracle_nll, dtype=np.float64)
+    sample_model_nll = np.asarray(ppl.sample_model_nll, dtype=np.float64)
+    sample_Mt = np.asarray(ppl.sample_Mt, dtype=np.float64)
+    sample_Jt = np.asarray(ppl.sample_Jt, dtype=np.float64)
+    sample_oracle_ppl = np.asarray(
+        [nll_to_ppl(float(x)) for x in sample_oracle_nll], dtype=np.float64
+    )
+    sample_model_ppl = np.asarray(
+        [nll_to_ppl(float(x)) for x in sample_model_nll], dtype=np.float64
+    )
+
+    step_sample: list[int] = []
+    step_id: list[int] = []
+    step_Mt: list[float] = []
+    step_Jt: list[float] = []
+    step_onll: list[float] = []
+    step_mnll: list[float] = []
+    step_n_sel: list[int] = []
+
+    tok_sample: list[int] = []
+    tok_step: list[int] = []
+    tok_gen: list[int] = []
+    tok_cpos: list[int] = []
+    tok_sel: list[int] = []
+    tok_ref: list[int] = []
+    tok_mt: list[float] = []
+    tok_onll: list[float] = []
+    tok_mnll: list[float] = []
+
+    for si, oracle in enumerate(ppl.sample_oracle):
+        if oracle is None:
+            continue
+        for sm in oracle.steps:
+            step_sample.append(si)
+            step_id.append(int(sm.step))
+            step_Mt.append(float(sm.Mt))
+            step_Jt.append(float(sm.Jt))
+            step_onll.append(float(sm.oracle_nll))
+            step_mnll.append(float(sm.model_nll))
+            step_n_sel.append(int(sm.n_selected))
+            for t in sm.tokens:
+                tok_sample.append(si)
+                tok_step.append(int(sm.step))
+                tok_gen.append(int(t.gen_pos))
+                tok_cpos.append(int(t.content_pos))
+                tok_sel.append(int(t.sel_tok))
+                tok_ref.append(int(t.ref_tok))
+                tok_mt.append(float(t.mt_kl))
+                tok_onll.append(float(t.oracle_nll))
+                tok_mnll.append(float(t.model_nll))
+
+    np.savez_compressed(
+        path,
+        stem=np.asarray(stem),
+        n_samples=np.asarray(n, dtype=np.int64),
+        jt_exact_max=np.asarray(int(ppl.jt_exact_max), dtype=np.int64),
+        jt_markov_order=np.asarray(int(ppl.jt_markov_order), dtype=np.int64),
+        # Task means (also in CSV)
+        oracle_nll=np.asarray(ppl.oracle_nll, dtype=np.float64),
+        oracle_ppl=np.asarray(ppl.oracle_ppl, dtype=np.float64),
+        model_commit_nll=np.asarray(ppl.model_commit_nll, dtype=np.float64),
+        model_commit_ppl=np.asarray(ppl.model_commit_ppl, dtype=np.float64),
+        Mt_total=np.asarray(ppl.Mt_total, dtype=np.float64),
+        Jt_total=np.asarray(ppl.Jt_total, dtype=np.float64),
+        # Per-sample
+        sample_oracle_nll=sample_oracle_nll,
+        sample_model_nll=sample_model_nll,
+        sample_oracle_ppl=sample_oracle_ppl,
+        sample_model_ppl=sample_model_ppl,
+        sample_Mt=sample_Mt,
+        sample_Jt=sample_Jt,
+        # Mean-over-samples step trends (for fidelity plots)
+        mt_trend=np.asarray(ppl.mt_trend, dtype=np.float64),
+        jt_trend=np.asarray(ppl.jt_trend, dtype=np.float64),
+        # Per-sample × step
+        step_sample_idx=np.asarray(step_sample, dtype=np.int32),
+        step=np.asarray(step_id, dtype=np.int32),
+        step_Mt=np.asarray(step_Mt, dtype=np.float64),
+        step_Jt=np.asarray(step_Jt, dtype=np.float64),
+        step_oracle_nll=np.asarray(step_onll, dtype=np.float64),
+        step_model_nll=np.asarray(step_mnll, dtype=np.float64),
+        step_n_selected=np.asarray(step_n_sel, dtype=np.int32),
+        # Per-token commits
+        tok_sample_idx=np.asarray(tok_sample, dtype=np.int32),
+        tok_step=np.asarray(tok_step, dtype=np.int32),
+        tok_gen_pos=np.asarray(tok_gen, dtype=np.int32),
+        tok_content_pos=np.asarray(tok_cpos, dtype=np.int32),
+        tok_sel=np.asarray(tok_sel, dtype=np.int32),
+        tok_ref=np.asarray(tok_ref, dtype=np.int32),
+        tok_mt_kl=np.asarray(tok_mt, dtype=np.float64),
+        tok_oracle_nll=np.asarray(tok_onll, dtype=np.float64),
+        tok_model_nll=np.asarray(tok_mnll, dtype=np.float64),
+    )
+    return path
+
+
+def load_oracle_artifacts(path: Union[str, Path]) -> dict[str, np.ndarray]:
+    """Load ``oracle.npz`` written by :func:`save_oracle_artifacts`."""
+    path = Path(path)
+    with np.load(path, allow_pickle=True) as z:
+        return {k: np.asarray(z[k]) for k in z.files}
 

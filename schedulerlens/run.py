@@ -33,7 +33,11 @@ from schedulerlens.metrics import (  # noqa: E402
     parse_run_stem,
     write_metrics_csv,
 )
-from schedulerlens.oracle import _ensure_pcfg_path, compute_task_perplexity  # noqa: E402
+from schedulerlens.oracle import (  # noqa: E402
+    _ensure_pcfg_path,
+    compute_task_perplexity,
+    save_oracle_artifacts,
+)
 from schedulerlens.proxies import TraceProxyError  # noqa: E402
 
 logger = logging.getLogger("schedulerlens")
@@ -54,6 +58,8 @@ def run_schedulerlens(
     oracle_workers: int = 1,
     step_workers: Optional[int] = None,
     forward_batch_size: int = 8,
+    jt_exact_max: Optional[int] = None,
+    jt_markov_order: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Compute metrics, write metrics.json / metrics.csv and plots to output_dir."""
     _ensure_pcfg_path()
@@ -132,12 +138,21 @@ def run_schedulerlens(
             oracle_workers=oracle_workers,
             step_workers=step_workers,
             forward_batch_size=forward_batch_size,
+            jt_exact_max=jt_exact_max,
+            jt_markov_order=jt_markov_order,
         )
         ppl_path = output_dir / "perplexity.json"
         with ppl_path.open("w", encoding="utf-8") as f:
             json.dump(ppl.to_dict(), f, indent=2)
         result["perplexity"] = ppl
         result["perplexity_path"] = str(ppl_path.resolve())
+        if do_replay and any(s is not None for s in ppl.sample_oracle):
+            oracle_path = save_oracle_artifacts(
+                output_dir / "plot_artifacts" / meta.stem / "oracle.npz",
+                ppl,
+                stem=meta.stem,
+            )
+            result["oracle_artifacts_path"] = str(oracle_path.resolve())
 
         if do_replay and ppl.mt_trend and ppl.jt_trend:
             m_hat = metrics.proxies["M_hat_t"].trend
@@ -285,6 +300,27 @@ def _add_oracle_args(p: argparse.ArgumentParser) -> None:
         metavar="B",
         help="Batched model forwards across steps within a sample (default: 8)",
     )
+    p.add_argument(
+        "--oracle-jt-exact-max",
+        type=int,
+        default=None,
+        metavar="K",
+        help=(
+            "Exact PCFG Jt only for |S|≤K (default 3). Larger simultaneous "
+            "unmasks (DUS/EB) use Markov Jt to avoid OOM. "
+            "Env: SCHEDULERLENS_JT_EXACT_MAX"
+        ),
+    )
+    p.add_argument(
+        "--oracle-jt-markov-order",
+        type=int,
+        default=None,
+        metavar="M",
+        help=(
+            "Markov order for large-|S| Jt (default 2 → exact joints of size ≤3). "
+            "Env: SCHEDULERLENS_JT_MARKOV_ORDER"
+        ),
+    )
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -382,6 +418,8 @@ def _cmd_file(args: argparse.Namespace) -> int:
             oracle_workers=args.oracle_workers,
             step_workers=args.oracle_step_workers,
             forward_batch_size=args.oracle_forward_batch,
+            jt_exact_max=args.oracle_jt_exact_max,
+            jt_markov_order=args.oracle_jt_markov_order,
         )
     except TraceProxyError as e:
         logger.error("Aborted (bad trace data): %s", e)
@@ -462,6 +500,8 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             oracle_workers=args.oracle_workers,
             step_workers=args.oracle_step_workers,
             forward_batch_size=args.oracle_forward_batch,
+            jt_exact_max=args.oracle_jt_exact_max,
+            jt_markov_order=args.oracle_jt_markov_order,
         )
         if args.local:
             result = analyze_local_file(
@@ -536,6 +576,8 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             oracle_workers=args.oracle_workers,
             step_workers=args.oracle_step_workers,
             forward_batch_size=args.oracle_forward_batch,
+            jt_exact_max=args.oracle_jt_exact_max,
+            jt_markov_order=args.oracle_jt_markov_order,
         )
     except TraceProxyError as e:
         logger.error("%s", e)

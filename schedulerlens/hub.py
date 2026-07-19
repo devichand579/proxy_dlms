@@ -23,7 +23,7 @@ from schedulerlens.metrics import (
     read_metrics_csv,
     write_metrics_csv,
 )
-from schedulerlens.oracle import compute_task_perplexity
+from schedulerlens.oracle import compute_task_perplexity, save_oracle_artifacts
 from schedulerlens.proxies import TraceProxyError
 from traces.hf_trace_upload import (
     cleanup_repo_cache,
@@ -195,6 +195,8 @@ def analyze_one_npz(
     oracle_workers: int = 1,
     step_workers: Optional[int] = None,
     forward_batch_size: int = 8,
+    jt_exact_max: Optional[int] = None,
+    jt_markov_order: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Analyze one local NPZ (samples streamed via ``iter_npz_traces``)."""
     meta = parse_run_stem(trace_path)
@@ -221,6 +223,8 @@ def analyze_one_npz(
         oracle_workers=oracle_workers,
         step_workers=step_workers,
         forward_batch_size=forward_batch_size,
+        jt_exact_max=jt_exact_max,
+        jt_markov_order=jt_markov_order,
     )
 
     correlations = None
@@ -539,10 +543,18 @@ def _save_stem_plot_artifacts(
     *,
     fidelity: Optional[Dict[str, np.ndarray]] = None,
     surfaces: Any = None,
+    perplexity: Any = None,
 ) -> None:
-    """Persist step-level plot inputs for one run; avoids holding them all in RAM."""
+    """Persist plot/oracle inputs for one run; avoids holding them all in RAM.
+
+    ``oracle.npz`` keeps expensive replay detail (per-sample / step / token).
+    Proxy caps are not stored (cheap to recompute from traces).
+    """
     stem_dir = art_dir / stem
     stem_dir.mkdir(parents=True, exist_ok=True)
+    if perplexity is not None and getattr(perplexity, "sample_oracle", None):
+        if any(s is not None for s in perplexity.sample_oracle):
+            save_oracle_artifacts(stem_dir / "oracle.npz", perplexity, stem=stem)
     if fidelity:
         np.savez_compressed(
             stem_dir / "fidelity.npz",
@@ -695,6 +707,8 @@ def run_compare(
     oracle_workers: int = 1,
     step_workers: Optional[int] = None,
     forward_batch_size: int = 8,
+    jt_exact_max: Optional[int] = None,
+    jt_markov_order: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Discover NPZs (Hub or local), analyze each, write CSV + comparison plots.
 
@@ -862,12 +876,15 @@ def run_compare(
                     oracle_workers=oracle_workers,
                     step_workers=step_workers,
                     forward_batch_size=forward_batch_size,
+                    jt_exact_max=jt_exact_max,
+                    jt_markov_order=jt_markov_order,
                 )
                 rows.append(result["row"])
                 stem = result["meta"].stem
                 fidelity = result.get("fidelity")
                 surfaces = result.get("surfaces")
                 metrics = result.get("metrics")
+                perplexity = result.get("perplexity")
 
                 # Per-NPZ PNGs first (trends + single-run panel), then persist arrays.
                 run_plot_paths = _write_run_plots(
@@ -883,10 +900,13 @@ def run_compare(
                     stem,
                     fidelity=fidelity,
                     surfaces=surfaces,
+                    perplexity=perplexity,
                 )
-                # Drop step-level payloads; batch compare reloads from plot_artifacts/.
+                # Drop bulky payloads; batch compare reloads from plot_artifacts/.
                 result["surfaces"] = None
                 result["fidelity"] = None
+                if perplexity is not None and hasattr(perplexity, "sample_oracle"):
+                    perplexity.sample_oracle = []
                 result["metrics"] = None
 
                 # Flush CSV + batch compare plots after each file.

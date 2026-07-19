@@ -122,6 +122,8 @@ Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp downlo
 | `--oracle-workers N` | Parallel samples in oracle replay (shared model + engine pool; default 1) |
 | `--oracle-step-workers N` | Parallel PCFG Mt/Jt across steps within a sample (default `min(8, CPUs)`) |
 | `--oracle-forward-batch B` | Batched model forwards over precomputed step inputs (default 8) |
+| `--oracle-jt-exact-max K` | Exact PCFG `Jt` only for simultaneous sets with `\|S\|≤K` (default **3**). Larger `S` (DUS/EB parallel unmasks) use Markov `Jt` so oracle replay does not OOM. Env: `SCHEDULERLENS_JT_EXACT_MAX` |
+| `--oracle-jt-markov-order M` | Markov order for large-`\|S\|` `Jt` (default **2** → exact joints of size ≤3). Env: `SCHEDULERLENS_JT_MARKOV_ORDER` |
 | `--namespace` | HF user/org for short `--repo` names **and** per-stem oracle models (`{ns}/{llada-100m-pcfg}`). Default: `TRACE_HF_NAMESPACE` / whoami |
 | `--hf-model` | Pin one HF model for all traces (disables per-stem switch) |
 | `--model-path` | Local checkpoint dir (or HF id if path does not exist) |
@@ -144,6 +146,26 @@ NPZ samples are streamed via `traces.trace_npz.iter_npz_traces` (one sample in R
 | `compare_proxy_corr.png` | Mean ρ by early/mid/late block |
 | `compare_proxy_fidelity.png` | Scatter Mt vs M̂_t, Jt vs Ĵ_t |
 | `compare_surfaces.png` | Step × token heatmaps |
+| `plot_artifacts/<stem>/oracle.npz` | **Full oracle replay dump** (see below) — keep this; replaying Mt/Jt is expensive |
+| `plot_artifacts/<stem>/fidelity.npz` | Mean step trends for fidelity scatter (also inside `oracle.npz`) |
+| `plot_artifacts/<stem>/surfaces.npz` | Confidence/entropy surfaces (optional; cheap to recompute) |
+| `run_plots/<stem>/` | Per-run PNGs written at analyze time |
+
+### Oracle artifact (`oracle.npz`)
+
+Written whenever `--replay-oracle` produces per-sample detail. Prefer this over re-running oracle.
+
+| Level | Arrays | Contents |
+| ----- | ------ | -------- |
+| Meta | `jt_exact_max`, `jt_markov_order`, `n_samples`, `stem` | Jt policy used |
+| Task | `oracle_ppl`, `model_commit_ppl`, `Mt_total`, `Jt_total`, … | Same as CSV caps |
+| Sample | `sample_oracle_nll/ppl`, `sample_model_nll/ppl`, `sample_Mt`, `sample_Jt` | One row per NPZ sample |
+| Step | `step_sample_idx`, `step`, `step_Mt`, `step_Jt`, `step_oracle_nll`, `step_model_nll`, `step_n_selected` | Per-sample × step |
+| Token | `tok_sample_idx`, `tok_step`, `tok_gen_pos`, `tok_content_pos`, `tok_sel`, `tok_ref`, `tok_mt_kl`, `tok_oracle_nll`, `tok_model_nll` | Per commit |
+
+`Jt` is set-level (one value per step); `Mt` / NLLs are stored per token. Proxy M̂/Ĵ caps are **not** stored here — recompute from traces if needed.
+
+Load: `from schedulerlens.oracle import load_oracle_artifacts`.
 
 ### CSV schema (unified)
 
@@ -173,7 +195,13 @@ Trajectory blocks are equal thirds of `n_steps`.
 
 Sample caps: over steps with `n_selected > 0` — entropy-weighted `Σ w_t x_t / Σ w_t` and uniform `mean(x_t)`. Task caps: mean over samples.
 
-**PCFG oracle (with `--replay-oracle`):** left-padded eval layout; teacher-forced reference prefix (`n_visible`); gen index → content via `n_visible + gen_pos`; Mt = Σ KL(q‖p) and Jt = joint-entropy gap on the **pre-step** committed set. Steps are precomputed from the unmask schedule (independent teacher-forced states), then **batched model forwards** + **parallel PCFG** (engine pool), with optional **multi-sample** workers.
+**PCFG oracle (with `--replay-oracle`):** left-padded eval layout; teacher-forced reference prefix (`n_visible`); gen index → content via `n_visible + gen_pos`; Mt = Σ KL(q‖p) and Jt = joint-entropy gap (multi-information) on the **pre-step** committed set. Steps are precomputed from the unmask schedule (independent teacher-forced states), then **batched model forwards** + **parallel PCFG** (engine pool), with optional **multi-sample** workers.
+
+**Large `|S|` / DUS:** exact `Jt` via CKY joint entropy is exponential in the simultaneous unmask set size (`|S|=8` can peak ~35 GB). SchedulerLens therefore:
+- computes **exact** `Jt` when `|S| ≤ exact_max` (default 3; BD-style single-token steps stay exact);
+- for larger sets, uses a **Markov chain-rule** approximation of order `M` (default 2): `Jt(S) ≈ Σ_i [Jt(S[i−M:i+1]) − Jt(S[i−M:i])]`, so every exact call uses joints of size ≤ `M+1 ≤ exact_max`.
+
+Raise `exact_max` only if you have the RAM. Concurrent exact CKY `Jt` calls are capped by `SCHEDULERLENS_JT_CONCURRENCY` (default **2**) so `--oracle-step-workers 8` cannot stack eight multi-GB chart caches.
 
 ---
 

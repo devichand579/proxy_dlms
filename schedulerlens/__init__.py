@@ -17,6 +17,7 @@ from .metrics import (
     parse_run_stem,
     write_metrics_csv,
 )
+from .oracle import load_oracle_artifacts, save_oracle_artifacts
 
 __all__ = [
     "PROXY_ATTRS",
@@ -32,4 +33,6 @@ __all__ = [
     "validate_trace_for_metrics",
     "parse_run_stem",
     "write_metrics_csv",
+    "save_oracle_artifacts",
+    "load_oracle_artifacts",
 ]
