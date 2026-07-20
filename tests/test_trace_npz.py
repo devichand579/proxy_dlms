@@ -15,6 +15,8 @@ from traces.trace_checks import (
     check_trace_file,
     check_trace_samples,
     conversion_repair_blockers,
+    count_fhs_corrector_extras,
+    repair_sample_from_mask_diff,
     validate_npz_roundtrip,
 )
 from traces.trace_npz import (
@@ -220,3 +222,93 @@ def test_iter_npz_traces_matches_load_trace_samples() -> None:
         from_iter = list(iter_npz_traces(npz_path))
         _, from_loader = load_trace_samples(npz_path)
         assert from_iter[0]["final_sequence"] == from_loader[0]["final_sequence"]
+
+
+def _fhs_pc_sample(*, gen_length: int = 8, step_budget: int = 4) -> dict:
+    """Minimal FHS predictor-corrector trace: Ln predictors + 1 corrector per chunk."""
+    assert gen_length % step_budget == 0
+    ln = gen_length // step_budget
+    stride = ln + 1
+    mask = [True] * gen_length
+    step_traces = []
+    pos = 0
+    for chunk in range(step_budget):
+        for _pred in range(ln):
+            preds = list(range(100, 100 + gen_length))
+            sel = [False] * gen_length
+            if pos < gen_length:
+                mask = mask[:]
+                mask[pos] = False
+                sel[pos] = True
+                pos += 1
+            step_traces.append(
+                {
+                    "step": len(step_traces),
+                    "mask_index": [mask[:]],
+                    "predictions": [preds],
+                    "confidences": [[0.5] * gen_length],
+                    "entropies": [[1.0] * gen_length],
+                    "selected_positions": [sel],
+                    "selected_tokens": [[preds[i] if sel[i] else 0 for i in range(gen_length)]],
+                }
+            )
+        # Corrector: same mask, no selection, refreshed logits.
+        step_traces.append(
+            {
+                "step": len(step_traces),
+                "mask_index": [mask[:]],
+                "predictions": [list(range(200, 200 + gen_length))],
+                "confidences": [[0.9] * gen_length],
+                "entropies": [[0.1] * gen_length],
+                "selected_positions": None,
+                "selected_tokens": None,
+            }
+        )
+    assert len(step_traces) == gen_length + step_budget
+    assert stride == ln + 1
+    return {
+        "gen_only": True,
+        "prompt": [[1, 2, 3]],
+        "final_sequence": [[1, 2, 3] + list(range(300, 300 + gen_length))],
+        "prompt_len": 3,
+        "gen_length": gen_length,
+        "step_traces": step_traces,
+        "unmasking_order": {},
+        "metadata": {},
+    }
+
+
+def test_fhs_corrector_count_and_merge_clears_phantoms() -> None:
+    """s256-style PC: merge must not leave false phantom correctors when len > budget."""
+    # PC mode requires step_budget > 128; gen > budget reproduces the s256 false-positive.
+    gen_length, step_budget = 512, 256  # Ln=2, stride=3, raw len=768
+    sample = _fhs_pc_sample(gen_length=gen_length, step_budget=step_budget)
+    assert len(sample["step_traces"]) == gen_length + step_budget
+    assert count_fhs_corrector_extras(
+        sample["step_traces"], gen_length=gen_length, step_budget=step_budget
+    ) == step_budget
+
+    repaired, msgs = repair_sample_from_mask_diff(
+        sample, is_fdm=False, is_fhs=True, step_budget=step_budget
+    )
+    assert any("merged FHS predictor+corrector" in m for m in msgs)
+    rsteps = repaired["step_traces"]
+    # Merge to gen_length predictors, then drop trailing step.
+    assert len(rsteps) == gen_length - 1
+    assert len(rsteps) > step_budget  # old detector used len > budget → false phantoms
+    assert (
+        count_fhs_corrector_extras(
+            rsteps, gen_length=gen_length, step_budget=step_budget
+        )
+        == 0
+    )
+    check = check_trace_samples(
+        [repaired],
+        path="toy_fhs_s256.jsonl",
+        max_samples=None,
+        check_last=True,
+        is_fhs=True,
+        step_budget=step_budget,
+    )
+    assert not check.any_phantom_steps
+    assert conversion_repair_blockers(check, [repaired], repair_enabled=True) == []

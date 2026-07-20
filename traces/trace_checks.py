@@ -193,18 +193,44 @@ def count_fhs_corrector_extras(
     ``gen_length + steps`` model calls. Correctors sit at the last index of each
     chunk of size ``Ln + 1`` where ``Ln = gen_length // steps``. Extrapolation
     (``steps <= 128``) is left alone.
+
+    After merge, length is at most ``gen_length`` (then trim may drop one more).
+    Early-stop raw PC can also be ``<= gen_length`` while still containing
+    correctors — those slots have no ``selected_positions`` / no mask-diff commit.
     """
     if (
         step_budget is None
         or int(step_budget) <= 128
         or gen_length <= 0
         or gen_length % int(step_budget) != 0
-        or len(steps) <= int(step_budget)
     ):
         return 0
     ln = gen_length // int(step_budget)
     stride = ln + 1
-    return sum(1 for t in range(len(steps)) if (t % stride) == (stride - 1))
+    if len(steps) < stride:
+        return 0
+
+    def _is_corrector_index(t: int) -> bool:
+        return (t % stride) == (stride - 1)
+
+    # Classic full / near-full PC recording: more forwards than gen tokens.
+    if len(steps) > gen_length:
+        return sum(1 for t in range(len(steps)) if _is_corrector_index(t))
+
+    # len <= gen_length: merged predictors, or early-stop PC. Only count slots
+    # that still look like correctors (no unmask commit).
+    extras = 0
+    for t in range(len(steps)):
+        if not _is_corrector_index(t):
+            continue
+        sel = steps[t].get("selected_positions")
+        if sel is None:
+            extras += 1
+            continue
+        vec = _gen_vec(sel, gen_length=gen_length, dtype=np.bool_)
+        if vec is None or int(np.sum(vec)) == 0:
+            extras += 1
+    return extras
 
 
 def count_phantom_extra_steps(
