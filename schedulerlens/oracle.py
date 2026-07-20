@@ -522,6 +522,11 @@ def default_jt_concurrency() -> int:
     return max(1, _env_int("SCHEDULERLENS_JT_CONCURRENCY", 2))
 
 
+def default_jt_large_set() -> int:
+    """If |S| > this, force pairwise Markov (order 1) for speed. 0 = disable."""
+    return max(0, _env_int("SCHEDULERLENS_JT_LARGE_SET", 6))
+
+
 _JT_SEM: Optional[threading.Semaphore] = None
 _JT_SEM_LOCK = threading.Lock()
 
@@ -557,6 +562,8 @@ def compute_jt(
     *,
     exact_max: Optional[int] = None,
     markov_order: Optional[int] = None,
+    large_set: Optional[int] = None,
+    skip: bool = False,
 ) -> float:
     """PCFG multi-information Jt = Σ H(X_i) − H(X_S) on the simultaneous set S.
 
@@ -568,13 +575,25 @@ def compute_jt(
 
     with m = markov_order. Each term only needs exact joints of size ≤ m+1
     (capped by ``exact_max``). When |S| ≤ exact_max this equals the exact Jt.
+
+    If ``|S| > large_set`` (default 6), force pairwise order-1 joints only —
+    EB/DUS steps with |S|=15+ otherwise dominate wall time. Pass ``skip=True``
+    to omit Jt (returns NaN; Mt/NLL still computed elsewhere).
     """
+    if skip:
+        return float("nan")
+
     positions = sorted({int(p) for p in S})
     if len(positions) < 2:
         return 0.0
 
     k_exact = max(2, int(exact_max if exact_max is not None else default_jt_exact_max()))
     order = max(1, int(markov_order if markov_order is not None else default_jt_markov_order()))
+    large = int(large_set if large_set is not None else default_jt_large_set())
+    # Huge simultaneous sets: pairwise only (size-2 joints), not size-3 windows.
+    if large > 0 and len(positions) > large:
+        order = 1
+        k_exact = 2
     # Never ask exact Jt for sets larger than k_exact.
     order = min(order, k_exact - 1)
 
@@ -609,6 +628,8 @@ def _pcfg_metrics_for_step(
     *,
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
+    jt_large_set: Optional[int] = None,
+    skip_jt: bool = False,
 ) -> OracleStepMetrics:
     """Mt / Jt / NLLs for one precomputed step (uses a private engine)."""
     q_batch = engine.marginals_batch(job.n_content, job.committed, job.S_content)
@@ -619,6 +640,8 @@ def _pcfg_metrics_for_step(
         job.S_content,
         exact_max=jt_exact_max,
         markov_order=jt_markov_order,
+        large_set=jt_large_set,
+        skip=skip_jt,
     )
     if hasattr(engine, "clear_cache"):
         engine.clear_cache()
@@ -679,6 +702,8 @@ def replay_oracle_mt_jt(
     trace_name: Union[str, Path, None] = None,
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
+    jt_large_set: Optional[int] = None,
+    skip_jt: bool = False,
 ) -> OracleSampleMetrics:
     """Re-forward model at each trace step; compute exact Mt and Jt vs PCFG oracle.
 
@@ -710,13 +735,16 @@ def replay_oracle_mt_jt(
 
     k_exact = max(2, int(jt_exact_max if jt_exact_max is not None else default_jt_exact_max()))
     m_order = max(1, int(jt_markov_order if jt_markov_order is not None else default_jt_markov_order()))
+    large = int(jt_large_set if jt_large_set is not None else default_jt_large_set())
     max_s = max((len(j.S_content) for j in jobs), default=0)
     if max_s > k_exact:
         logger.debug(
-            "Oracle Jt: max |S|=%d > exact_max=%d → Markov order=%d",
+            "Oracle Jt: max |S|=%d exact_max=%d markov=%d large_set=%d skip=%s",
             max_s,
             k_exact,
             min(m_order, k_exact - 1),
+            large,
+            skip_jt,
         )
 
     n_workers = max(1, int(step_workers if step_workers is not None else _default_step_workers()))
@@ -736,6 +764,8 @@ def replay_oracle_mt_jt(
                 kl,
                 jt_exact_max=k_exact,
                 jt_markov_order=m_order,
+                jt_large_set=large,
+                skip_jt=skip_jt,
             )
         finally:
             pool.release(eng)
@@ -866,6 +896,8 @@ def _compute_sample_perplexity_inner(
     trace_name: Union[str, Path, None] = None,
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
+    jt_large_set: Optional[int] = None,
+    skip_jt: bool = False,
 ):
     """Return (SamplePerplexity, optional OracleSampleMetrics)."""
     meta = trace_dict.get("metadata") or {}
@@ -888,6 +920,8 @@ def _compute_sample_perplexity_inner(
             trace_name=trace_name,
             jt_exact_max=jt_exact_max,
             jt_markov_order=jt_markov_order,
+            jt_large_set=jt_large_set,
+            skip_jt=skip_jt,
         )
         return SamplePerplexity(
             model_commit_nll=oracle.model_nll,
@@ -932,6 +966,8 @@ def compute_sample_perplexity(
     trace_name: Union[str, Path, None] = None,
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
+    jt_large_set: Optional[int] = None,
+    skip_jt: bool = False,
 ) -> SamplePerplexity:
     """Per-sample commit NLL/PPL; oracle fields when PCFG metadata + engine present."""
     sp, _oracle = _compute_sample_perplexity_inner(
@@ -946,6 +982,8 @@ def compute_sample_perplexity(
         trace_name=trace_name,
         jt_exact_max=jt_exact_max,
         jt_markov_order=jt_markov_order,
+        jt_large_set=jt_large_set,
+        skip_jt=skip_jt,
     )
     return sp
 
@@ -965,6 +1003,8 @@ def compute_task_perplexity(
     forward_batch_size: int = 8,
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
+    jt_large_set: Optional[int] = None,
+    skip_jt: bool = False,
 ) -> TaskPerplexity:
     """Aggregate perplexity / oracle metrics over a trace file.
 
@@ -974,6 +1014,8 @@ def compute_task_perplexity(
     - ``oracle_workers``: parallel samples (shared model + lock; shared engine pool)
 
     Large-|S| Jt uses Markov approximation (``jt_exact_max`` / ``jt_markov_order``).
+    Sets larger than ``jt_large_set`` fall back to pairwise order-1. ``skip_jt``
+    computes Mt/NLL only.
     """
     from traces.trace_npz import iter_npz_traces
 
@@ -1079,6 +1121,7 @@ def compute_task_perplexity(
     model_lock: Optional[threading.Lock] = None
     k_exact = max(2, int(jt_exact_max if jt_exact_max is not None else default_jt_exact_max()))
     m_order = max(1, int(jt_markov_order if jt_markov_order is not None else default_jt_markov_order()))
+    large = int(jt_large_set if jt_large_set is not None else default_jt_large_set())
     if do_replay:
         pool_size = n_sample_workers * n_step_workers
         pool = _EnginePool(pool_size)
@@ -1086,13 +1129,15 @@ def compute_task_perplexity(
         if verbose:
             logger.info(
                 "Oracle replay: samples=%d step_workers=%d forward_batch=%d "
-                "engine_pool=%d jt_exact_max=%d jt_markov=%d",
+                "engine_pool=%d jt_exact_max=%d jt_markov=%d jt_large_set=%d skip_jt=%s",
                 n_sample_workers,
                 n_step_workers,
                 forward_batch_size,
                 pool_size,
                 k_exact,
                 min(m_order, k_exact - 1),
+                large,
+                skip_jt,
             )
 
     def _process_one(sample_idx: int, tr: dict):
@@ -1110,6 +1155,8 @@ def compute_task_perplexity(
             trace_name=trace_path,
             jt_exact_max=k_exact,
             jt_markov_order=m_order,
+            jt_large_set=large,
+            skip_jt=skip_jt,
         ), len(tr.get("step_traces") or [])
 
     n_done = 0

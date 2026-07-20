@@ -124,6 +124,8 @@ Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp downlo
 | `--oracle-forward-batch B` | Batched model forwards over precomputed step inputs (default 8) |
 | `--oracle-jt-exact-max K` | Exact PCFG `Jt` only for simultaneous sets with `\|S\|≤K` (default **3**). Larger `S` (DUS/EB parallel unmasks) use Markov `Jt` so oracle replay does not OOM. Env: `SCHEDULERLENS_JT_EXACT_MAX` |
 | `--oracle-jt-markov-order M` | Markov order for large-`\|S\|` `Jt` (default **2** → exact joints of size ≤3). Env: `SCHEDULERLENS_JT_MARKOV_ORDER` |
+| `--oracle-jt-large-set N` | If `\|S\|>N`, force **pairwise** `Jt` (order 1) for speed (default **6**). EB/DUS steps with `\|S\|=15+` dominate wall time otherwise. `0` disables. Env: `SCHEDULERLENS_JT_LARGE_SET` |
+| `--oracle-no-jt` | Skip `Jt` entirely (keep Mt + commit NLL/PPL). Fastest for EB full-file runs |
 | `--namespace` | HF user/org for short `--repo` names **and** per-stem oracle models (`{ns}/{llada-100m-pcfg}`). Default: `TRACE_HF_NAMESPACE` / whoami |
 | `--hf-model` | Pin one HF model for all traces (disables per-stem switch) |
 | `--model-path` | Local checkpoint dir (or HF id if path does not exist) |

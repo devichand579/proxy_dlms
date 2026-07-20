@@ -197,6 +197,8 @@ def analyze_one_npz(
     forward_batch_size: int = 8,
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
+    jt_large_set: Optional[int] = None,
+    skip_jt: bool = False,
 ) -> Dict[str, Any]:
     """Analyze one local NPZ (samples streamed via ``iter_npz_traces``)."""
     meta = parse_run_stem(trace_path)
@@ -225,6 +227,8 @@ def analyze_one_npz(
         forward_batch_size=forward_batch_size,
         jt_exact_max=jt_exact_max,
         jt_markov_order=jt_markov_order,
+        jt_large_set=jt_large_set,
+        skip_jt=skip_jt,
     )
 
     correlations = None
@@ -714,6 +718,8 @@ def run_compare(
     forward_batch_size: int = 8,
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
+    jt_large_set: Optional[int] = None,
+    skip_jt: bool = False,
 ) -> Dict[str, Any]:
     """Discover NPZs (Hub or local), analyze each, write CSV + comparison plots.
 
@@ -883,6 +889,8 @@ def run_compare(
                     forward_batch_size=forward_batch_size,
                     jt_exact_max=jt_exact_max,
                     jt_markov_order=jt_markov_order,
+                    jt_large_set=jt_large_set,
+                    skip_jt=skip_jt,
                 )
                 rows.append(result["row"])
                 stem = result["meta"].stem

@@ -60,6 +60,8 @@ def run_schedulerlens(
     forward_batch_size: int = 8,
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
+    jt_large_set: Optional[int] = None,
+    skip_jt: bool = False,
 ) -> Dict[str, Any]:
     """Compute metrics, write metrics.json / metrics.csv and plots to output_dir."""
     _ensure_pcfg_path()
@@ -140,6 +142,8 @@ def run_schedulerlens(
             forward_batch_size=forward_batch_size,
             jt_exact_max=jt_exact_max,
             jt_markov_order=jt_markov_order,
+            jt_large_set=jt_large_set,
+            skip_jt=skip_jt,
         )
         ppl_path = output_dir / "perplexity.json"
         with ppl_path.open("w", encoding="utf-8") as f:
@@ -327,6 +331,21 @@ def _add_oracle_args(p: argparse.ArgumentParser) -> None:
             "Env: SCHEDULERLENS_JT_MARKOV_ORDER"
         ),
     )
+    p.add_argument(
+        "--oracle-jt-large-set",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "If |S|>N, force pairwise Jt (Markov order 1) for speed (default 6). "
+            "Set 0 to disable. Env: SCHEDULERLENS_JT_LARGE_SET"
+        ),
+    )
+    p.add_argument(
+        "--oracle-no-jt",
+        action="store_true",
+        help="Skip Jt entirely (Mt + commit NLL/PPL only). Much faster for EB/DUS.",
+    )
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -426,6 +445,8 @@ def _cmd_file(args: argparse.Namespace) -> int:
             forward_batch_size=args.oracle_forward_batch,
             jt_exact_max=args.oracle_jt_exact_max,
             jt_markov_order=args.oracle_jt_markov_order,
+            jt_large_set=args.oracle_jt_large_set,
+            skip_jt=args.oracle_no_jt,
         )
     except TraceProxyError as e:
         logger.error("Aborted (bad trace data): %s", e)
@@ -508,6 +529,8 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             forward_batch_size=args.oracle_forward_batch,
             jt_exact_max=args.oracle_jt_exact_max,
             jt_markov_order=args.oracle_jt_markov_order,
+            jt_large_set=args.oracle_jt_large_set,
+            skip_jt=args.oracle_no_jt,
         )
         if args.local:
             result = analyze_local_file(
@@ -584,6 +607,8 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             forward_batch_size=args.oracle_forward_batch,
             jt_exact_max=args.oracle_jt_exact_max,
             jt_markov_order=args.oracle_jt_markov_order,
+            jt_large_set=args.oracle_jt_large_set,
+            skip_jt=args.oracle_no_jt,
         )
     except TraceProxyError as e:
         logger.error("%s", e)
