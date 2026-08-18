@@ -112,7 +112,60 @@ def collect_hidden_batch_loaded(
     if not hasattr(model, "records"):
         raise RuntimeError("Model must use PreLogitsCaptureWrapper (capture_pre_logits=True).")
     rec = model.records
-    prompt_len = int(input_ids.shape[1])
+    orig_prompt_len = int(input_ids.shape[1])
+
+    # === NEW TENSOR SLICING LOGIC ===
+    B = len(texts)
+    few_shot_lens = []
+
+    # 1. Calculate few-shot lengths dynamically
+    for text in texts:
+        parts = text.split("\n\n")
+        if len(parts) > 1:
+            prefix_str = "\n\n".join(parts[:-1]) + "\n\n"
+            fs_len = len(tokenizer.encode(prefix_str, add_special_tokens=False))
+            few_shot_lens.append(fs_len)
+        else:
+            few_shot_lens.append(0)
+
+    orig_seq_len = rec[0].shape[1] if len(rec) > 0 else orig_prompt_len
+    gen_len = orig_seq_len - orig_prompt_len
+
+    # 2. Find actual unpadded lengths using the existing attention_mask
+    unpadded_lens = attention_mask.sum(dim=1).tolist()
+
+    q_lens = []
+    for b in range(B):
+        # Safeguard: ensure fs_len never swallows the actual question
+        fs = min(few_shot_lens[b], max(0, int(unpadded_lens[b]) - 1))
+        few_shot_lens[b] = fs
+        q_lens.append(int(unpadded_lens[b]) - fs)
+
+    # 3. Calculate the new, highly-compressed prompt length
+    new_prompt_len = max(q_lens) if q_lens else 0
+    new_seq_len = new_prompt_len + gen_len
+
+    # 4. Shift and pack the dense tensors
+    if new_prompt_len < orig_prompt_len:
+        for i in range(len(rec)):
+            t = rec[i]
+            if t.dim() == 3:
+                # Initialize a tightly-packed tensor with zeros (which act as safe padding)
+                new_t = torch.zeros((B, new_seq_len, t.shape[2]), dtype=t.dtype, device=t.device)
+                for b in range(B):
+                    fs = few_shot_lens[b]
+                    q = q_lens[b]
+                    # Copy the isolated target question
+                    new_t[b, :q, :] = t[b, fs : fs + q, :]
+                    # Copy the generation block, perfectly aligned to new_prompt_len
+                    new_t[b, new_prompt_len : new_prompt_len + gen_len, :] = t[b, orig_prompt_len : orig_prompt_len + gen_len, :]
+                rec[i] = new_t
+
+        prompt_len = new_prompt_len
+    else:
+        prompt_len = orig_prompt_len
+    # ================================
+
     save_hidden_records(rec, out_path, prompt_len=prompt_len)
     meta: Dict[str, Any] = {
         "steps_taken": int(steps_taken),
