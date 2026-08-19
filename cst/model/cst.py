@@ -6,6 +6,7 @@ from typing import List, Tuple
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from .jump_relu import JumpReLU
 
@@ -54,15 +55,32 @@ class CST(nn.Module):
         y_hats = [self.decode(A, j) for j in range(1, self.w + 1)]
         return A, y_hats
 
-    def decoder_sparsity_penalty(self, A: torch.Tensor, c: float = 1.0) -> torch.Tensor:
-        """Sparsity via tanh on column-weighted A; A is [B,L,k]."""
-        if A.shape[-1] != self.k:
-            raise ValueError(f"A last dim must be k={self.k}, got {A.shape}")
+    def _sparsity_terms(self, A: torch.Tensor, c_f: float) -> torch.Tensor:
         penalty = torch.zeros((), device=A.device, dtype=torch.float32)
         Af = A.float()
-        c_f = float(c)
         for dec in self.W_dec:
             col_norms = torch.linalg.norm(dec.weight.float(), dim=0)
             inner = c_f * col_norms.view(1, 1, -1) * Af
             penalty = penalty + torch.tanh(inner).sum()
         return penalty
+
+    def decoder_sparsity_penalty(
+        self,
+        A: torch.Tensor,
+        c: float = 1.0,
+        *,
+        checkpoint: bool = True,
+    ) -> torch.Tensor:
+        """Sparsity via tanh on column-weighted A; A is [B,L,k].
+
+        Produces a scalar but touches two ``[B,L,k]`` intermediates per decoder,
+        so a w=4 bank retains 8 of them per CST -- with four CSTs per anchor that
+        was ~40% of activation memory. ``checkpoint`` recomputes them in backward
+        instead of holding them; ``A`` is retained by the caller either way.
+        """
+        if A.shape[-1] != self.k:
+            raise ValueError(f"A last dim must be k={self.k}, got {A.shape}")
+        c_f = float(c)
+        if checkpoint and torch.is_grad_enabled() and A.requires_grad:
+            return torch_checkpoint(self._sparsity_terms, A, c_f, use_reentrant=False)
+        return self._sparsity_terms(A, c_f)

@@ -5,23 +5,25 @@ from __future__ import annotations
 import json
 import logging
 import math
+from itertools import islice
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
 
 from cst.model.cst_bank import CSTBank
+from cst.model.residency import CSTResidency, steps_for_anchors
 from cst.naming import train_checkpoint_names
 from cst.storage_dtype import map_float_tensors
 from cst.train.hidden_chunk import iter_anchor_samples, load_chunk_H
-from cst.train.loss import windowed_cst_loss_full
+from cst.train.loss import windowed_cst_loss_block
 
 logger = logging.getLogger("cst.train")
 
 # Training checkpoints: one ``latest`` (resume) + one ``best`` (lowest ``loss_mean``); no per-phase .pt files.
 # Short basenames below; with ``name_token`` see :func:`train_checkpoint_names` for ``cst_{...}_train_*.pt``.
-CKPT_LATEST = "cst_latest.pt"
-CKPT_BEST = "cst_best.pt"
+CKPT_LATEST = "cst_latest"
+CKPT_BEST = "cst_best"
 TRAIN_STATE_JSON = "cst_train_state.json"
 
 # Keys in training checkpoint ``meta`` (full-run resume at collect segment boundaries + W&B)
@@ -185,6 +187,7 @@ def save_train_checkpoints(
     train_batches: float,
     name_token: Optional[str] = None,
     extra_meta: Optional[Dict[str, Any]] = None,
+    save_optimizer_state: bool = False,
 ) -> Dict[str, Any]:
     """Write latest/best CST checkpoints and training state; drop obsolete ``cst_phase_*.pt``."""
     ckpt_dir = Path(ckpt_dir)
@@ -214,6 +217,7 @@ def save_train_checkpoints(
         optimizer=optimizer,
         ramp=ramp,
         meta=meta,
+        save_optimizer_state=save_optimizer_state,
     )
     logger.info(
         "wrote %s loss_sum=%.6f anchors=%d loss_mean=%s",
@@ -243,6 +247,7 @@ def save_train_checkpoints(
             optimizer=optimizer,
             ramp=ramp,
             meta=best_meta,
+            save_optimizer_state=save_optimizer_state,
         )
         _write_train_state(
             ckpt_dir,
@@ -255,13 +260,13 @@ def save_train_checkpoints(
         logger.info("wrote %s new best loss_mean=%.6f", best_n, loss_mean)
     else:
         bpath = ckpt_dir / best_n
-        if bpath.is_file() and math.isfinite(best_prev):
+        if bpath.exists() and math.isfinite(best_prev):
             logger.info("kept %s (best loss_mean=%.6f)", best_n, best_prev)
 
     n_removed = remove_legacy_phase_checkpoints(ckpt_dir)
     return {
         "latest": str(ckpt_dir / latest_n),
-        "best": str(ckpt_dir / best_n) if (ckpt_dir / best_n).is_file() else None,
+        "best": str(ckpt_dir / best_n) if (ckpt_dir / best_n).exists() else None,
         "loss_mean": loss_mean,
         "updated_best": updated_best,
         "legacy_phase_removed": n_removed,
@@ -288,6 +293,43 @@ class LambdaRamp:
         self.total_steps = int(d.get("total_steps", self.total_steps))
 
 
+class _DeviceRows:
+    """Absolute-indexed view of a host ``[T,B,L,D]`` tensor, staging one window on device.
+
+    ``windowed_cst_loss_full`` indexes ``H_full`` by absolute step, but a block
+    of anchors only ever reads rows ``block[0]-w+1 .. block[-1]``. Staging just
+    that window keeps the targets off the device budget: the full tensor is
+    ~17 GB at 513 frames and sequence length 1024, against ~1 GB per window.
+    """
+
+    def __init__(self, H: torch.Tensor, device: torch.device) -> None:
+        self._H = H
+        self._device = device
+        self._lo = 0
+        self._buf: Optional[torch.Tensor] = None
+
+    def prepare(self, lo: int, hi: int) -> None:
+        lo = max(0, int(lo))
+        hi = min(int(hi), self._H.shape[0] - 1)
+        self._lo = lo
+        self._buf = self._H[lo : hi + 1].to(self._device, non_blocking=True)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        if self._buf is None:
+            raise RuntimeError("_DeviceRows.prepare() must be called before indexing")
+        j = int(idx) - self._lo
+        if j < 0 or j >= self._buf.shape[0]:
+            raise IndexError(f"row {idx} outside staged window [{self._lo}, {self._lo + self._buf.shape[0] - 1}]")
+        return self._buf[j]
+
+    def dim(self) -> int:
+        return self._H.dim()
+
+    @property
+    def shape(self) -> torch.Size:
+        return self._H.shape
+
+
 def train_on_chunk_files(
     paths: List[str | Path],
     cst_bank: CSTBank,
@@ -299,8 +341,23 @@ def train_on_chunk_files(
     c_tanh: float,
     lambda_pre_dead: float = 0.0,
     device: torch.device,
+    anchor_block: int = 24,
+    residency: Optional[CSTResidency] = None,
 ) -> Dict[str, Any]:
-    """Train on each hidden file: one optimizer step per file, summed loss over anchors. Returns loss stats and ``per_chunk``."""
+    """Train on each hidden file in blocks of ``anchor_block`` consecutive anchors.
+
+    One backward per block, not one per chunk file: the previous code stacked a
+    loss tensor per anchor and called ``backward()`` once at the end, holding
+    every anchor's autograd graph simultaneously.
+
+    Anchor ``t`` touches steps ``t-w+1 .. t``, so step ``s`` is complete once
+    anchor ``s+w-1`` has run. Each step is therefore updated exactly once per
+    chunk with its full gradient, then released back to host by ``residency``.
+    Because reconstructions sum decoder outputs across steps, steps update at
+    staggered points within a chunk rather than simultaneously.
+
+    Returns loss stats and ``per_chunk``.
+    """
     cst_bank.train()
     total_loss = 0.0
     n_items = 0
@@ -308,7 +365,6 @@ def train_on_chunk_files(
     min_frames = 2
     for p in paths:
         H, _meta, _ = load_chunk_H(p)
-        H = H.to(device)
         n_frames = H.shape[0]
         if n_frames < min_frames:
             logger.warning(
@@ -318,29 +374,73 @@ def train_on_chunk_files(
                 n_frames,
             )
             continue
+        # H stays on host when streaming; only the rows a block needs are shipped.
+        rows: Any = H.to(device) if residency is None else _DeviceRows(H, device)
         lam = ramp.step()
         optimizer.zero_grad(set_to_none=True)
-        anchor_losses: List[torch.Tensor] = []
+
+        # Windows overlap by w-1, so materialising them all would cost ~w times
+        # the chunk in host RAM. Pull them a block at a time instead.
+        sample_iter = iter_anchor_samples(H, w, device=None)
+        anchors_all: List[int] = []
+        chunk_loss_val = 0.0
         n_anchors_in_file = 0
-        for anchor, h_win in iter_anchor_samples(H, w, device=device):
-            loss, m = windowed_cst_loss_full(
+        n_blocks = 0
+        stepped: set[int] = set()
+
+        while True:
+            batch = list(islice(sample_iter, max(1, int(anchor_block))))
+            if not batch:
+                break
+            block = [a for a, _ in batch]
+            anchors_all.extend(block)
+            n_blocks += 1
+            need = steps_for_anchors(block, w)
+            if residency is not None:
+                residency.ensure(need)
+            h_wins = [hw.to(device, non_blocking=True) for _, hw in batch]
+            if isinstance(rows, _DeviceRows):
+                rows.prepare(block[0] - w + 1, block[-1])
+
+            loss, m = windowed_cst_loss_block(
                 cst_bank,
-                anchor,
-                h_win,
-                H,
+                block,
+                h_wins,
+                rows,
                 lambda_sparsity=lambda_sparsity,
                 c_tanh=c_tanh,
                 lambda_ramp=lam,
                 lambda_pre_dead=lambda_pre_dead,
             )
-            total_loss += float(m.get("loss", 0.0))
-            n_items += 1
-            n_anchors_in_file += 1
             if loss.requires_grad and loss.numel() > 0:
-                anchor_losses.append(loss)
-        if anchor_losses:
-            chunk_loss = torch.stack(anchor_losses).sum()
-            chunk_loss_val = float(chunk_loss.detach().item())
+                loss.backward()
+
+            total_loss += float(m.get("loss", 0.0))
+            chunk_loss_val += float(m.get("loss", 0.0))
+            n_items += len(block)
+            n_anchors_in_file += len(block)
+
+            # Steps whose window closed inside this block are done for this chunk.
+            last_anchor = block[-1]
+            closed = [s for s in need if s <= last_anchor - w + 1 and s not in stepped]
+            if closed:
+                _step_subset(optimizer, cst_bank, closed)
+                stepped.update(closed)
+                if residency is not None:
+                    for s in closed:
+                        residency.release(s)
+            del loss, h_wins, batch
+
+        # Trailing steps (the last w-1) never see a closing anchor in this chunk.
+        trailing = [s for s in steps_for_anchors(anchors_all, w) if s not in stepped]
+        if trailing:
+            _step_subset(optimizer, cst_bank, trailing)
+            if residency is not None:
+                for s in trailing:
+                    residency.release(s)
+
+        optimizer.zero_grad(set_to_none=True)
+        if n_anchors_in_file:
             p_str = str(p)
             per_chunk.append(
                 {
@@ -350,20 +450,76 @@ def train_on_chunk_files(
                 }
             )
             logger.info(
-                "train chunk %s loss=%.6f n_anchors=%d (optimizer step)",
+                "train chunk %s loss=%.6f n_anchors=%d blocks=%d (per-step optimizer updates)",
                 Path(p).name,
                 chunk_loss_val,
                 n_anchors_in_file,
+                n_blocks,
             )
-            if chunk_loss.requires_grad:
-                chunk_loss.backward()
-                optimizer.step()
+        del H, rows
     return {
         "train_loss": total_loss,
         "train_batches": float(n_items),
         "per_chunk": per_chunk,
         "n_chunks": float(len(per_chunk)),
     }
+
+
+def _step_subset(optimizer: torch.optim.Optimizer, cst_bank: CSTBank, steps: List[int]) -> None:
+    """Run one optimizer update restricted to the parameters of ``steps``."""
+    wanted = {id(p) for s in steps for p in cst_bank.get(s).parameters()}
+    saved = [g["params"] for g in optimizer.param_groups]
+    try:
+        for g in optimizer.param_groups:
+            g["params"] = [p for p in g["params"] if id(p) in wanted]
+        optimizer.step()
+    finally:
+        for g, orig in zip(optimizer.param_groups, saved):
+            g["params"] = orig
+    for s in steps:
+        for p in cst_bank.get(s).parameters():
+            p.grad = None
+
+
+CKPT_META_JSON = "meta.json"
+CKPT_SHARD_FMT = "cst_{:05d}.pt"
+CKPT_FORMAT_VERSION = 2
+
+
+def _is_sharded_ckpt(path: Path) -> bool:
+    return path.is_dir() and (path / CKPT_META_JSON).is_file()
+
+
+def _cst_opt_state(optimizer: torch.optim.Optimizer, mod: torch.nn.Module) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for name, prm in mod.named_parameters():
+        st = optimizer.state.get(prm)
+        if not st:
+            continue
+        entry: Dict[str, Any] = {"step": int(st.get("step", 0))}
+        for key in ("exp_avg", "exp_avg_sq"):
+            buf = st.get(key)
+            if isinstance(buf, torch.Tensor):
+                entry[key] = buf.detach().to("cpu", copy=True)
+        out[name] = entry
+    return out
+
+
+def _load_cst_opt_state(
+    optimizer: torch.optim.Optimizer,
+    mod: torch.nn.Module,
+    blob: Dict[str, Any],
+) -> None:
+    for name, prm in mod.named_parameters():
+        entry = blob.get(name)
+        if not entry:
+            continue
+        st = optimizer.state[prm]
+        st["step"] = int(entry.get("step", 0))
+        for key in ("exp_avg", "exp_avg_sq"):
+            buf = entry.get(key)
+            if isinstance(buf, torch.Tensor):
+                st[key] = buf.to(prm.device)
 
 
 def save_cst_checkpoint(
@@ -373,24 +529,99 @@ def save_cst_checkpoint(
     optimizer: torch.optim.Optimizer,
     ramp: LambdaRamp,
     meta: Optional[Dict[str, Any]] = None,
+    save_optimizer_state: bool = False,
 ) -> None:
-    """Write CST state, optimizer, ramp, and ``meta`` to ``path``."""
+    """Write the bank to ``path`` as a directory of per-step shards.
+
+    A single ``.pt`` is not viable at this scale: 512 CSTs at k=4096 is ~86 GB of
+    bf16 parameters (~258 GB with fp32 optimizer state), and ``torch.save``
+    would need all of it materialised in host RAM at once. Shards are written
+    one step at a time, so peak overhead is a single CST.
+
+    ``meta.json`` is written last and is the completion marker -- a run killed
+    mid-save leaves a directory that :func:`_is_sharded_ckpt` rejects.
+
+    ``save_optimizer_state`` defaults off: resuming then restores weights but
+    restarts the Adam moments.
+    """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    raw = {
-        "cst": cst_bank.state_dict_for_save(),
-        "optimizer": optimizer.state_dict(),
+    path.mkdir(parents=True, exist_ok=True)
+    stale = path / CKPT_META_JSON
+    if stale.is_file():
+        stale.unlink()
+
+    for t in range(1, cst_bank.max_steps + 1):
+        mod = cst_bank.get(t)
+        shard: Dict[str, Any] = {
+            "cst": map_float_tensors(
+                {k: v.detach().to("cpu", copy=True) for k, v in mod.state_dict().items()},
+                to_storage=True,
+            )
+        }
+        if save_optimizer_state:
+            shard["optimizer"] = _cst_opt_state(optimizer, mod)
+        torch.save(shard, path / CKPT_SHARD_FMT.format(t))
+
+    doc = {
+        "format_version": CKPT_FORMAT_VERSION,
+        "max_steps": int(cst_bank.max_steps),
+        "d": int(cst_bank.d),
+        "k": int(cst_bank.k),
+        "w": int(cst_bank.w),
+        "storage_float_dtype": "bfloat16",
+        "has_optimizer_state": bool(save_optimizer_state),
         "ramp": ramp.state_dict(),
         "meta": meta or {},
     }
-    to_save = {
-        "cst": map_float_tensors(raw["cst"], to_storage=True),
-        "optimizer": map_float_tensors(raw["optimizer"], to_storage=True),
-        "ramp": map_float_tensors(raw["ramp"], to_storage=True),
-        "meta": raw["meta"],
-        "storage_float_dtype": "bfloat16",
-    }
-    torch.save(to_save, path)
+    (path / CKPT_META_JSON).write_text(json.dumps(doc, indent=2))
+
+
+def _load_sharded(
+    path: Path,
+    cst_bank: CSTBank,
+    optimizer: Optional[torch.optim.Optimizer],
+    ramp: Optional[LambdaRamp],
+) -> Dict[str, Any]:
+    doc = json.loads((path / CKPT_META_JSON).read_text())
+    saved_steps = int(doc.get("max_steps", cst_bank.max_steps))
+    if saved_steps != cst_bank.max_steps:
+        logger.warning(
+            "checkpoint has %d steps, bank has %d; loading the overlap only",
+            saved_steps,
+            cst_bank.max_steps,
+        )
+    want_opt = optimizer is not None and bool(doc.get("has_optimizer_state"))
+    for t in range(1, min(saved_steps, cst_bank.max_steps) + 1):
+        shard_path = path / CKPT_SHARD_FMT.format(t)
+        if not shard_path.is_file():
+            logger.warning("missing checkpoint shard %s; leaving step %d at init", shard_path, t)
+            continue
+        shard = torch.load(shard_path, map_location="cpu", weights_only=False)
+        mod = cst_bank.get(t)
+        mod.load_state_dict(map_float_tensors(shard["cst"], to_storage=False))
+        if want_opt and "optimizer" in shard:
+            _load_cst_opt_state(optimizer, mod, shard["optimizer"])
+    if ramp is not None and doc.get("ramp"):
+        ramp.load_state_dict(doc["ramp"])
+    return doc.get("meta") or {}
+
+
+def _load_legacy_pt(
+    path: Path,
+    cst_bank: CSTBank,
+    optimizer: Optional[torch.optim.Optimizer],
+    ramp: Optional[LambdaRamp],
+) -> Dict[str, Any]:
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    cst_bank.load_state_dict_from_save(map_float_tensors(payload["cst"], to_storage=False))
+    if optimizer is not None and "optimizer" in payload:
+        try:
+            optimizer.load_state_dict(map_float_tensors(payload["optimizer"], to_storage=False))
+        except (ValueError, KeyError) as e:
+            logger.warning("legacy optimizer state not loadable (%s); starting moments fresh", e)
+    if ramp is not None and "ramp" in payload:
+        ramp.load_state_dict(map_float_tensors(payload["ramp"], to_storage=False))
+    return payload.get("meta") or {}
 
 
 def load_cst_checkpoint(
@@ -399,23 +630,19 @@ def load_cst_checkpoint(
     optimizer: torch.optim.Optimizer,
     ramp: LambdaRamp,
 ) -> Dict[str, Any]:
-    """Load from ``path``; return checkpoint ``meta``."""
-    payload = torch.load(path, map_location="cpu", weights_only=False)
-    cst_sd = map_float_tensors(payload["cst"], to_storage=False)
-    cst_bank.load_state_dict_from_save(cst_sd)
-    if "optimizer" in payload:
-        optimizer.load_state_dict(map_float_tensors(payload["optimizer"], to_storage=False))
-    if "ramp" in payload:
-        ramp.load_state_dict(map_float_tensors(payload["ramp"], to_storage=False))
-    return payload.get("meta") or {}
+    """Load from ``path`` (sharded directory or legacy single ``.pt``); return ``meta``."""
+    path = Path(path)
+    if _is_sharded_ckpt(path):
+        return _load_sharded(path, cst_bank, optimizer, ramp)
+    return _load_legacy_pt(path, cst_bank, optimizer, ramp)
 
 
 def load_cst_bank_weights(path: str | Path, cst_bank: CSTBank) -> Dict[str, Any]:
     """Load only CST weights from ``path``; return ``meta``."""
-    payload = torch.load(path, map_location="cpu", weights_only=False)
-    cst_sd = map_float_tensors(payload["cst"], to_storage=False)
-    cst_bank.load_state_dict_from_save(cst_sd)
-    return payload.get("meta") or {}
+    path = Path(path)
+    if _is_sharded_ckpt(path):
+        return _load_sharded(path, cst_bank, None, None)
+    return _load_legacy_pt(path, cst_bank, None, None)
 
 
 def delete_files(paths: List[str | Path]) -> None:
