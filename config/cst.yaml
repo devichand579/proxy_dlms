@@ -28,6 +28,10 @@ eval:
   ntf_conf_low: 0.2
   ntf_conf_high: 0.8
   ntf_first_non_eos: false
+  # >0 streams the bank from host RAM instead of placing all of it at once.
+  # Eval needs only params (no grads/optimizer), but that is still ~172 GB at
+  # max_steps=512/k=4096; set this if the bank does not fit on the card.
+  gpu_pinned_gb: 0.0
   wandb_name: cst-eval
 
 store:
@@ -52,6 +56,8 @@ cst:
   k: 4096
   w: 4
   max_steps: 512
+  # Retained for call-site compatibility; ignored. GPU residency is now explicit
+  # (train.gpu_pinned_gb + cst.model.residency), not an LRU cache.
   max_on_gpu: 512
   jumprelu_initial_threshold: 0.03
   jumprelu_bandwidth: 1.0
@@ -82,8 +88,10 @@ train:
   target_staging_gb: 1.0
   inference_batch_size: 2
   scheduler_mode: pd
-  gen_length: 256
-  steps: 256
+  # steps <= gen_length is asserted in schedulers/generate.py; 512 steps means
+  # 512 gen positions, and trains all 512 CSTs in the bank.
+  gen_length: 512
+  steps: 512
   block_length: null
   top_k: 1
   max_prompt_length: 512
@@ -98,6 +106,19 @@ train:
   c_tanh: 1.0
   # Sparsity ramp: one ramp.step() per training chunk .pt file (not per epoch); see LambdaRamp in trainer.
   ramp_total_steps: 10000
+  # --- Memory: block-structured training + streamed bank residency ---
+  # Anchors per backward. A block of G consecutive anchors touches G+w-1 steps.
+  # Raise until GPU peak (logged each phase) approaches the card; 24 is safe at
+  # sequence length ~1024 on a 192 GB pool.
+  anchor_block: 16
+  # Bank state pinned on GPU; the rest streams from host RAM as the sweep moves.
+  # 0 disables streaming and places the whole bank on GPU (small banks only).
+  # At max_steps=512/k=4096 the bank is ~344 GB. Host must also hold the chunk
+  # tensor (~17 GB) and interpreter overhead, so ~135 keeps host under 240 GB.
+  gpu_pinned_gb: 135
+  # Checkpoints shard per CST. Params only by default (~86 GB at 512x k=4096);
+  # true also writes Adam moments, tripling checkpoint size, for exact resume.
+  save_optimizer_state: false
   gsm8k_num_fewshot: 4
   arc_csqa_num_fewshot: 5
   trace_name: cst_collect

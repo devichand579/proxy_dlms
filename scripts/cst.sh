@@ -61,8 +61,13 @@ Options:
                         eval   — score CST checkpoint on saved hiddens
   --scope train|eval    store only: sets store.scope=train|eval
   --hidden_dir DIR      mode=eval only: local folder of .pt to score (not used for store)
-  --checkpoint PATH     eval: CST checkpoint .pt
+  --checkpoint PATH     eval: CST checkpoint (sharded dir, or legacy .pt)
   --task_name NAME      store/eval: lm-eval task (e.g. gsm8k)
+  --anchor_block N      train: anchors per backward (memory/throughput knob)
+  --gpu_pinned_gb N     train: GB of bank state pinned on GPU; rest streams from host RAM
+  --save_optimizer_state
+                        train: also shard Adam moments into checkpoints (3x size)
+  --device DEV          local only: 0|1|cuda|cuda:0|cpu
   --slurm               optional: one srun wrap (omit with sbatch unless your site requires it)
   -h, --help            show this message
 
@@ -70,6 +75,10 @@ Examples:
   ./scripts/cst.sh --mode store store.scope=train
   ./scripts/cst.sh --mode store --scope eval --task_name gsm8k
   ./scripts/cst.sh --mode train train.target_staging_gb=1.0
+  ./scripts/cst.sh --mode train --anchor_block 32 --gpu_pinned_gb 110
+  # Tiny smoke run (CPU-sized bank, no streaming):
+  ./scripts/cst.sh --mode train cst.max_steps=8 train.steps=8 train.gen_length=8 \
+      train.anchor_block=2 train.gpu_pinned_gb=0
   ./scripts/cst.sh --mode eval --checkpoint outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_ls0.001_train_best.pt \
       --hidden_dir outputs/eval_hidden
 
@@ -80,6 +89,7 @@ EOF
 }
 
 MODE="train"
+DEVICE=""
 EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -107,6 +117,22 @@ while [[ $# -gt 0 ]]; do
       EXTRA+=(store.task_name="$2" eval.task_name="$2")
       shift 2
       ;;
+    --anchor_block)
+      EXTRA+=(train.anchor_block="$2")
+      shift 2
+      ;;
+    --gpu_pinned_gb)
+      EXTRA+=(train.gpu_pinned_gb="$2")
+      shift 2
+      ;;
+    --save_optimizer_state)
+      EXTRA+=(train.save_optimizer_state=true)
+      shift
+      ;;
+    --device)
+      DEVICE="$2"
+      shift 2
+      ;;
     --slurm)
       export SLURM_WRAPPED=1
       shift
@@ -123,5 +149,47 @@ if [[ "${SLURM_WRAPPED:-}" == "1" ]]; then
 else
   RUN=()
 fi
+
+# Initialize conda
+if [[ -x "$HOME/miniconda3/bin/conda" ]]; then
+  eval "$("$HOME/miniconda3/bin/conda" shell.bash hook)"
+elif [[ -x "$HOME/anaconda3/bin/conda" ]]; then
+  eval "$("$HOME/anaconda3/bin/conda" shell.bash hook)"
+else
+  eval "$(conda shell.bash hook)"
+fi
+conda activate strace
+export PATH="$CONDA_PREFIX/bin:$PATH"
+
+export TOKENIZERS_PARALLELISM=false
+export HF_HUB_DISABLE_PROGRESS_BARS="${HF_HUB_DISABLE_PROGRESS_BARS:-1}"
+# Streaming the bank between host and device allocates and frees large blocks
+# every chunk; expandable segments keep the caching allocator from fragmenting.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+# Local GPU pin when not using --slurm
+if [[ "${SLURM_WRAPPED:-}" != "1" ]]; then
+  export CUDA_DEVICE_ORDER=PCI_BUS_ID
+  if [[ -n "$DEVICE" ]]; then
+    case "$DEVICE" in
+      cpu|CPU)   export CUDA_VISIBLE_DEVICES="" ;;
+      cuda)      export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" ;;
+      cuda:*)    export CUDA_VISIBLE_DEVICES="${DEVICE#cuda:}" ;;
+      [0-9]*)    export CUDA_VISIBLE_DEVICES="$DEVICE" ;;
+      *)         echo "Warning: unrecognized --device '$DEVICE' (leaving CUDA_VISIBLE_DEVICES as-is)" ;;
+    esac
+  else
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+  fi
+fi
+
+mkdir -p job_outputs
+
+echo "CST launcher"
+echo "  cwd: $REPO_ROOT"
+echo "  mode: $MODE"
+echo "  slurm/srun: ${SLURM_WRAPPED:-0}  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+echo "  overrides: ${EXTRA[*]:-none}"
+echo ""
 
 "${RUN[@]}" python hydra_runners/run_cst.py "mode=${MODE}" "${EXTRA[@]}"
