@@ -1247,8 +1247,8 @@ def save_oracle_artifacts(
 ) -> Path:
     """Persist granular oracle replay results (sample / step / token) to NPZ.
 
-    Expensive oracle quantities are kept so plots and analyses can be redone
-    without replaying the PCFG model. Proxy M̂/Ĵ caps are intentionally omitted
+    Expensive oracle quantities are kept so analyses can be redone without
+    replaying the PCFG model. Proxy M̂/Ĵ caps are intentionally omitted
     (cheap to recompute from traces).
     """
     path = Path(path)

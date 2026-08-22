@@ -433,9 +433,7 @@ def run_pos_analysis(
     models_root: Optional[Union[str, Path]] = None,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    """Compute POS metrics, write pos_metrics.json and plots."""
-    from schedulerlens.plots import save_pos_plots
-
+    """Compute POS metrics and write pos_metrics.json."""
     trace_path = Path(trace_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -461,34 +459,12 @@ def run_pos_analysis(
             indent=2,
         )
 
-    result: Dict[str, Any] = {
+    return {
         "n_samples": metrics.n_samples,
         "n_steps": metrics.n_steps,
         "model_name": metrics.model_name,
         "model_dir": metrics.model_dir,
         "metrics_path": str(metrics_path.resolve()),
         "metrics": metrics,
-        "pos_mean_unmask_plot": None,
-        "pos_unmask_trend_plot": None,
-        "pos_bucket_trend_plot": None,
-        "pos_bucket_mean_unmask_plot": None,
     }
-
-    if metrics.n_steps > 0 and metrics.mean_unmask_step_by_pos:
-        prefix = trace_path.stem
-        mean_plot, trend_plot, bucket_plot, bucket_mean_plot = save_pos_plots(
-            metrics, output_dir, prefix=prefix
-        )
-        result["pos_mean_unmask_plot"] = str(mean_plot.resolve())
-        result["pos_unmask_trend_plot"] = str(trend_plot.resolve())
-        result["pos_bucket_trend_plot"] = (
-            str(bucket_plot.resolve()) if bucket_plot else None
-        )
-        result["pos_bucket_mean_unmask_plot"] = (
-            str(bucket_mean_plot.resolve()) if bucket_mean_plot else None
-        )
-    else:
-        logger.warning("Skipped POS plots: no unmask events found.")
-
-    return result
 
