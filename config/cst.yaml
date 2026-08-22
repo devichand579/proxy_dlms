@@ -39,7 +39,7 @@ store:
   name_token: null      # eval: override auto name_token
   wandb_name: cst-store-eval
   # Train + eval store: optional cap on samples (eval: lm-eval limit; train: defaults to train.samples_per_epoch)
-  samples: null
+  samples: 1000
   target_staging_gb: null  # GB per upload segment; defaults to train.target_staging_gb
 
 wandb: true
@@ -80,9 +80,9 @@ train:
   # Collection stops when total written chunk size reaches this (decimal GB, 1e9 bytes per GB).
   # Same cap used at train time for each Hub download slice (download -> train -> delete -> next).
   target_staging_gb: 1.0
-  inference_batch_size: 2
+  inference_batch_size: 8
   scheduler_mode: pd
-  gen_length: 256
+  gen_length: 512
   steps: 256
   block_length: null
   top_k: 1
