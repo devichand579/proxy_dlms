@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
 from cst import save_hidden_records
-from cst.naming import cst_hidden_chunk_basename, cst_hidden_segment_prefix
+from cst.naming import cst_hidden_chunk_basename
 from load_model import (
     infer_diffusion_token_ids,
     is_dream_model_dir,
@@ -63,7 +63,6 @@ def collect_hidden_batch_loaded(
     steps: int = 256,
     block_length: Optional[int] = None,
     top_k: int = 1,
-    max_prompt_length: int = 512,
     trace_name: Optional[str] = None,
     staging_name_token: Optional[str] = None,
     use_eos_harness: bool = True,
@@ -79,12 +78,15 @@ def collect_hidden_batch_loaded(
     if is_dream_model_dir(model_path):
         texts = [prepend_bos_for_dream(tokenizer, t) for t in texts]
 
+    # Same as eval.py: left-pad so generate() sees pads on the left of the prompt.
+    if getattr(tokenizer, "padding_side", None) != "left":
+        tokenizer.padding_side = "left"
+
     enc = tokenizer(
         texts,
         add_special_tokens=False,
         padding=True,
-        truncation=True,
-        max_length=max_prompt_length,
+        truncation=False,
         return_tensors="pt",
     )
     input_ids = enc["input_ids"].to(device)
@@ -131,8 +133,10 @@ def collect_hidden_batch_loaded(
     orig_seq_len = rec[0].shape[1] if len(rec) > 0 else orig_prompt_len
     gen_len = orig_seq_len - orig_prompt_len
 
-    # 2. Find actual unpadded lengths using the existing attention_mask
+    # 2. Find actual unpadded lengths using the existing attention_mask.
+    # Left pad: [PAD × left][few-shot][question][GEN]; content starts at left_pad.
     unpadded_lens = attention_mask.sum(dim=1).tolist()
+    left_pads = [orig_prompt_len - int(u) for u in unpadded_lens]
 
     q_lens = []
     for b in range(B):
@@ -141,32 +145,43 @@ def collect_hidden_batch_loaded(
         few_shot_lens[b] = fs
         q_lens.append(int(unpadded_lens[b]) - fs)
 
-    # 3. Calculate the new, highly-compressed prompt length
+    # 3. Packed layout matches generate: left-pad questions, gen on the right.
+    #    [zeros][question][GEN]; prompt_len = max question length in the batch.
     new_prompt_len = max(q_lens) if q_lens else 0
     new_seq_len = new_prompt_len + gen_len
+    prompt_len = new_prompt_len if new_prompt_len > 0 else orig_prompt_len
 
-    # 4. Shift and pack the dense tensors
-    if new_prompt_len < orig_prompt_len:
+    if rec and new_prompt_len > 0:
         for i in range(len(rec)):
             t = rec[i]
-            if t.dim() == 3:
-                # Initialize a tightly-packed tensor with zeros (which act as safe padding)
-                new_t = torch.zeros((B, new_seq_len, t.shape[2]), dtype=t.dtype, device=t.device)
-                for b in range(B):
-                    fs = few_shot_lens[b]
-                    q = q_lens[b]
-                    # Copy the isolated target question
-                    new_t[b, :q, :] = t[b, fs : fs + q, :]
-                    # Copy the generation block, perfectly aligned to new_prompt_len
-                    new_t[b, new_prompt_len : new_prompt_len + gen_len, :] = t[b, orig_prompt_len : orig_prompt_len + gen_len, :]
-                rec[i] = new_t
+            if t.dim() != 3:
+                continue
+            new_t = torch.zeros((B, new_seq_len, t.shape[2]), dtype=t.dtype, device=t.device)
+            for b in range(B):
+                fs = few_shot_lens[b]
+                q = q_lens[b]
+                src = left_pads[b] + fs
+                dst = new_prompt_len - q
+                new_t[b, dst : dst + q, :] = t[b, src : src + q, :]
+                new_t[b, new_prompt_len : new_prompt_len + gen_len, :] = t[
+                    b, orig_prompt_len : orig_prompt_len + gen_len, :
+                ]
+            rec[i] = new_t
 
-        prompt_len = new_prompt_len
-    else:
-        prompt_len = orig_prompt_len
-    # ================================
-
-    save_hidden_records(rec, out_path, prompt_len=prompt_len)
+    n_question_tokens = int(sum(q_lens))
+    n_gen_tokens = int(B) * int(gen_len)
+    cst_train_tokens = n_question_tokens + n_gen_tokens
+    save_hidden_records(
+        rec,
+        out_path,
+        prompt_len=prompt_len,
+        extra_meta={
+            "n_samples": int(B),
+            "n_question_tokens": n_question_tokens,
+            "n_gen_tokens": n_gen_tokens,
+            "cst_train_tokens": cst_train_tokens,
+        },
+    )
     meta: Dict[str, Any] = {
         "steps_taken": int(steps_taken),
         "blocks": int(blocks),
@@ -174,6 +189,9 @@ def collect_hidden_batch_loaded(
         "batch_size": int(input_ids.shape[0]),
         "prompt_len": prompt_len,
         "gen_length": int(gen_length),
+        "n_question_tokens": n_question_tokens,
+        "n_gen_tokens": n_gen_tokens,
+        "cst_train_tokens": cst_train_tokens,
         "mask_id": int(mask_id),
         "mode": mode,
         "strategy": strategy,
@@ -194,92 +212,61 @@ def load_model_for_collect(
     compile_model: bool = False,
 ) -> Tuple[torch.nn.Module, Any]:
     """Load model with pre-logit capture enabled."""
-    return load_model_and_tokenizer(
+    model, tokenizer = load_model_and_tokenizer(
         model_path,
         device=device,
         compile_model=compile_model,
         capture_pre_logits=True,
     )
-
-
-def _bytes_from_gb(gb: float) -> int:
-    """Convert GB target to bytes."""
-    return max(0, int(float(gb) * 1e9))
+    if getattr(tokenizer, "padding_side", None) != "left":
+        tokenizer.padding_side = "left"
+    return model, tokenizer
 
 
 @torch.no_grad()
-def collect_hidden_until_size_gb_from_row_batches(
+def collect_hidden_row_batch(
     model: torch.nn.Module,
     tokenizer,
     model_path: str,
-    staging_dir: str | Path,
+    out_dir: str | Path,
     *,
-    row_batches: Sequence[Sequence[Dict[str, Any]]],
-    start_idx: int,
-    target_gb: float,
+    rows: List[Dict[str, Any]],
+    batch_idx: int,
+    name_token: str,
     device: str = "cuda",
     mode_key: str = "pd",
     gen_length: int = 256,
     steps: int = 256,
     block_length: Optional[int] = None,
     top_k: int = 1,
-    max_prompt_length: int = 512,
-    staging_name_token: Optional[str] = None,
-    segment: int = 0,
     capture_context: str = "train",
     use_eos_harness: bool = True,
-) -> Tuple[List[str], int, Dict[str, Any]]:
-    """Collect chunks until target_gb; return paths, next index, summary."""
-    target_b = _bytes_from_gb(target_gb)
-    staging_dir = Path(staging_dir)
-    staging_dir.mkdir(parents=True, exist_ok=True)
-
-    paths: List[str] = []
-    total_bytes = 0
-    total_gen_time = 0.0
-    b = int(start_idx)
-    n = len(row_batches)
-    n_seg = 0
-    while total_bytes < target_b and b < n:
-        rows = row_batches[b]
-        texts = [str(r.get("text", "")) for r in rows]
-        if not any(texts):
-            raise ValueError(f"row_batches[{b}] has no non-empty text")
-        if not staging_name_token:
-            raise ValueError("collect_hidden_until_size_gb_from_row_batches requires staging_name_token")
-        out_name = cst_hidden_chunk_basename(staging_name_token, segment, b)
-        trace_name = f"{cst_hidden_segment_prefix(staging_name_token, segment)}_{b:06d}"
-        out_path = staging_dir / out_name
-        meta = collect_hidden_batch_loaded(
-            model,
-            tokenizer,
-            model_path,
-            texts,
-            str(out_path),
-            device=device,
-            mode_key=mode_key,
-            gen_length=gen_length,
-            steps=steps,
-            block_length=block_length,
-            top_k=top_k,
-            max_prompt_length=max_prompt_length,
-            trace_name=trace_name,
-            staging_name_token=staging_name_token,
-            use_eos_harness=use_eos_harness,
-            capture_context=capture_context,
-        )
-        paths.append(str(out_path))
-        total_bytes += out_path.stat().st_size
-        total_gen_time += float(meta.get("gen_time", 0.0))
-        b += 1
-        n_seg += 1
-
-    summary: Dict[str, Any] = {
-        "target_gb": float(target_gb),
-        "written_bytes": total_bytes,
-        "written_gb": total_bytes / 1e9,
-        "n_batches": n_seg,
-        "next_idx": b,
-        "total_gen_time": total_gen_time,
-    }
-    return paths, b, summary
+) -> Tuple[str, Dict[str, Any]]:
+    """Collect one inference batch and write ``{name_token}_{batch:06d}.pt``."""
+    texts = [str(r.get("text", "")) for r in rows]
+    if not any(texts):
+        raise ValueError(f"row_batches[{batch_idx}] has no non-empty text")
+    if not name_token:
+        raise ValueError("collect_hidden_row_batch requires name_token")
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_name = cst_hidden_chunk_basename(name_token, batch_idx)
+    out_path = out_dir / out_name
+    meta = collect_hidden_batch_loaded(
+        model,
+        tokenizer,
+        model_path,
+        texts,
+        str(out_path),
+        device=device,
+        mode_key=mode_key,
+        gen_length=gen_length,
+        steps=steps,
+        block_length=block_length,
+        top_k=top_k,
+        trace_name=out_path.stem,
+        staging_name_token=name_token,
+        use_eos_harness=use_eos_harness,
+        capture_context=capture_context,
+    )
+    return str(out_path), meta
