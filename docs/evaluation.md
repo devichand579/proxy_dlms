@@ -78,7 +78,7 @@ Task-specific **generation length** and **diffusion step count** are centralized
 - **Length & steps:** `arc_challenge_chat` uses 128/128; most other lm-eval tasks use 512/512 (see `sampling_defaults.py`). Override with `**--steps` / `--gen_length`** in `scripts/eval.sh`, or `**steps=` / `gen_length=`** on the Hydra CLI / in YAML (`null` keeps task defaults). The launcher checks `**steps ≤ gen_length**`.  
 - **Block length:** `block_diffusion` 32, `fdm` 64, `dus` 16, else `gen_length`. Override: `--block_length` / `block_length=`.  
 - **Top-k:** scheduler-specific; override: `--top_k` / `top_k=`.  
-- **Few-shot:** e.g. HumanEval / `arc_challenge_chat` 0; GSM8K / Minerva 4; MBPP 3. Override: `--num_fewshot` / `num_fewshot:`.
+- **Few-shot:** HumanEval 0; GSM8K / Minerva 4; MBPP 3; `arc_challenge_chat` 5. Override: `--num_fewshot` / `num_fewshot:`.
 
 
 

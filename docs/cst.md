@@ -174,7 +174,7 @@ See [Evaluation](evaluation.md) for resumable eval and CST aggregates.
 
 ## `cst.train_data`
 
-Mixed prompt pools for **train store** only: GSM8K, Minerva, ARC, CSQA, TACO. See `cst/train_data/compose.py`.
+Mixed prompt pools for **train store** only. GSM8K, Minerva (`minerva_math500` formatter + fixed 4-shot), ARC-Challenge, and ARC-Easy use lm-eval `fewshot_context` with the same `k` as `launch_eval` (GSM8K/Minerva 4, ARC 5). Queries still come from each source's **train** split. TACO is 0-shot (like HumanEval). CommonsenseQA is not in the eval suite, so it keeps the 5-shot chat formatter with labeled validation demos. See `cst/train_data/compose.py`.
 
 ---
 

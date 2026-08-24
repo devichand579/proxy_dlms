@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import nn
@@ -111,13 +111,17 @@ def save_hidden_records(
     path: Union[str, Path],
     *,
     prompt_len: int,
+    extra_meta: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Save hidden_states and meta.prompt_len to a .pt file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     rec_list = [map_float_tensors(t.float(), to_storage=True) for t in records]
+    meta: Dict[str, Any] = {"prompt_len": int(prompt_len)}
+    if extra_meta:
+        meta.update(extra_meta)
     payload: dict[str, Any] = {
         "hidden_states": rec_list,
-        "meta": {"prompt_len": int(prompt_len)},
+        "meta": meta,
     }
     torch.save(payload, path)

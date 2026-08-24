@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from load_model import infer_diffusion_token_ids, is_dream_model_dir, load_tokenizer, prepend_bos_for_dream
+from cst.eval_data.lmeval_task import eval_num_fewshot
 
 logger = logging.getLogger(__name__)
 
@@ -232,23 +233,6 @@ def model_dir_for_name(model: str, repo_root: Optional[Path] = None) -> Path:
 
 def lm_eval_task_name(task: str) -> str:
     return LM_EVAL_TASK_ALIASES.get(task.strip(), task.strip())
-
-
-def eval_num_fewshot(task_name: str) -> int:
-    t = str(task_name).strip().lower()
-    if "humaneval" in t:
-        return 0
-    if "gsm8k" in t:
-        return 4
-    if "math500" in t or "minerva_math500" in t:
-        return 4
-    if "mbpp3" in t:
-        return 3
-    if "mbpp" in t:
-        return 3
-    if "arc_challenge_chat" in t:
-        return 5
-    return 0
 
 
 def decode_generation_from_trace(

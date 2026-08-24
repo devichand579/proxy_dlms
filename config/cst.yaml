@@ -47,15 +47,12 @@ store:
   steps: 256
   block_length: null
   top_k: 2
-  max_prompt_length: 512
   inference_batch_size: 8
   samples: 1000
   seed: 0
   compile_model: false
   # Match eval.launch_eval: false = full steps + no truncate-at-EOS in collect
   use_eos_harness: true
-  gsm8k_num_fewshot: 4
-  arc_csqa_num_fewshot: 5
   name_token: null      # override auto {model}_{scheduler}_{gen_length}_{steps}
   # eval store
   task_name: null       # required when scope=eval (e.g. gsm8k)

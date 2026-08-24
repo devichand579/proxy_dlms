@@ -133,8 +133,8 @@ def _sampling_state_from_store(store_cfg: Any, *, n_samples: int, inference_bs: 
         "train_samples_per_epoch": int(n_samples),
         "train_inference_batch_size": int(inference_bs),
         "train_resample_each_epoch": False,
-        "train_gsm8k_num_fewshot": int(store_cfg.get("gsm8k_num_fewshot", 4)),
-        "train_arc_csqa_num_fewshot": int(store_cfg.get("arc_csqa_num_fewshot", 5)),
+        "train_gsm8k_num_fewshot": eval_num_fewshot("gsm8k"),
+        "train_arc_csqa_num_fewshot": eval_num_fewshot("arc_challenge_chat"),
     }
 
 
@@ -183,6 +183,10 @@ def _store_hiddens(
         compile_model=bool(store_cfg.get("compile_model", False)),
     )
     ueh = _coerce_use_eos_harness(store_cfg.get("use_eos_harness", True))
+    total_question_tokens = 0
+    total_gen_tokens = 0
+    total_cst_train_tokens = 0
+    total_samples = 0
     try:
         for bi, rows in enumerate(row_batches):
             logger.info("=== collect batch %d / %d ===", bi + 1, nbat)
@@ -200,10 +204,21 @@ def _store_hiddens(
                 steps=int(store_cfg.get("steps", 256)),
                 block_length=store_cfg.get("block_length"),
                 top_k=int(store_cfg.get("top_k", 1)),
-                max_prompt_length=int(store_cfg.get("max_prompt_length", 512)),
                 capture_context=capture_context,
                 use_eos_harness=ueh,
             )
+            b_q = int(meta.get("n_question_tokens", 0))
+            b_g = int(meta.get("n_gen_tokens", 0))
+            b_t = int(meta.get("cst_train_tokens", b_q + b_g))
+            b_n = int(meta.get("batch_size", len(rows)))
+            total_question_tokens += b_q
+            total_gen_tokens += b_g
+            total_cst_train_tokens += b_t
+            total_samples += b_n
+            sampling_state["cst_question_tokens"] = int(total_question_tokens)
+            sampling_state["cst_gen_tokens"] = int(total_gen_tokens)
+            sampling_state["cst_train_tokens"] = int(total_cst_train_tokens)
+            sampling_state["cst_train_samples"] = int(total_samples)
             nbytes = Path(out_path).stat().st_size
             rec = upload_hidden_chunk(
                 repo_id,
@@ -219,10 +234,14 @@ def _store_hiddens(
                 scope=scope,
             )
             logger.info(
-                "uploaded %s (%.3f GB, gen_time=%.2fs)",
+                "uploaded %s (%.3f GB, gen_time=%.2fs, cst_tokens=%d question=%d gen=%d, total_cst_tokens=%d)",
                 rec.filename,
                 nbytes / 1e9,
                 float(meta.get("gen_time", 0.0)),
+                b_t,
+                b_q,
+                b_g,
+                total_cst_train_tokens,
             )
     finally:
         del model
@@ -230,7 +249,15 @@ def _store_hiddens(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    logger.info("collect finished: %s on %s", name_token, repo_id)
+    logger.info(
+        "collect finished: %s on %s | samples=%d cst_train_tokens=%d (question=%d + gen=%d)",
+        name_token,
+        repo_id,
+        total_samples,
+        total_cst_train_tokens,
+        total_question_tokens,
+        total_gen_tokens,
+    )
     return 0
 
 
@@ -387,8 +414,6 @@ def store_train_hiddens(cfg: DictConfig) -> int:
 
     inference_bs = int(store_cfg.inference_batch_size)
     seed = int(store_cfg.get("seed", 0))
-    gsm_fs = int(store_cfg.get("gsm8k_num_fewshot", 4))
-    arc_fs = int(store_cfg.get("arc_csqa_num_fewshot", 5))
 
     model_path = _section_model_path(cfg, store_cfg)
     sched_m = str(store_cfg.get("scheduler_mode", "pd"))
@@ -397,9 +422,7 @@ def store_train_hiddens(cfg: DictConfig) -> int:
 
     sampling_state = _sampling_state_from_store(store_cfg, n_samples=n_sp, inference_bs=inference_bs)
 
-    row_batches = sample_uniform_batched(
-        n_sp, inference_bs, seed=seed, gsm8k_num_fewshot=gsm_fs, arc_csqa_num_fewshot=arc_fs
-    )
+    row_batches = sample_uniform_batched(n_sp, inference_bs, seed=seed)
 
     return _store_hiddens(
         cfg,
@@ -588,6 +611,19 @@ def run_train(cfg: DictConfig) -> int:
     manifest_fp = manifest.sampling_fingerprint_from_manifest()
     if manifest_fp is not None:
         sampling_state = manifest_fp
+        n_tok = manifest_fp.get("cst_train_tokens")
+        n_q = manifest_fp.get("cst_question_tokens")
+        n_g = manifest_fp.get("cst_gen_tokens")
+        n_s = manifest_fp.get("cst_train_samples")
+        if n_tok is not None:
+            logger.info(
+                "CST train tokens (question + gen_length, no few-shot/pad): %s "
+                "(samples=%s question=%s gen=%s)",
+                f"{int(n_tok):,}",
+                f"{int(n_s):,}" if n_s is not None else "?",
+                f"{int(n_q):,}" if n_q is not None else "?",
+                f"{int(n_g):,}" if n_g is not None else "?",
+            )
 
     n_cst_params = sum(p.numel() for p in cst_bank.parameters())
     logger.info("CST parameters: total=%s", f"{n_cst_params:,}")
@@ -623,6 +659,17 @@ def run_train(cfg: DictConfig) -> int:
             wandb_run_id_resumed = str(wb.id)
         if global_step == 0:
             wb.log({"cst/total_parameters": n_cst_params}, step=global_step)
+            if sampling_state and sampling_state.get("cst_train_tokens") is not None:
+                wbd = {
+                    "data/cst_train_tokens": float(sampling_state["cst_train_tokens"]),
+                }
+                if sampling_state.get("cst_question_tokens") is not None:
+                    wbd["data/cst_question_tokens"] = float(sampling_state["cst_question_tokens"])
+                if sampling_state.get("cst_gen_tokens") is not None:
+                    wbd["data/cst_gen_tokens"] = float(sampling_state["cst_gen_tokens"])
+                if sampling_state.get("cst_train_samples") is not None:
+                    wbd["data/cst_train_samples"] = float(sampling_state["cst_train_samples"])
+                wb.log(wbd, step=global_step)
 
     all_chunks = manifest.all_chunks_sorted()
     nbat = manifest.total_batch_count()

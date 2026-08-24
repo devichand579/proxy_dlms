@@ -23,7 +23,6 @@ def capture_prompt_to_pt(
     steps: int = 256,
     block_length: Optional[int] = None,
     top_k: int = 1,
-    max_prompt_length: int = 512,
     compile_model: bool = False,
     use_eos_harness: bool = True,
 ) -> Dict[str, Any]:
@@ -46,7 +45,6 @@ def capture_prompt_to_pt(
         steps=steps,
         block_length=block_length,
         top_k=top_k,
-        max_prompt_length=max_prompt_length,
         trace_name="tag_single",
         use_eos_harness=use_eos_harness,
     )
