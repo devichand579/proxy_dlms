@@ -4,9 +4,19 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from cst.eval_data.lmeval_task import eval_num_fewshot, load_lmeval_task
+from cst.eval_data.lmeval_task import (
+    CST_EVAL_TASKS,
+    eval_num_fewshot,
+    expand_eval_task_names,
+    load_lmeval_task,
+)
 
-__all__ = ["eval_num_fewshot", "load_eval_row_batches"]
+__all__ = [
+    "CST_EVAL_TASKS",
+    "eval_num_fewshot",
+    "expand_eval_task_names",
+    "load_eval_row_batches",
+]
 
 
 def load_eval_row_batches(

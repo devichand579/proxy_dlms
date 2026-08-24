@@ -4,6 +4,7 @@ CST entry point: store hiddens, train CST, or eval CST.
 
 Config: config/cst.yaml. Examples:
   python hydra_runners/run_cst.py mode=store store.scope=train
+  python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=all
   python hydra_runners/run_cst.py mode=train
   python hydra_runners/run_cst.py mode=eval eval.checkpoint=...
 Or: ./scripts/cst.sh --mode store|train|eval
@@ -28,7 +29,13 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from cst.hf_hiddens.config import hf_token, resolve_eval_repo_id, resolve_train_repo_id
+from cst.hf_hiddens.manifest import (
+    fingerprint_conflicts,
+    fingerprint_progress,
+    store_fingerprint_required_keys,
+)
 from cst.hf_hiddens.store import (
+    HubStorageFullError,
     download_all_chunks,
     download_hidden_chunk,
     fetch_manifest,
@@ -58,7 +65,7 @@ from cst.train.trainer import (
     train_on_chunk_files,
 )
 from cst.train_data.compose import sample_uniform_batched
-from cst.eval_data.compose import eval_num_fewshot, load_eval_row_batches
+from cst.eval_data.compose import eval_num_fewshot, expand_eval_task_names, load_eval_row_batches
 
 _CONFIG_DIR = _REPO_ROOT / "config"
 logger = logging.getLogger("run_cst")
@@ -109,9 +116,10 @@ def _hidden_name_token(
     model_path: str,
     *,
     task_name: Optional[str] = None,
+    ignore_name_token_override: bool = False,
 ) -> str:
     override = section.get("name_token") if section is not None else None
-    if not _is_blank(override):
+    if not ignore_name_token_override and not _is_blank(override):
         return str(override).strip()
     sched = "pd"
     if section is not None and not _is_blank(section.get("scheduler_mode")):
@@ -127,7 +135,31 @@ def _hidden_name_token(
     )
 
 
-def _sampling_state_from_store(store_cfg: Any, *, n_samples: int, inference_bs: int) -> Dict[str, Any]:
+def _optional_int(v: Any) -> Optional[int]:
+    if _is_blank(v):
+        return None
+    return int(v)
+
+
+def _store_generation_fingerprint(store_cfg: Any, sched_m: str) -> Dict[str, Any]:
+    return {
+        "scheduler": str(sched_m),
+        "gen_length": int(store_cfg.get("gen_length", 256)),
+        "steps": int(store_cfg.get("steps", 256)),
+        "block_length": _optional_int(store_cfg.get("block_length")),
+        "top_k": int(store_cfg.get("top_k", 1)),
+        "use_eos_harness": _coerce_use_eos_harness(store_cfg.get("use_eos_harness", True)),
+    }
+
+
+def _sampling_state_from_store(
+    store_cfg: Any,
+    *,
+    n_samples: int,
+    inference_bs: int,
+    sched_m: str,
+) -> Dict[str, Any]:
+    gen = _store_generation_fingerprint(store_cfg, sched_m)
     return {
         "train_seed": int(store_cfg.get("seed", 0)),
         "train_samples_per_epoch": int(n_samples),
@@ -135,6 +167,12 @@ def _sampling_state_from_store(store_cfg: Any, *, n_samples: int, inference_bs: 
         "train_resample_each_epoch": False,
         "train_gsm8k_num_fewshot": eval_num_fewshot("gsm8k"),
         "train_arc_csqa_num_fewshot": eval_num_fewshot("arc_challenge_chat"),
+        "train_scheduler": gen["scheduler"],
+        "train_gen_length": gen["gen_length"],
+        "train_steps": gen["steps"],
+        "train_block_length": gen["block_length"],
+        "train_top_k": gen["top_k"],
+        "train_use_eos_harness": gen["use_eos_harness"],
     }
 
 
@@ -148,7 +186,12 @@ def _store_hiddens(
     sampling_state: Dict[str, Any],
     sched_m: str,
 ) -> int:
-    """Collect each inference batch and upload that .pt to the Hub."""
+    """Collect each inference batch and upload that .pt to the Hub.
+
+    With ``store.resume=true`` (default), batches already listed in the Hub
+    manifest are skipped when the sampling fingerprint matches this run
+    (same seed, sample count, batch size, and generation settings).
+    """
     store_cfg = cfg.get("store") or OmegaConf.create({})
     device = torch.device(str(store_cfg.get("device", "cuda")))
     scratch = Path(str(store_cfg.get("scratch_dir", "outputs/cst_staging")))
@@ -156,6 +199,7 @@ def _store_hiddens(
     cache_dir = Path(str(store_cfg.get("hf_local_cache_dir", "outputs/cst_hf_cache")))
     capture_context = "train" if scope == "train" else "eval"
     delete_local = bool(store_cfg.get("delete_local_after_hf_push", True))
+    resume = bool(store_cfg.get("resume", True))
     model_path = _section_model_path(cfg, store_cfg)
 
     nbat = len(row_batches)
@@ -177,18 +221,82 @@ def _store_hiddens(
         token=hf_token(store_cfg),
         create_if_missing=True,
     )
+    stored_idx = {int(c.batch_idx) for c in manifest.all_chunks_sorted()}
+    skip: set[int] = set()
+    total_question_tokens = 0
+    total_gen_tokens = 0
+    total_cst_train_tokens = 0
+    total_samples = 0
+    if stored_idx and resume:
+        conflicts = fingerprint_conflicts(
+            manifest.sampling_fingerprint,
+            sampling_state,
+            required_keys=store_fingerprint_required_keys(scope),
+        )
+        if conflicts:
+            raise RuntimeError(
+                f"store resume refused for {repo_id}/{name_token}: Hub data is not "
+                f"the same draw. Re-run with the original store.seed / store.samples / "
+                f"store.inference_batch_size (and generation settings), use a new "
+                f"store.name_token, or pass store.resume=false to overwrite. "
+                + "; ".join(conflicts)
+            )
+        skip = {i for i in stored_idx if 0 <= i < nbat}
+        prog = fingerprint_progress(manifest.sampling_fingerprint)
+        total_question_tokens = prog["cst_question_tokens"]
+        total_gen_tokens = prog["cst_gen_tokens"]
+        total_cst_train_tokens = prog["cst_train_tokens"]
+        total_samples = prog["cst_train_samples"]
+        sampling_state["cst_question_tokens"] = int(total_question_tokens)
+        sampling_state["cst_gen_tokens"] = int(total_gen_tokens)
+        sampling_state["cst_train_tokens"] = int(total_cst_train_tokens)
+        sampling_state["cst_train_samples"] = int(total_samples)
+        extra = sorted(i for i in stored_idx if i >= nbat)
+        if extra:
+            logger.warning(
+                "store resume: Hub has %d chunk(s) with batch_idx >= %d; leaving them in the manifest",
+                len(extra),
+                nbat,
+            )
+        logger.info(
+            "store resume: skipping %d / %d batches already on Hub; collecting %d remaining",
+            len(skip),
+            nbat,
+            nbat - len(skip),
+        )
+    elif stored_idx and not resume:
+        logger.warning(
+            "store.resume=false: Hub already has %d chunks for %s; re-collecting all %d batches",
+            len(stored_idx),
+            name_token,
+            nbat,
+        )
+
+    remaining = [i for i in range(nbat) if i not in skip]
+    if not remaining:
+        logger.info(
+            "store resume: all %d batches already on Hub (%s / %s); nothing to collect | "
+            "samples=%d cst_train_tokens=%d (question=%d + gen=%d)",
+            nbat,
+            name_token,
+            repo_id,
+            total_samples,
+            total_cst_train_tokens,
+            total_question_tokens,
+            total_gen_tokens,
+        )
+        return 0
+
     model, tokenizer = load_model_for_collect(
         model_path,
         device=str(device),
         compile_model=bool(store_cfg.get("compile_model", False)),
     )
     ueh = _coerce_use_eos_harness(store_cfg.get("use_eos_harness", True))
-    total_question_tokens = 0
-    total_gen_tokens = 0
-    total_cst_train_tokens = 0
-    total_samples = 0
     try:
         for bi, rows in enumerate(row_batches):
+            if bi in skip:
+                continue
             logger.info("=== collect batch %d / %d ===", bi + 1, nbat)
             out_path, meta = collect_hidden_row_batch(
                 model,
@@ -211,6 +319,44 @@ def _store_hiddens(
             b_g = int(meta.get("n_gen_tokens", 0))
             b_t = int(meta.get("cst_train_tokens", b_q + b_g))
             b_n = int(meta.get("batch_size", len(rows)))
+            nbytes = Path(out_path).stat().st_size
+            try:
+                rec = upload_hidden_chunk(
+                    repo_id,
+                    name_token,
+                    out_path,
+                    manifest=manifest,
+                    sampling_fingerprint=dict(
+                        sampling_state,
+                        cst_question_tokens=int(total_question_tokens + b_q),
+                        cst_gen_tokens=int(total_gen_tokens + b_g),
+                        cst_train_tokens=int(total_cst_train_tokens + b_t),
+                        cst_train_samples=int(total_samples + b_n),
+                    ),
+                    cache_dir=cache_dir,
+                    revision=str(store_cfg.get("hf_hiddens_revision", "main")),
+                    token=hf_token(store_cfg),
+                    private_repo=bool(store_cfg.get("hf_hiddens_private", False)),
+                    delete_local_after=delete_local,
+                    scope=scope,
+                )
+            except HubStorageFullError as e:
+                try:
+                    Path(out_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                n_on_hub = len(manifest.all_chunks_sorted())
+                logger.warning(
+                    "Hub storage full while uploading batch %d / %d for %s; "
+                    "finishing store early. %d batch(es) already on Hub. "
+                    "Free space and re-run the same command to resume. (%s)",
+                    bi + 1,
+                    nbat,
+                    name_token,
+                    n_on_hub,
+                    e,
+                )
+                raise
             total_question_tokens += b_q
             total_gen_tokens += b_g
             total_cst_train_tokens += b_t
@@ -219,20 +365,6 @@ def _store_hiddens(
             sampling_state["cst_gen_tokens"] = int(total_gen_tokens)
             sampling_state["cst_train_tokens"] = int(total_cst_train_tokens)
             sampling_state["cst_train_samples"] = int(total_samples)
-            nbytes = Path(out_path).stat().st_size
-            rec = upload_hidden_chunk(
-                repo_id,
-                name_token,
-                out_path,
-                manifest=manifest,
-                sampling_fingerprint=dict(sampling_state),
-                cache_dir=cache_dir,
-                revision=str(store_cfg.get("hf_hiddens_revision", "main")),
-                token=hf_token(store_cfg),
-                private_repo=bool(store_cfg.get("hf_hiddens_private", False)),
-                delete_local_after=delete_local,
-                scope=scope,
-            )
             logger.info(
                 "uploaded %s (%.3f GB, gen_time=%.2fs, cst_tokens=%d question=%d gen=%d, total_cst_tokens=%d)",
                 rec.filename,
@@ -420,7 +552,9 @@ def store_train_hiddens(cfg: DictConfig) -> int:
     name_token = _hidden_name_token(store_cfg, model_path)
     hf_train_repo = resolve_train_repo_id(store_cfg)
 
-    sampling_state = _sampling_state_from_store(store_cfg, n_samples=n_sp, inference_bs=inference_bs)
+    sampling_state = _sampling_state_from_store(
+        store_cfg, n_samples=n_sp, inference_bs=inference_bs, sched_m=sched_m
+    )
 
     row_batches = sample_uniform_batched(n_sp, inference_bs, seed=seed)
 
@@ -441,23 +575,61 @@ def store_train_hiddens(cfg: DictConfig) -> int:
 
 
 def store_eval_hiddens(cfg: DictConfig) -> int:
-    """Store eval hidden chunks on the Hub."""
+    """Store eval hidden chunks on the Hub.
+
+    ``store.task_name=all`` (or a comma-separated list) stores each task into
+    its own folder under the same ``hiddens-eval`` repo. Resume is per folder.
+    """
     store = cfg.get("store") or OmegaConf.create({})
 
     task = store.get("task_name")
     if _is_blank(task):
-        raise ValueError("store.scope=eval requires store.task_name")
+        raise ValueError("store.scope=eval requires store.task_name (or store.task_name=all)")
+
+    tasks = expand_eval_task_names(task)
+    multi = len(tasks) > 1
+    if multi and not _is_blank(store.get("name_token")):
+        logger.warning(
+            "store.name_token=%s ignored for multi-task eval store; each task uses "
+            "the auto folder {model}_{scheduler}_{gen_length}_{steps}_task_{task}",
+            store.get("name_token"),
+        )
+    logger.info("eval store tasks (%d): %s", len(tasks), ", ".join(tasks))
+    rc = 0
+    for i, t in enumerate(tasks, start=1):
+        logger.info("=== eval store task %d / %d: %s ===", i, len(tasks), t)
+        rc = _store_eval_one_task(
+            cfg, task_name=t, ignore_name_token_override=multi
+        )
+        if rc:
+            return rc
+    return 0
+
+
+def _store_eval_one_task(
+    cfg: DictConfig,
+    *,
+    task_name: str,
+    ignore_name_token_override: bool = False,
+) -> int:
+    """Store one lm-eval task's hidden chunks on the Hub."""
+    store = cfg.get("store") or OmegaConf.create({})
 
     model_path = _section_model_path(cfg, store)
     sched_m = str(store.get("scheduler_mode", "pd"))
-    name_token = _hidden_name_token(store, model_path, task_name=str(task))
+    name_token = _hidden_name_token(
+        store,
+        model_path,
+        task_name=str(task_name),
+        ignore_name_token_override=ignore_name_token_override,
+    )
 
     repo_id = resolve_eval_repo_id(store, store=store)
     inference_bs = int(store.inference_batch_size)
     seed = int(store.get("seed", 0))
 
     nfs = store.get("num_fewshot")
-    num_fewshot = int(nfs) if not _is_blank(nfs) else eval_num_fewshot(str(task))
+    num_fewshot = int(nfs) if not _is_blank(nfs) else eval_num_fewshot(str(task_name))
 
     sp_cfg = store.get("samples")
     limit = None
@@ -467,22 +639,26 @@ def store_eval_hiddens(cfg: DictConfig) -> int:
             raise ValueError("store.samples must be >= 1 when set")
 
     row_batches = load_eval_row_batches(
-        str(task),
+        str(task_name),
         inference_bs,
         limit=limit,
         num_fewshot=num_fewshot,
         seed=seed,
     )
 
+    gen = _store_generation_fingerprint(store, sched_m)
     sampling_state = {
-        "eval_task": str(task),
+        "eval_task": str(task_name),
         "eval_num_fewshot": int(num_fewshot),
         "eval_limit": limit,
         "eval_inference_batch_size": int(inference_bs),
         "eval_seed": int(seed),
-        "eval_scheduler": sched_m,
-        "eval_gen_length": int(store.get("gen_length", 256)),
-        "eval_steps": int(store.get("steps", 256)),
+        "eval_scheduler": gen["scheduler"],
+        "eval_gen_length": gen["gen_length"],
+        "eval_steps": gen["steps"],
+        "eval_block_length": gen["block_length"],
+        "eval_top_k": gen["top_k"],
+        "eval_use_eos_harness": gen["use_eos_harness"],
     }
 
     return _store_hiddens(
@@ -499,10 +675,18 @@ def store_eval_hiddens(cfg: DictConfig) -> int:
 def run_store(cfg: DictConfig) -> int:
     store = cfg.get("store") or OmegaConf.create({})
     scope = str(store.get("scope", "train")).strip().lower()
-    if scope == "train":
-        return store_train_hiddens(cfg)
-    if scope == "eval":
-        return store_eval_hiddens(cfg)
+    try:
+        if scope == "train":
+            return store_train_hiddens(cfg)
+        if scope == "eval":
+            return store_eval_hiddens(cfg)
+    except HubStorageFullError as e:
+        logger.warning(
+            "store finished early (Hub storage full). Batches already on Hub are kept; "
+            "re-run the same command after freeing space to resume. (%s)",
+            e,
+        )
+        return 0
     raise ValueError(f"store.scope must be 'train' or 'eval', got {scope!r}")
 
 

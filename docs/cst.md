@@ -20,7 +20,7 @@ Everything goes through **`hydra_runners/run_cst.py`** / **`./scripts/cst.sh`** 
 ```bash
 # 1) Store (once per model / scheduler / gen_length / steps)
 python hydra_runners/run_cst.py mode=store store.scope=train
-python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k
+python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=all
 
 # 2) Train CST from Hub (no inference). Lookup keys must match the store run.
 python hydra_runners/run_cst.py mode=train
@@ -74,12 +74,19 @@ python hydra_runners/run_cst.py mode=store store.scope=train
 
 Default repo: **`{whoami}/hiddens-train`**.
 
+**Resume after a crash:** `store.resume=true` (default). Re-run the **same** command (`store.seed`, `store.samples`, `store.inference_batch_size`, scheduler / gen length / steps). Sampling is deterministic, so batch `i` is the same rows; batches already listed in that `name_token`'s Hub `manifest.json` are skipped. A chunk uploaded but not yet recorded in the manifest is collected again (at most the last batch). If the fingerprint does not match, store refuses to skip — use the original settings, a new `store.name_token`, or `store.resume=false` to overwrite.
+
+If Hugging Face storage/quota (or local disk) fills mid-run, store **stops early with exit 0**. Already-uploaded batches stay on Hub; free space and re-run the same command to resume. Remaining eval tasks in `store.task_name=all` are skipped.
+
 ### Eval hiddens (`store.scope=eval`)
 
-Runs the **lm-eval task** through the model + scheduler, writing each batch `.pt` and uploading it immediately. Optional `store.samples` caps how many eval instances to capture (default: all task documents).
+Runs the **lm-eval task** through the model + scheduler, writing each batch `.pt` and uploading it immediately. Optional `store.samples` caps how many eval instances to capture **per task** (YAML default `1000`; `store.samples=null` for the full test set). Same crash resume as train store (`store.resume=true`).
+
+`store.task_name=all` stores the standard suite in order — GSM8K, Minerva Math500, ARC-Challenge chat, HumanEval, MBPP — each as its own folder in `{whoami}/hiddens-eval`. Comma-separated lists work too (`store.task_name=gsm8k,humaneval`). Re-running `all` after a crash resumes each task independently. Per-task few-shot still follows `launch_eval` defaults unless `store.num_fewshot` is set. `store.samples` (YAML default `1000`) is a **per-task** cap; set `store.samples=null` for full tests.
 
 ```bash
 python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k
+python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=all
 python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k store.samples=128
 ```
 
@@ -95,7 +102,11 @@ Default repo: **`{whoami}/hiddens-eval`**. Requires `store.task_name` (or `store
   "chunks": [
     {"batch_idx": 42, "filename": "llada_pd_512_256_000042.pt", "bytes": 12345678}
   ],
-  "sampling_fingerprint": {"train_samples_per_epoch": 1000, "train_seed": 0}
+  "sampling_fingerprint": {
+    "train_samples_per_epoch": 1000,
+    "train_seed": 0,
+    "train_inference_batch_size": 8
+  }
 }
 ```
 

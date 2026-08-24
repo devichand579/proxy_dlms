@@ -4,6 +4,7 @@
 #
 #   python hydra_runners/run_cst.py mode=store store.scope=train
 #   python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k
+#   python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=all
 #   python hydra_runners/run_cst.py mode=train
 #   python hydra_runners/run_cst.py mode=eval eval.checkpoint=... eval.hidden_dir=...
 #
@@ -42,37 +43,42 @@ store:
   model_path: ${model_path}
   device: cuda
   scratch_dir: outputs/cst_staging
-  scheduler_mode: pd
+  scheduler_mode: top_k_c
   gen_length: 512
-  steps: 256
+  steps: 512
   block_length: null
   top_k: 2
   inference_batch_size: 8
   samples: 1000
   seed: 0
+  # Re-run the same store job after a crash: skip Hub chunks already in the
+  # manifest when seed / samples / batch size / generation settings match.
+  # store.resume=false re-collects every batch (overwrites those files).
+  resume: true
   compile_model: false
   # Match eval.launch_eval: false = full steps + no truncate-at-EOS in collect
   use_eos_harness: true
   name_token: null      # override auto {model}_{scheduler}_{gen_length}_{steps}
-  # eval store
-  task_name: null       # required when scope=eval (e.g. gsm8k)
+  # eval store: one lm-eval task, comma-separated list, or ``all``
+  # (gsm8k, minerva_math500, arc_challenge_chat, humaneval, mbpp)
+  task_name: null
   num_fewshot: null     # eval: defaults to launch_eval few-shot for task
   # Hub: huggingface-cli login (or HF_TOKEN). Repos: {whoami}/hiddens-train and {whoami}/hiddens-eval
   delete_local_after_hf_push: true
 
 # ---------------------------------------------------------------------------
 # mode=train — download Hub hiddens and fit CST. No LM inference.
-# Look up data with the same model / scheduler / gen_length / steps as store.
+# scheduler_mode / gen_length / steps select the Hub folder, they do not run
+# a scheduler. Defaults interpolate from store.* (override to use another run).
 # ---------------------------------------------------------------------------
 train:
   model_path: ${model_path}
   device: cuda
   scratch_dir: outputs/cst_staging
   checkpoint_dir: outputs/cst_ckpt
-  # Hub lookup (must match a prior store run)
-  scheduler_mode: pd
-  gen_length: 512
-  steps: 256
+  scheduler_mode: ${store.scheduler_mode}
+  gen_length: ${store.gen_length}
+  steps: ${store.steps}
   name_token: null      # override auto {model}_{scheduler}_{gen_length}_{steps}
   hidden_source: hf_hub
   # Resume: explicit .pt, or resume_from_latest=true loads cst_<token>_latest.pt

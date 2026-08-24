@@ -62,13 +62,14 @@ Options:
   --scope train|eval    store only: sets store.scope=train|eval
   --hidden_dir DIR      mode=eval only: local folder of .pt to score (not used for store)
   --checkpoint PATH     eval: CST checkpoint .pt
-  --task_name NAME      store/eval: lm-eval task (e.g. gsm8k)
+  --task_name NAME      store/eval: lm-eval task (gsm8k, all, or gsm8k,humaneval)
   --slurm               optional: one srun wrap (omit with sbatch unless your site requires it)
   -h, --help            show this message
 
 Examples:
   ./scripts/cst.sh --mode store store.scope=train
   ./scripts/cst.sh --mode store --scope eval --task_name gsm8k
+  ./scripts/cst.sh --mode store --scope eval --task_name all
   ./scripts/cst.sh --mode train train.num_epochs=1
   ./scripts/cst.sh --mode eval --checkpoint outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt \
       --hidden_dir outputs/eval_hidden

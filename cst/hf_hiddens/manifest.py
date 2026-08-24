@@ -5,8 +5,109 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
+
+
+MANIFEST_VERSION = 2
+
+# Running totals written during store; ignored when checking whether a resume
+# is the same draw (seed / sample count / batching / generation settings).
+FINGERPRINT_PROGRESS_KEYS = frozenset(
+    {
+        "cst_question_tokens",
+        "cst_gen_tokens",
+        "cst_train_tokens",
+        "cst_train_samples",
+    }
+)
+
+STORE_TRAIN_FINGERPRINT_REQUIRED = (
+    "train_seed",
+    "train_samples_per_epoch",
+    "train_inference_batch_size",
+)
+STORE_EVAL_FINGERPRINT_REQUIRED = (
+    "eval_task",
+    "eval_seed",
+    "eval_inference_batch_size",
+    "eval_num_fewshot",
+    "eval_limit",
+)
+
+
+def normalize_fingerprint_value(v: Any) -> Any:
+    """Canonical form for fingerprint equality (None / int / bool / str)."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if s.lower() in ("", "null", "none"):
+            return None
+        if s.lower() in ("true", "false"):
+            return s.lower() == "true"
+        try:
+            return int(s)
+        except ValueError:
+            return s
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, int):
+        return int(v)
+    return v
+
+
+def fingerprint_identity(fp: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Fingerprint fields that must match for store resume, excluding running totals."""
+    if not fp:
+        return {}
+    return {k: v for k, v in fp.items() if k not in FINGERPRINT_PROGRESS_KEYS}
+
+
+def fingerprint_progress(fp: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    """Running CST token counters from a stored fingerprint (0 if missing)."""
+    src = fp or {}
+    out: Dict[str, int] = {}
+    for k in FINGERPRINT_PROGRESS_KEYS:
+        raw = src.get(k)
+        try:
+            out[k] = 0 if raw is None else int(raw)
+        except (TypeError, ValueError):
+            out[k] = 0
+    return out
+
+
+def fingerprint_conflicts(
+    stored: Optional[Dict[str, Any]],
+    current: Dict[str, Any],
+    *,
+    required_keys: Sequence[str],
+) -> List[str]:
+    """Human-readable mismatches that block skipping already-stored batches."""
+    if not stored:
+        return ["Hub folder has chunks but no sampling_fingerprint; cannot verify the same draw"]
+    msgs: List[str] = []
+    stored_id = fingerprint_identity(stored)
+    current_id = fingerprint_identity(current)
+    keys = set(required_keys) | (set(stored_id) & set(current_id))
+    for k in sorted(keys):
+        if k in required_keys and k not in stored:
+            msgs.append(f"missing {k} in stored fingerprint")
+            continue
+        sv = normalize_fingerprint_value(stored.get(k))
+        cv = normalize_fingerprint_value(current.get(k))
+        if sv != cv:
+            msgs.append(f"{k}: stored={stored.get(k)!r} vs current={current.get(k)!r}")
+    return msgs
+
+
+def store_fingerprint_required_keys(scope: str) -> tuple[str, ...]:
+    s = str(scope).strip().lower()
+    if s == "eval":
+        return STORE_EVAL_FINGERPRINT_REQUIRED
+    return STORE_TRAIN_FINGERPRINT_REQUIRED
 
 
 @dataclass

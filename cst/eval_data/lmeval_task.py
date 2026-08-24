@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from lm_eval.tasks import TaskManager
+
+# lm-eval tasks used by ``launch_eval`` / ``scripts/eval.sh``.
+# ``store.task_name=all`` stores each into ``{whoami}/hiddens-eval`` as its own folder.
+CST_EVAL_TASKS: tuple[str, ...] = (
+    "gsm8k",
+    "minerva_math500",
+    "arc_challenge_chat",
+    "humaneval",
+    "mbpp",
+)
 
 
 def eval_num_fewshot(task_name: str) -> int:
@@ -23,6 +33,35 @@ def eval_num_fewshot(task_name: str) -> int:
     if "arc_challenge_chat" in t:
         return 5
     return 0
+
+
+def expand_eval_task_names(task_name: Any) -> List[str]:
+    """Expand ``all`` / comma-separated names / Hydra lists into lm-eval task ids."""
+    if task_name is None:
+        raise ValueError("task_name is empty")
+    if isinstance(task_name, str):
+        parts = [p.strip() for p in task_name.split(",") if p.strip()]
+    else:
+        try:
+            parts = [str(p).strip() for p in task_name if str(p).strip()]
+        except TypeError:
+            parts = [str(task_name).strip()]
+        if not parts:
+            parts = [str(task_name).strip()]
+    if not parts:
+        raise ValueError("task_name is empty")
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in parts:
+        if raw.lower() in ("all", "*"):
+            extra = list(CST_EVAL_TASKS)
+        else:
+            extra = [raw]
+        for t in extra:
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
 
 
 def resolve_lmeval_task(task_dict: Dict[str, Any], task_name: str):
