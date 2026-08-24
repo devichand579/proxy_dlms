@@ -1,6 +1,6 @@
 # Scheduler Tracing: Understanding Diffusion Language Models and Unmasking Schedulers
 
-This repository contains the code for the papers "Scheduler Tracing: Understanding Diffusion Language Models and Unmasking Schedulers" and "Schedulerlens: A Decision Taxonomy and Interpretability Framework for Masked Diffusion Language Models and Schedulers". A unified framework for understanding and characterizing diffusion-based text generation which includes integration of diffusion language models, unmasking schedulers, evaluations, tracing, interpretability, hidden representations capture, cross-step-transcoder training/evaluation and circuit tracing for unmasking sequences.
+This repository contains the code for the papers "_____" and "____". A unified framework for understanding and characterizing diffusion-based text generation which includes integration of diffusion language models, unmasking schedulers, evaluations, tracing, interpretability, hidden representations capture, cross-step-transcoder training/evaluation and circuit tracing for unmasking sequences.
 
 ## Quick start
 
@@ -16,7 +16,6 @@ pip install -r requirements.txt
 |------|---------|
 | `scripts/` | Bash launchers (`eval.sh`, `cst.sh`, `tag.sh`, `llada-pcfg.sh`, …) |
 | `hydra_runners/` | Hydra entry points (`run_cst.py`, `run_tag.py`, `launch_eval.py`, `run_llada-pcfg.py`) |
-| `tests/` | Scheduler and tracing smoke tests |
 | `config/` | Hydra YAML configs |
 
 Run everything from the repo root, e.g. `./scripts/eval.sh …`, `python hydra_runners/run_cst.py mode=train`, `python tests/test_schedulers.py --scheduler pure_diffusion`.
