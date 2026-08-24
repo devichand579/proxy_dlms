@@ -19,12 +19,12 @@ from cst.train.loss import windowed_cst_loss_full
 logger = logging.getLogger("cst.train")
 
 # Training checkpoints: one ``latest`` (resume) + one ``best`` (lowest ``loss_mean``); no per-phase .pt files.
-# Short basenames below; with ``name_token`` see :func:`train_checkpoint_names` for ``cst_{...}_train_*.pt``.
+# Short basenames below; with ``name_token`` see :func:`train_checkpoint_names` for ``cst_{hidden}_k{K}_w{W}_{ls}_*.pt``.
 CKPT_LATEST = "cst_latest.pt"
 CKPT_BEST = "cst_best.pt"
 TRAIN_STATE_JSON = "cst_train_state.json"
 
-# Keys in training checkpoint ``meta`` (full-run resume at collect segment boundaries + W&B)
+# Keys in training checkpoint ``meta`` (full-run resume at batch boundaries + W&B)
 META_DATA_NEXT_EPOCH = "data_next_epoch"
 # 0-based index of the epoch that will be trained next, or == ``num_epochs`` if already finished
 META_DATA_NEXT_BATCH_IDX = "data_next_batch_idx"
@@ -70,8 +70,9 @@ def parse_data_resume_from_meta(
 ) -> Optional[tuple[int, int, int]]:
     """
     Return ``(data_next_epoch, data_next_batch_idx, data_next_segment)`` for the next
-    collection segment, or None if not present/invalid.
+    training batch, or None if not present/invalid.
 
+    ``data_next_segment`` is kept for old checkpoints (always 0 for new saves).
     If ``require_all`` is true, all three int keys must be set.
     """
     if not meta:

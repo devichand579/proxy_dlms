@@ -1,11 +1,17 @@
 # CST: store hiddens (Hub) | train CST | eval CST
 #
+# Store and train are independent. Store uploads hiddens; train later loads them from Hub.
+#
 #   python hydra_runners/run_cst.py mode=store store.scope=train
 #   python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k
 #   python hydra_runners/run_cst.py mode=train
 #   python hydra_runners/run_cst.py mode=eval eval.checkpoint=... eval.hidden_dir=...
 #
 # Shell: ./scripts/cst.sh --mode store|train|eval [hydra overrides...]
+#
+# Hub folder name_token: {model}_{scheduler}_{gen_length}_{steps}
+#   e.g. llada_pd_512_256   (eval store appends _task_{task})
+# Hub auth: huggingface-cli login (or HF_TOKEN). Repos: {whoami}/hiddens-train, {whoami}/hiddens-eval
 
 defaults:
   - launcher: local
@@ -13,40 +19,12 @@ defaults:
 
 mode: train
 
-eval:
-  hidden_dir: outputs/eval_hidden
-  checkpoint: null
-  hidden_source: local   # local | hf_hub
-  task_name: null
-  scheduler_tag: null
-  name_token: null
-  hf_repo: null
-  lambda_sparsity: null
-  model_path: null
-  device: cuda
-  w: null
-  ntf_conf_low: 0.2
-  ntf_conf_high: 0.8
-  ntf_first_non_eos: false
-  wandb_name: cst-eval
-
-store:
-  scope: train          # train | eval
-  hf_repo: null         # eval only: override full Hub repo (else train.hf_hiddens_eval_repo / org)
-  task_name: null       # eval: lm-eval task (e.g. gsm8k)
-  num_fewshot: null     # eval: defaults to launch_eval few-shot for task
-  scheduler_tag: null   # eval: defaults to train.scheduler_mode
-  name_token: null      # eval: override auto name_token
-  wandb_name: cst-store-eval
-  # Train + eval store: optional cap on samples (eval: lm-eval limit; train: defaults to train.samples_per_epoch)
-  samples: 1000
-  target_staging_gb: null  # GB per upload segment; defaults to train.target_staging_gb
-
 wandb: true
 wandb_project: strace-cst
 
 model_path: ./models/llada
 
+# CST architecture (mode=train / mode=eval only; store does not use this)
 cst:
   d_model: 4096
   k: 4096
@@ -56,73 +34,87 @@ cst:
   jumprelu_initial_threshold: 0.03
   jumprelu_bandwidth: 1.0
 
-train:
+# ---------------------------------------------------------------------------
+# mode=store — LM + scheduler collect, upload each batch to Hub. Does not train.
+# ---------------------------------------------------------------------------
+store:
+  scope: train          # train | eval
+  model_path: ${model_path}
   device: cuda
-  staging_dir: outputs/cst_staging
-  checkpoint_dir: outputs/cst_ckpt
-  # Resume: explicit .pt, or resume_from_latest=true loads cst_<model>_scheduler_<sched>_train_latest.pt
-  # (or legacy cst_latest.pt) under checkpoint_dir
-  resume_checkpoint: null
-  resume_from_latest: false
-  # When resuming from a train-latest .pt, also restore row-batch cursor (epoch/batch/segment) and W&B step/run id.
-  # Set false to load weights/optimizer/ramp only and start data from the beginning (legacy).
-  resume_data_from_checkpoint: true
-  # If true, when resume_data_from_checkpoint is true, train.seed / samples_per_epoch / few-shot / resample
-  # are taken from the checkpoint (must match the run that produced the data cursor). Set false to keep YAML.
-  resume_override_sampling: true
-  # Draw samples_per_epoch row once (train.seed) and reuse the same batches for every epoch when
-  # resample_each_epoch=false. Segments within an epoch follow target_staging_gb.
-  # Set resample_each_epoch=true to resample each epoch (legacy; seed offsets by epoch).
-  samples_per_epoch: 2048
-  resample_each_epoch: false
-  # Train only: how many passes over the same stored hiddens (store ignores this).
-  num_epochs: 1
-  # Collection stops when total written chunk size reaches this (decimal GB, 1e9 bytes per GB).
-  # Same cap used at train time for each Hub download slice (download -> train -> delete -> next).
-  target_staging_gb: 1.0
-  inference_batch_size: 8
+  scratch_dir: outputs/cst_staging
   scheduler_mode: pd
   gen_length: 512
   steps: 256
   block_length: null
-  top_k: 1
+  top_k: 2
   max_prompt_length: 512
-  compile_model: false
-  # Match eval.launch_eval: false = full steps + no truncate-at-EOS in collect (see collect_batch.generate)
-  use_eos_harness: true
+  inference_batch_size: 8
+  samples: 1000
   seed: 0
-  learning_rate: 0.0003
-  lambda_sparsity: 0.001
-  # Pre-JumpReLU dead-feature penalty: mean(ReLU(-h)); not ramped (CLT-style). Set 0 to disable.
-  lambda_pre_dead: 3.0e-6
-  c_tanh: 1.0
-  # Sparsity ramp: one ramp.step() per training chunk .pt file (not per epoch); see LambdaRamp in trainer.
-  ramp_total_steps: 10000
+  compile_model: false
+  # Match eval.launch_eval: false = full steps + no truncate-at-EOS in collect
+  use_eos_harness: true
   gsm8k_num_fewshot: 4
   arc_csqa_num_fewshot: 5
-  trace_name: cst_collect
+  name_token: null      # override auto {model}_{scheduler}_{gen_length}_{steps}
+  # eval store
+  task_name: null       # required when scope=eval (e.g. gsm8k)
+  num_fewshot: null     # eval: defaults to launch_eval few-shot for task
+  # Hub: huggingface-cli login (or HF_TOKEN). Repos: {whoami}/hiddens-train and {whoami}/hiddens-eval
+  delete_local_after_hf_push: true
+
+# ---------------------------------------------------------------------------
+# mode=train — download Hub hiddens and fit CST. No LM inference.
+# Look up data with the same model / scheduler / gen_length / steps as store.
+# ---------------------------------------------------------------------------
+train:
+  model_path: ${model_path}
+  device: cuda
+  scratch_dir: outputs/cst_staging
+  checkpoint_dir: outputs/cst_ckpt
+  # Hub lookup (must match a prior store run)
+  scheduler_mode: pd
+  gen_length: 512
+  steps: 256
+  name_token: null      # override auto {model}_{scheduler}_{gen_length}_{steps}
+  hidden_source: hf_hub
+  # Resume: explicit .pt, or resume_from_latest=true loads cst_<token>_latest.pt
+  resume_checkpoint: null
+  resume_from_latest: false
+  resume_data_from_checkpoint: true
+  resume_override_sampling: true
+  num_epochs: 1
+  learning_rate: 0.0003
+  lambda_sparsity: 0.001
+  # Pre-JumpReLU dead-feature penalty: mean(ReLU(-h)); not ramped. Set 0 to disable.
+  lambda_pre_dead: 3.0e-6
+  c_tanh: 1.0
+  # Sparsity ramp: one ramp.step() per training chunk .pt file
+  ramp_total_steps: 10000
   wandb: true
   wandb_name: cst-train
-  # Hub token for hidden-chunk upload/download (``huggingface-cli login`` or ``HF_TOKEN``).
-  hf_token: null
-
-  # --- Hidden chunks on Hugging Face (see docs/cst.md) ---
-  # Train mode always downloads from Hub; collect via mode=store store.scope=train.
-  # store / eval Hub paths also use these keys (no default org in code).
-  hidden_source: hf_hub
-  # Required: HF username or org slug -> {org}/hiddens-train and {org}/hiddens-eval
-  hf_hiddens_org: devichand
-  hf_hiddens_train_repo: null   # override full repo id, e.g. ${hf_hiddens_org}/hiddens-train
-  hf_hiddens_eval_repo: null    # override full repo id, e.g. ${hf_hiddens_org}/hiddens-eval
-  hf_hiddens_revision: main
-  hf_hiddens_private: false
-  hf_local_cache_dir: outputs/cst_hf_cache
-  # Restricted GPU node: enqueue Hub jobs; run ``python -m cst.hidden_hf_worker poll`` on a login machine.
-  hf_use_worker_queue: false
-  hf_worker_queue_dir: outputs/hf_worker_queue
-  hf_worker_wait_timeout_sec: 86400
-  delete_local_after_hf_push: false
+  # Hub download uses the same login as store ({whoami}/hiddens-train)
   delete_local_chunks_after_train: true
+
+# ---------------------------------------------------------------------------
+# mode=eval — score a CST checkpoint on saved (local or Hub) eval hiddens
+# ---------------------------------------------------------------------------
+eval:
+  hidden_dir: outputs/eval_hidden
+  checkpoint: null
+  hidden_source: local   # local | hf_hub
+  task_name: null
+  scheduler_mode: pd
+  gen_length: 512
+  steps: 256
+  name_token: null
+  model_path: ${model_path}
+  device: cuda
+  w: null
+  ntf_conf_low: 0.2
+  ntf_conf_high: 0.8
+  ntf_first_non_eos: false
+  wandb_name: cst-eval
 
 hydra:
   run:

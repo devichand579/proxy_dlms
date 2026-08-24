@@ -242,7 +242,7 @@ Set `**prompt`** (full) or `**hidden_pt**` (chunk), not neither.
 
 ```bash
 ./scripts/tag.sh \
-  --cst_checkpoint outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt \
+  --cst_checkpoint outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt \
   --model_path ./models/llada \
   --out_dir outputs/tag_demo \
   --prompt "Your question here"
@@ -253,7 +253,7 @@ Hydra:
 ```bash
 python hydra_runners/run_tag.py \
   model_path=./models/llada \
-  cst_checkpoint=outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt \
+  cst_checkpoint=outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt \
   prompt="Your question here" \
   out_dir=outputs/tag_demo
 ```

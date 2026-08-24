@@ -27,19 +27,22 @@ import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from cst.hf_hiddens.config import hf_token, resolve_eval_repo_id, resolve_org, resolve_train_repo_id
-from cst.hf_hiddens.jobs import dispatch_from_config
-from cst.hf_hiddens.store import fetch_manifest
+from cst.hf_hiddens.config import hf_token, resolve_eval_repo_id, resolve_train_repo_id
+from cst.hf_hiddens.store import (
+    download_all_chunks,
+    download_hidden_chunk,
+    fetch_manifest,
+    upload_hidden_chunk,
+)
 from cst.model.cst_bank import CSTBank
 from cst.naming import (
-    cst_eval_task_name_token,
-    cst_hidden_segment_prefix,
-    cst_train_name_token,
+    cst_ckpt_name_token,
+    cst_hidden_name_token,
     model_label_from_path,
     resolve_train_best_in_dir,
     resolve_train_resume_latest,
 )
-from cst.train.collect_batch import collect_hidden_until_size_gb_from_row_batches, load_model_for_collect
+from cst.train.collect_batch import collect_hidden_row_batch, load_model_for_collect
 from cst.train.trainer import (
     LambdaRamp,
     META_TRAIN_NUM_EPOCHS,
@@ -88,28 +91,54 @@ def _merge_eval_cfg(cfg: DictConfig) -> DictConfig:
     return base
 
 
-def _sampling_state_from_config(tr: Any) -> Dict[str, Any]:
+def _is_blank(v: Any) -> bool:
+    return v is None or str(v).strip().lower() in ("", "null", "none")
+
+
+def _section_model_path(cfg: DictConfig, section: Any) -> str:
+    mp = section.get("model_path") if section is not None else None
+    if _is_blank(mp):
+        mp = cfg.get("model_path")
+    if _is_blank(mp):
+        raise ValueError("model_path is required")
+    return str(mp)
+
+
+def _hidden_name_token(
+    section: Any,
+    model_path: str,
+    *,
+    task_name: Optional[str] = None,
+) -> str:
+    override = section.get("name_token") if section is not None else None
+    if not _is_blank(override):
+        return str(override).strip()
+    sched = "pd"
+    if section is not None and not _is_blank(section.get("scheduler_mode")):
+        sched = str(section.get("scheduler_mode"))
+    gen_length = 256 if section is None else int(section.get("gen_length", 256))
+    steps = 256 if section is None else int(section.get("steps", 256))
+    return cst_hidden_name_token(
+        model_label_from_path(model_path),
+        sched,
+        gen_length,
+        steps,
+        task_name=task_name,
+    )
+
+
+def _sampling_state_from_store(store_cfg: Any, *, n_samples: int, inference_bs: int) -> Dict[str, Any]:
     return {
-        "train_seed": int(tr.get("seed", 0)),
-        "train_samples_per_epoch": int(tr.get("samples_per_epoch", 2048)),
-        "train_inference_batch_size": int(tr.inference_batch_size),
-        "train_resample_each_epoch": bool(tr.get("resample_each_epoch", False)),
-        "train_gsm8k_num_fewshot": int(tr.get("gsm8k_num_fewshot", 4)),
-        "train_arc_csqa_num_fewshot": int(tr.get("arc_csqa_num_fewshot", 5)),
+        "train_seed": int(store_cfg.get("seed", 0)),
+        "train_samples_per_epoch": int(n_samples),
+        "train_inference_batch_size": int(inference_bs),
+        "train_resample_each_epoch": False,
+        "train_gsm8k_num_fewshot": int(store_cfg.get("gsm8k_num_fewshot", 4)),
+        "train_arc_csqa_num_fewshot": int(store_cfg.get("arc_csqa_num_fewshot", 5)),
     }
 
 
-def _target_staging_gb(store_cfg: Any, tr: Any) -> float:
-    tg = store_cfg.get("target_staging_gb")
-    if tg is None or str(tg).strip().lower() in ("", "null", "none"):
-        tg = tr.get("target_staging_gb")
-    target_gb = 1.0 if tg is None or str(tg).strip().lower() in ("", "null", "none") else float(tg)
-    if target_gb <= 0:
-        raise ValueError("store.target_staging_gb / train.target_staging_gb must be positive.")
-    return target_gb
-
-
-def _store_hiddens_segments(
+def _store_hiddens(
     cfg: DictConfig,
     *,
     scope: str,
@@ -118,130 +147,90 @@ def _store_hiddens_segments(
     row_batches: List[List[Dict[str, Any]]],
     sampling_state: Dict[str, Any],
     sched_m: str,
-    wandb_name: str,
 ) -> int:
-    """Collect hiddens by segment and upload each slice to the Hub."""
-    try:
-        import wandb
-    except ImportError:
-        wandb = None
-
-    tr = cfg.train
+    """Collect each inference batch and upload that .pt to the Hub."""
     store_cfg = cfg.get("store") or OmegaConf.create({})
-    device = torch.device(str(tr.get("device", "cuda")))
-    staging = Path(str(tr.get("staging_dir", "outputs/cst_staging")))
-    staging.mkdir(parents=True, exist_ok=True)
-    target_gb = _target_staging_gb(store_cfg, tr)
-    use_wandb = bool(tr.get("wandb", cfg.get("wandb", True)))
+    device = torch.device(str(store_cfg.get("device", "cuda")))
+    scratch = Path(str(store_cfg.get("scratch_dir", "outputs/cst_staging")))
+    scratch.mkdir(parents=True, exist_ok=True)
+    cache_dir = Path(str(store_cfg.get("hf_local_cache_dir", "outputs/cst_hf_cache")))
     capture_context = "train" if scope == "train" else "eval"
+    delete_local = bool(store_cfg.get("delete_local_after_hf_push", True))
+    model_path = _section_model_path(cfg, store_cfg)
 
     nbat = len(row_batches)
     logger.info(
-        "store %s hiddens -> %s (%s): %d row batches, %.3f GB per segment",
+        "store %s hiddens -> %s (%s): %d batches (upload each batch)",
         scope,
         repo_id,
         name_token,
         nbat,
-        target_gb,
     )
     if nbat == 0:
         raise RuntimeError(f"store.scope={scope}: no row batches to collect")
 
-    wb = None
-    global_step = 0
-    if use_wandb and wandb is not None:
-        wb = wandb.init(
-            project=str(cfg.get("wandb_project", "strace-cst")),
-            name=str(wandb_name),
-            config=OmegaConf.to_container(cfg, resolve=True),
-            reinit=True,
-        )
-
-    bi, seg = 0, 0
-    while bi < nbat:
-        seg_prefix = cst_hidden_segment_prefix(name_token, seg)
-        logger.info("=== collect segment %d (batch %d / %d) ===", seg + 1, bi, nbat)
-
-        model, tokenizer = load_model_for_collect(
-            str(cfg.model_path),
-            device=str(device),
-            compile_model=bool(tr.get("compile_model", False)),
-        )
-        ueh = _coerce_use_eos_harness(tr.get("use_eos_harness", True))
-        try:
-            batch_paths, next_bi, coll_sum = collect_hidden_until_size_gb_from_row_batches(
+    manifest = fetch_manifest(
+        repo_id,
+        name_token,
+        cache_dir=cache_dir,
+        revision=str(store_cfg.get("hf_hiddens_revision", "main")),
+        token=hf_token(store_cfg),
+        create_if_missing=True,
+    )
+    model, tokenizer = load_model_for_collect(
+        model_path,
+        device=str(device),
+        compile_model=bool(store_cfg.get("compile_model", False)),
+    )
+    ueh = _coerce_use_eos_harness(store_cfg.get("use_eos_harness", True))
+    try:
+        for bi, rows in enumerate(row_batches):
+            logger.info("=== collect batch %d / %d ===", bi + 1, nbat)
+            out_path, meta = collect_hidden_row_batch(
                 model,
                 tokenizer,
-                str(cfg.model_path),
-                staging,
-                row_batches=row_batches,
-                start_idx=bi,
-                target_gb=target_gb,
+                model_path,
+                scratch,
+                rows=rows,
+                batch_idx=bi,
+                name_token=name_token,
                 device=str(device),
                 mode_key=sched_m,
-                gen_length=int(tr.get("gen_length", 256)),
-                steps=int(tr.get("steps", 256)),
-                block_length=tr.get("block_length"),
-                top_k=int(tr.get("top_k", 1)),
-                max_prompt_length=int(tr.get("max_prompt_length", 512)),
-                staging_name_token=name_token,
-                segment=seg,
+                gen_length=int(store_cfg.get("gen_length", 256)),
+                steps=int(store_cfg.get("steps", 256)),
+                block_length=store_cfg.get("block_length"),
+                top_k=int(store_cfg.get("top_k", 1)),
+                max_prompt_length=int(store_cfg.get("max_prompt_length", 512)),
                 capture_context=capture_context,
                 use_eos_harness=ueh,
             )
-        finally:
-            del model
-            del tokenizer
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        if not batch_paths:
-            logger.warning("collect returned no files (start_idx=%d); stopping", bi)
-            break
-
-        logger.info(
-            "collect segment: wrote %.3f GB in %d batches, next idx %d",
-            coll_sum.get("written_gb", 0.0),
-            coll_sum.get("n_batches", 0),
-            coll_sum.get("next_idx", next_bi),
-        )
-
-        dispatch_from_config(
-            tr,
-            {
-                "type": "upload_hidden_segment",
-                "repo_id": repo_id,
-                "name_token": name_token,
-                "local_paths": list(batch_paths),
-                "segment": seg,
-                "prefix": seg_prefix,
-                "next_batch_idx": int(coll_sum.get("next_idx", next_bi)),
-                "sampling_fingerprint": dict(sampling_state),
-                "scope": scope,
-                "delete_local_after": bool(tr.get("delete_local_after_hf_push", False)),
-            },
-        )
-
-        if wb:
-            wb.log(
-                {
-                    "collect/segment": seg,
-                    "collect/written_gb": coll_sum.get("written_gb", 0),
-                    "collect/n_batches": coll_sum.get("n_batches", 0),
-                    "collect/next_batch_idx": float(coll_sum.get("next_idx", next_bi)),
-                },
-                step=global_step,
+            nbytes = Path(out_path).stat().st_size
+            rec = upload_hidden_chunk(
+                repo_id,
+                name_token,
+                out_path,
+                manifest=manifest,
+                sampling_fingerprint=dict(sampling_state),
+                cache_dir=cache_dir,
+                revision=str(store_cfg.get("hf_hiddens_revision", "main")),
+                token=hf_token(store_cfg),
+                private_repo=bool(store_cfg.get("hf_hiddens_private", False)),
+                delete_local_after=delete_local,
+                scope=scope,
             )
-        global_step += int(coll_sum.get("n_batches", 0))
-
-        bi = int(coll_sum.get("next_idx", next_bi))
-        if bool(tr.get("delete_local_chunks_after_train", True)):
-            delete_files(batch_paths)
-        seg += 1
+            logger.info(
+                "uploaded %s (%.3f GB, gen_time=%.2fs)",
+                rec.filename,
+                nbytes / 1e9,
+                float(meta.get("gen_time", 0.0)),
+            )
+    finally:
+        del model
+        del tokenizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     logger.info("collect finished: %s on %s", name_token, repo_id)
-    if wb:
-        wandb.finish()
     return 0
 
 
@@ -261,10 +250,9 @@ def _train_cst_on_chunks_and_checkpoint(
     log_wandb: bool,
     name_token: str,
     epoch: Optional[int] = None,
-    segment: Optional[int] = None,
+    batch_idx: Optional[int] = None,
     data_next_epoch: int = 0,
     data_next_batch_idx: int = 0,
-    data_next_segment: int = 0,
     num_epochs: int = 1,
     wandb_run_id_for_meta: Optional[str] = None,
     sampling_state: Optional[Dict[str, Any]] = None,
@@ -296,8 +284,8 @@ def _train_cst_on_chunks_and_checkpoint(
             }
             if epoch is not None:
                 row["train/epoch"] = int(epoch)
-            if segment is not None:
-                row["train/segment"] = int(segment)
+            if batch_idx is not None:
+                row["train/batch_idx"] = int(batch_idx)
             wb.log(row, step=global_step)
         if not chunks:
             global_step += 1
@@ -309,8 +297,8 @@ def _train_cst_on_chunks_and_checkpoint(
             }
             if epoch is not None:
                 row2["train/epoch"] = int(epoch)
-            if segment is not None:
-                row2["train/segment"] = int(segment)
+            if batch_idx is not None:
+                row2["train/batch_idx"] = int(batch_idx)
             wb.log(row2, step=global_step)
         wb.log(
             {
@@ -331,12 +319,22 @@ def _train_cst_on_chunks_and_checkpoint(
         extra_meta,
         data_next_epoch=int(data_next_epoch),
         data_next_batch_idx=int(data_next_batch_idx),
-        data_next_segment=int(data_next_segment),
+        data_next_segment=0,
         wandb_global_step=int(global_step),
         wandb_run_id=run_id,
         num_epochs=int(num_epochs),
     )
-    if sampling_state is not None:
+    if sampling_state is not None and all(
+        k in sampling_state
+        for k in (
+            "train_seed",
+            "train_samples_per_epoch",
+            "train_inference_batch_size",
+            "train_resample_each_epoch",
+            "train_gsm8k_num_fewshot",
+            "train_arc_csqa_num_fewshot",
+        )
+    ):
         merge_sampling_state_into_meta(
             extra_meta,
             train_seed=int(sampling_state["train_seed"]),
@@ -378,44 +376,32 @@ def _train_cst_on_chunks_and_checkpoint(
 
 def store_train_hiddens(cfg: DictConfig) -> int:
     """Store train hidden chunks on the Hub."""
-    tr = cfg.train
     store_cfg = cfg.get("store") or OmegaConf.create({})
 
     sp_cfg = store_cfg.get("samples")
-    if sp_cfg is None or str(sp_cfg).strip().lower() in ("", "null", "none"):
-        sp_cfg = tr.get("samples_per_epoch")
-    if sp_cfg is None or str(sp_cfg).strip().lower() in ("", "null", "none"):
-        raise ValueError("store.samples / train.samples_per_epoch must be set")
+    if _is_blank(sp_cfg):
+        raise ValueError("store.samples must be set")
     n_sp = int(sp_cfg)
     if n_sp < 1:
         raise ValueError("store.samples must be >= 1")
 
-    inference_bs = int(tr.inference_batch_size)
-    seed = int(tr.get("seed", 0))
-    gsm_fs = int(tr.get("gsm8k_num_fewshot", 4))
-    arc_fs = int(tr.get("arc_csqa_num_fewshot", 5))
+    inference_bs = int(store_cfg.inference_batch_size)
+    seed = int(store_cfg.get("seed", 0))
+    gsm_fs = int(store_cfg.get("gsm8k_num_fewshot", 4))
+    arc_fs = int(store_cfg.get("arc_csqa_num_fewshot", 5))
 
-    model_lbl = model_label_from_path(str(cfg.model_path))
-    sched_m = str(tr.get("scheduler_mode", "pd"))
-    k, w = int(cfg.cst.k), int(cfg.cst.w)
-    lam = float(tr.get("lambda_sparsity", 1e-3))
-    name_token = cst_train_name_token(model_lbl, sched_m, k, w, lam)
-    hf_train_repo = resolve_train_repo_id(tr)
+    model_path = _section_model_path(cfg, store_cfg)
+    sched_m = str(store_cfg.get("scheduler_mode", "pd"))
+    name_token = _hidden_name_token(store_cfg, model_path)
+    hf_train_repo = resolve_train_repo_id(store_cfg)
 
-    sampling_state = {
-        "train_seed": int(seed),
-        "train_samples_per_epoch": int(n_sp),
-        "train_inference_batch_size": int(inference_bs),
-        "train_resample_each_epoch": False,
-        "train_gsm8k_num_fewshot": int(gsm_fs),
-        "train_arc_csqa_num_fewshot": int(arc_fs),
-    }
+    sampling_state = _sampling_state_from_store(store_cfg, n_samples=n_sp, inference_bs=inference_bs)
 
     row_batches = sample_uniform_batched(
         n_sp, inference_bs, seed=seed, gsm8k_num_fewshot=gsm_fs, arc_csqa_num_fewshot=arc_fs
     )
 
-    return _store_hiddens_segments(
+    return _store_hiddens(
         cfg,
         scope="train",
         name_token=name_token,
@@ -423,7 +409,6 @@ def store_train_hiddens(cfg: DictConfig) -> int:
         row_batches=row_batches,
         sampling_state=sampling_state,
         sched_m=sched_m,
-        wandb_name=str(tr.get("wandb_name", "cst-store-train")),
     )
 
 
@@ -434,34 +419,26 @@ def store_train_hiddens(cfg: DictConfig) -> int:
 
 def store_eval_hiddens(cfg: DictConfig) -> int:
     """Store eval hidden chunks on the Hub."""
-    tr = cfg.train
     store = cfg.get("store") or OmegaConf.create({})
 
     task = store.get("task_name")
-    if task is None or str(task).strip().lower() in ("", "null", "none"):
+    if _is_blank(task):
         raise ValueError("store.scope=eval requires store.task_name")
 
-    sched_m = str(store.get("scheduler_tag") or tr.get("scheduler_mode", "pd"))
-    k, w = int(cfg.cst.k), int(cfg.cst.w)
-    lam = float(tr.get("lambda_sparsity", 1e-3))
-    name_token = store.get("name_token")
-    if name_token is None or str(name_token).strip().lower() in ("", "null", "none"):
-        name_token = cst_eval_task_name_token(
-            model_label_from_path(str(cfg.model_path)), sched_m, str(task), k, w, lam
-        )
-    else:
-        name_token = str(name_token).strip()
+    model_path = _section_model_path(cfg, store)
+    sched_m = str(store.get("scheduler_mode", "pd"))
+    name_token = _hidden_name_token(store, model_path, task_name=str(task))
 
-    repo_id = resolve_eval_repo_id(tr, store=store)
-    inference_bs = int(tr.inference_batch_size)
-    seed = int(tr.get("seed", 0))
+    repo_id = resolve_eval_repo_id(store, store=store)
+    inference_bs = int(store.inference_batch_size)
+    seed = int(store.get("seed", 0))
 
     nfs = store.get("num_fewshot")
-    num_fewshot = int(nfs) if nfs not in (None, "", "null", "none") else eval_num_fewshot(str(task))
+    num_fewshot = int(nfs) if not _is_blank(nfs) else eval_num_fewshot(str(task))
 
     sp_cfg = store.get("samples")
     limit = None
-    if sp_cfg is not None and str(sp_cfg).strip().lower() not in ("", "null", "none"):
+    if not _is_blank(sp_cfg):
         limit = int(sp_cfg)
         if limit < 1:
             raise ValueError("store.samples must be >= 1 when set")
@@ -481,9 +458,11 @@ def store_eval_hiddens(cfg: DictConfig) -> int:
         "eval_inference_batch_size": int(inference_bs),
         "eval_seed": int(seed),
         "eval_scheduler": sched_m,
+        "eval_gen_length": int(store.get("gen_length", 256)),
+        "eval_steps": int(store.get("steps", 256)),
     }
 
-    return _store_hiddens_segments(
+    return _store_hiddens(
         cfg,
         scope="eval",
         name_token=name_token,
@@ -491,7 +470,6 @@ def store_eval_hiddens(cfg: DictConfig) -> int:
         row_batches=row_batches,
         sampling_state=sampling_state,
         sched_m=sched_m,
-        wandb_name=str(store.get("wandb_name") or tr.get("wandb_name", "cst-store-eval")),
     )
 
 
@@ -526,15 +504,10 @@ def run_train(cfg: DictConfig) -> int:
         )
 
     device = torch.device(str(tr.get("device", "cuda")))
-    staging = Path(str(tr.get("staging_dir", "outputs/cst_staging")))
-    staging.mkdir(parents=True, exist_ok=True)
+    scratch = Path(str(tr.get("scratch_dir", tr.get("staging_dir", "outputs/cst_staging"))))
+    scratch.mkdir(parents=True, exist_ok=True)
     ckpt_dir = Path(str(tr.get("checkpoint_dir", "outputs/cst_ckpt")))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-    tg = tr.get("target_staging_gb")
-    target_gb = 1.0 if tg is None or str(tg).strip().lower() in ("", "null", "none") else float(tg)
-    if target_gb <= 0:
-        raise ValueError("train.target_staging_gb must be positive.")
 
     use_wandb = bool(tr.get("wandb", cfg.get("wandb", True)))
     num_epochs = int(tr.get("num_epochs", 1))
@@ -542,11 +515,11 @@ def run_train(cfg: DictConfig) -> int:
         raise ValueError("train.num_epochs must be >= 1")
 
     cst_cfg = cfg.cst
-    model_lbl = model_label_from_path(str(cfg.model_path))
-    sched_m = str(tr.get("scheduler_mode", "pd"))
+    model_path = _section_model_path(cfg, tr)
     k, w = int(cst_cfg.k), int(cst_cfg.w)
     lam = float(tr.get("lambda_sparsity", 1e-3))
-    name_token = cst_train_name_token(model_lbl, sched_m, k, w, lam)
+    hidden_token = _hidden_name_token(tr, model_path)
+    ckpt_token = cst_ckpt_name_token(hidden_token, k, w, lam)
     hf_train_repo = resolve_train_repo_id(tr)
     cache_dir = Path(str(tr.get("hf_local_cache_dir", "outputs/cst_hf_cache")))
 
@@ -570,7 +543,7 @@ def run_train(cfg: DictConfig) -> int:
         loaded_ckpt_path = rp_str
         logger.info("resumed CST from %s", rp_str)
     elif bool(tr.get("resume_from_latest", False)):
-        resume_p = resolve_train_resume_latest(ckpt_dir, name_token)
+        resume_p = resolve_train_resume_latest(ckpt_dir, ckpt_token)
         if resume_p is not None and resume_p.is_file():
             ckpt_meta = load_cst_checkpoint(str(resume_p), cst_bank, optimizer, ramp)
             loaded_ckpt_path = str(resume_p)
@@ -598,7 +571,7 @@ def run_train(cfg: DictConfig) -> int:
                     num_epochs,
                 )
 
-    sampling_state = _sampling_state_from_config(tr)
+    sampling_state: Optional[Dict[str, Any]] = None
     if loaded_ckpt_path and resume_data_from_checkpoint and bool(tr.get("resume_override_sampling", True)):
         sfp = parse_sampling_state_from_meta(ckpt_meta)
         if sfp is not None:
@@ -606,7 +579,7 @@ def run_train(cfg: DictConfig) -> int:
 
     manifest = fetch_manifest(
         hf_train_repo,
-        name_token,
+        hidden_token,
         cache_dir=cache_dir,
         revision=str(tr.get("hf_hiddens_revision", "main")),
         token=hf_token(tr),
@@ -618,7 +591,7 @@ def run_train(cfg: DictConfig) -> int:
 
     n_cst_params = sum(p.numel() for p in cst_bank.parameters())
     logger.info("CST parameters: total=%s", f"{n_cst_params:,}")
-    logger.info("train from Hub: %s (%s)", hf_train_repo, name_token)
+    logger.info("train from Hub: %s (%s)", hf_train_repo, hidden_token)
 
     if resume_trip is not None:
         r_e, r_b, _r_s = resume_trip
@@ -651,10 +624,11 @@ def run_train(cfg: DictConfig) -> int:
         if global_step == 0:
             wb.log({"cst/total_parameters": n_cst_params}, step=global_step)
 
+    all_chunks = manifest.all_chunks_sorted()
     nbat = manifest.total_batch_count()
     if nbat == 0:
         raise FileNotFoundError(
-            f"no hiddens in manifest for {name_token} @ {hf_train_repo}. "
+            f"no hiddens in manifest for {hidden_token} @ {hf_train_repo}. "
             "Run: python hydra_runners/run_cst.py mode=store store.scope=train"
         )
 
@@ -669,36 +643,26 @@ def run_train(cfg: DictConfig) -> int:
                 return 0
             continue
         bi = r_b if resume_trip is not None and cst_pass == r_e else 0
-
-        step_in_pass = 0
-        while bi < nbat:
-            step_in_pass += 1
-            dl_dir = staging / "hf_dl" / name_token / f"pass{cst_pass:03d}_step{step_in_pass:04d}"
+        pending = [c for c in all_chunks if int(c.batch_idx) >= int(bi)]
+        dl_dir = scratch / "hf_dl" / hidden_token
+        for ch in pending:
             logger.info(
-                "=== download pass %d step %d (batch %d / %d, target %.3f GB) ===",
+                "=== download pass %d batch %d / %d (%s) ===",
                 cst_pass + 1,
-                step_in_pass,
-                bi,
+                int(ch.batch_idx),
                 nbat,
-                target_gb,
+                ch.filename,
             )
             try:
-                result = dispatch_from_config(
-                    tr,
-                    {
-                        "type": "download_hiddens_until_gb",
-                        "repo_id": str(hf_train_repo),
-                        "name_token": name_token,
-                        "start_batch_idx": bi,
-                        "target_gb": target_gb,
-                        "local_dir": str(dl_dir),
-                    },
+                dest = download_hidden_chunk(
+                    str(hf_train_repo),
+                    hidden_token,
+                    ch.filename,
+                    dl_dir,
+                    expected_bytes=ch.bytes,
+                    revision=str(tr.get("hf_hiddens_revision", "main")),
+                    token=hf_token(tr),
                 )
-                batch_paths = [str(p) for p in result.get("local_paths") or []]
-                next_bi = int(result.get("next_batch_idx", bi))
-                coll_sum = dict(result.get("summary") or {})
-                if not batch_paths:
-                    raise RuntimeError(f"HF download returned no paths: {coll_sum}")
             except FileNotFoundError as e:
                 logger.error("Hub data missing — run mode=store first: %s", e)
                 break
@@ -707,21 +671,20 @@ def run_train(cfg: DictConfig) -> int:
                 wb.log(
                     {
                         "download/pass": cst_pass,
-                        "download/step": step_in_pass,
-                        "download/written_gb": coll_sum.get("written_gb", 0),
-                        "download/n_batches": coll_sum.get("n_batches", 0),
+                        "download/batch_idx": int(ch.batch_idx),
+                        "download/bytes": float(ch.bytes),
                     },
                     step=global_step,
                 )
-            global_step += int(coll_sum.get("n_batches", 0))
+            global_step += 1
 
-            bi = int(coll_sum.get("next_idx", next_bi))
-            d_ne = int(cst_pass) + 1 if bi >= nbat else int(cst_pass)
-            d_nb = 0 if bi >= nbat else int(bi)
+            next_bi = int(ch.batch_idx) + 1
+            d_ne = int(cst_pass) + 1 if next_bi >= nbat else int(cst_pass)
+            d_nb = 0 if next_bi >= nbat else int(next_bi)
 
             global_step = _train_cst_on_chunks_and_checkpoint(
-                batch_paths,
-                ckpt_phase=int(cst_pass) * 100_000 + step_in_pass,
+                [str(dest)],
+                ckpt_phase=int(cst_pass) * 100_000 + int(ch.batch_idx) + 1,
                 cst_cfg=cst_cfg,
                 cst_bank=cst_bank,
                 optimizer=optimizer,
@@ -732,12 +695,11 @@ def run_train(cfg: DictConfig) -> int:
                 global_step=global_step,
                 ckpt_dir=ckpt_dir,
                 log_wandb=use_wandb and wb is not None,
-                name_token=name_token,
+                name_token=ckpt_token,
                 epoch=cst_pass,
-                segment=step_in_pass,
+                batch_idx=int(ch.batch_idx),
                 data_next_epoch=d_ne,
                 data_next_batch_idx=d_nb,
-                data_next_segment=0,
                 num_epochs=int(num_epochs),
                 wandb_run_id_for_meta=wandb_run_id_resumed if (not use_wandb or wb is None) else None,
                 sampling_state=sampling_state,
@@ -761,40 +723,29 @@ def run_eval(cfg: DictConfig) -> int:
         wandb = None
 
     from cst.eval.run_eval_cst import run_eval_on_dir
-    from cst.hf_hiddens.segment import download_all_manifest_chunks
 
     ev = _merge_eval_cfg(cfg)
     hidden_dir = str(ev.get("hidden_dir", _EVAL_DEFAULTS["hidden_dir"]))
     hidden_source = str(ev.get("hidden_source", "local")).strip().lower()
 
     if hidden_source in ("hf", "hf_hub", "hub"):
-        tr = cfg.train
         store = cfg.get("store") or OmegaConf.create({})
         task = ev.get("task_name") or store.get("task_name")
-        if not task or str(task).strip().lower() in ("", "null", "none"):
+        if _is_blank(task):
             raise ValueError("eval.hidden_source=hf_hub requires eval.task_name (or store.task_name)")
-        sched = ev.get("scheduler_tag") or tr.get("scheduler_mode", "pd")
-        lam = float(ev.get("lambda_sparsity", tr.get("lambda_sparsity", 1e-3)))
-        name_token = ev.get("name_token")
-        if not name_token or str(name_token).strip().lower() in ("", "null", "none"):
-            name_token = cst_eval_task_name_token(
-                model_label_from_path(str(cfg.model_path)),
-                str(sched),
-                str(task),
-                int(cfg.cst.k),
-                int(cfg.cst.w),
-                lam,
-            )
-        repo_id = resolve_eval_repo_id(tr, eval_cfg=ev)
-        cache = Path(str(tr.get("hf_local_cache_dir", "outputs/cst_hf_cache"))) / "eval_dl" / name_token
+        model_path = _section_model_path(cfg, ev)
+        name_token = _hidden_name_token(ev, model_path, task_name=str(task))
+        repo_id = resolve_eval_repo_id(ev, store=store, eval_cfg=ev)
+        cache_dir = str(ev.get("hf_local_cache_dir", "outputs/cst_hf_cache"))
+        cache = Path(cache_dir) / "eval_dl" / name_token
         hidden_dir = str(
-            download_all_manifest_chunks(
+            download_all_chunks(
                 repo_id,
                 str(name_token),
                 local_dir=cache,
-                cache_dir=str(tr.get("hf_local_cache_dir", "outputs/cst_hf_cache")),
-                revision=str(tr.get("hf_hiddens_revision", "main")),
-                token=hf_token(tr),
+                cache_dir=cache_dir,
+                revision=str(ev.get("hf_hiddens_revision", "main")),
+                token=hf_token(ev),
             )
         )
 

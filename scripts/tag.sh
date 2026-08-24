@@ -68,11 +68,11 @@ Any other args are passed to Hydra, e.g.:
   cst_config=/path/to/cst.yaml
 
 Examples:
-  ./scripts/tag.sh --cst_checkpoint outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_train_best.pt \\
+  ./scripts/tag.sh --cst_checkpoint outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt \\
            --model_path ./models/llada --out_dir outputs/tag_run \\
            --prompt "Solve: 2+2="
 
-  ./scripts/tag.sh --cst_checkpoint outputs/cst_ckpt/..._train_best.pt --model_path ./models/llada \\
+  ./scripts/tag.sh --cst_checkpoint outputs/cst_ckpt/..._best.pt --model_path ./models/llada \\
            --hidden_pt outputs/.../hidden/file.pt --out_dir outputs/tag_from_pt
 
 Slurm:

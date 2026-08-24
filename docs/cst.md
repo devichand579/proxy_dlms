@@ -4,35 +4,36 @@
 
 ## Two entry points
 
-Collection and training are **separate**. Run **`mode=store`** once (LM inference -> Hub), then **`mode=train`** (download from Hub -> fit CST, no LM).
+Collection and training are **separate** (separate config blocks, separate jobs). Run **`mode=store`** once (LM inference -> Hub), then **`mode=train`** later (download from Hub -> fit CST, no LM).
 
 Everything goes through **`hydra_runners/run_cst.py`** / **`./scripts/cst.sh`** with `mode=store`, `mode=train`, or `mode=eval`.
 
 | | **`mode=store`** | **`mode=train`** / **`mode=eval`** |
 |---|---|---|
-| **Purpose** | Run LM+scheduler on prompts -> **Hugging Face** (train mix or eval task) | **Train** or **score** CST from stored hiddens |
-| **Needs GPU + model** | Yes (collect + scheduler for both train and eval store) | **No** for train (Hub download only); eval scoring only |
-| **Output** | Chunks on `{namespace}/hiddens-train` or `{namespace}/hiddens-eval` | CST checkpoints under `outputs/cst_ckpt/` or eval metrics |
+| **Purpose** | Run LM+scheduler on prompts -> **Hugging Face** | **Train** or **score** CST from stored hiddens |
+| **Config** | `store.*` only | `train.*` + `cst.*` / `eval.*` |
+| **Needs GPU + model** | Yes | **No** for train (Hub download only); eval scoring only |
+| **Output** | Chunks on `{whoami}/hiddens-train` or `{whoami}/hiddens-eval` | CST checkpoints under `outputs/cst_ckpt/` or eval metrics |
 
-`train.hf_hiddens_org` is your **HF username** if you have no org (e.g. `devichand` -> [devichand/hiddens-train](https://huggingface.co/datasets/devichand/hiddens-train)), or an org slug otherwise.
+`huggingface-cli login` (or `HF_TOKEN`) is enough. Repos default to **`{your-username}/hiddens-train`** and **`{your-username}/hiddens-eval`**.
 
 ```bash
-# 1) Store (once per model / scheduler / task)
+# 1) Store (once per model / scheduler / gen_length / steps)
 python hydra_runners/run_cst.py mode=store store.scope=train
 python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k
 
-# 2) Train CST from Hub (no inference)
+# 2) Train CST from Hub (no inference). Lookup keys must match the store run.
 python hydra_runners/run_cst.py mode=train
 
 # 3) Eval CST from Hub or local folder
 python hydra_runners/run_cst.py mode=eval eval.hidden_source=hf_hub eval.task_name=gsm8k \
-  eval.checkpoint=outputs/cst_ckpt/cst_..._train_best.pt
+  eval.checkpoint=outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt
 python hydra_runners/run_cst.py mode=eval eval.hidden_dir=/path/to/hiddens eval.checkpoint=...
 ```
 
 **lm-eval + CST metrics during benchmarks:** `hydra_runners/launch_eval.py` with `cst_checkpoint=...` (separate from the table above).
 
-**Config:** `config/cst.yaml` — `store.*`, `train.*`, `cst.*`. **Code:** `cst/`, `cst/hf_hiddens/`, `cst/hidden_hf_worker.py`.
+**Config:** `config/cst.yaml` — `store.*`, `train.*`, `eval.*`, `cst.*`. **Code:** `cst/`, `cst/hf_hiddens/`.
 
 ---
 
@@ -49,81 +50,60 @@ Legacy chunks may still include extra `meta` fields or `token_unmasked` / `token
 
 Loaded as `[T, B, L, D]` float32 via `cst.train.hidden_chunk.load_chunk_H`.
 
-**Filename examples** (same pattern for train and eval):
+**Filename examples:**
 
-- Train: `llada_scheduler_pd_k4096_w4_ls0.001_train_seg000_000042.pt`
-- Eval: `llada_scheduler_pd_k4096_w4_ls0.001_task_gsm8k_seg000_000042.pt`
+- Train: `llada_pd_512_256_000042.pt`
+- Eval: `llada_pd_512_256_task_gsm8k_000042.pt`
 
-Pattern: `{name_token}_seg{segment:03d}_{batch_idx:06d}.pt`
+Pattern: `{name_token}_{batch_idx:06d}.pt` where `name_token` is `{model}_{scheduler}_{gen_length}_{steps}`.
 
 ---
 
 ## Store hidden data (`mode=store`)
 
+Uses **`store.*` only** (scheduler, gen length, steps, batch size, Hub credentials). Does **not** read `train.*` or `cst.*`.
+
 ### Train hiddens (`store.scope=train`)
 
-Runs the full collect loop (sample prompts -> LM + scheduler -> `.pt` until `target_staging_gb` per segment) and **uploads each segment to Hub**. Does **not** train CST.
+Runs the collect loop (sample prompts -> LM + scheduler -> one `.pt` per inference batch) and **uploads each batch to Hub**. Does **not** train CST.
 
 ```bash
 huggingface-cli login
 python hydra_runners/run_cst.py mode=store store.scope=train
 ```
 
-Uses `train.target_staging_gb`, `train.scheduler_mode`, `train.samples_per_epoch`, etc.
-
-Default repo: **`{hf_hiddens_org}/hiddens-train`**.
+Default repo: **`{whoami}/hiddens-train`**.
 
 ### Eval hiddens (`store.scope=eval`)
 
-Runs the **full lm-eval task** through the model + scheduler (same collect loop as train), writing segments to `train.staging_dir` and uploading each slice to Hub. Optional `store.samples` caps how many eval instances to capture (default: all task documents).
+Runs the **lm-eval task** through the model + scheduler, writing each batch `.pt` and uploading it immediately. Optional `store.samples` caps how many eval instances to capture (default: all task documents).
 
 ```bash
 python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k
-# Optional: cap instances or segment size
 python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k store.samples=128
 ```
 
-Default repo: **`{hf_hiddens_org}/hiddens-eval`**. Requires `store.task_name` (or `store.name_token` override).
+Default repo: **`{whoami}/hiddens-eval`**. Requires `store.task_name` (or `store.name_token` override). Eval tokens append `_task_{task}`.
 
-Each segment in `manifest.json` (no epoch field — one stored dataset per `name_token`):
+`manifest.json` (one stored dataset per `name_token`):
 
 ```json
 {
   "schema_version": 2,
   "scope": "train",
-  "name_token": "llada_scheduler_pd_k4096_w4_ls0.001_train",
-  "segments": [
-    {
-      "segment": 0,
-      "prefix": "llada_scheduler_pd_k4096_w4_ls0.001_train_seg000",
-      "chunks": [{"batch_idx": 42, "filename": "llada_scheduler_pd_k4096_w4_ls0.001_train_seg000_000042.pt", "bytes": 12345678}],
-      "total_bytes": 12345678,
-      "next_batch_idx": 1,
-      "sampling_fingerprint": {"train_samples_per_epoch": 2048, "train_seed": 0}
-    }
-  ]
+  "name_token": "llada_pd_512_256",
+  "chunks": [
+    {"batch_idx": 42, "filename": "llada_pd_512_256_000042.pt", "bytes": 12345678}
+  ],
+  "sampling_fingerprint": {"train_samples_per_epoch": 1000, "train_seed": 0}
 }
 ```
-
-Upload segments in the manifest are bookkeeping only; train uses a **global batch cursor** across them (`batch_idx` in each filename).
-
-### Restricted GPU / worker queue
-
-When the store or train machine cannot reach the Hub:
-
-```yaml
-train:
-  hf_use_worker_queue: true
-  hf_worker_queue_dir: outputs/hf_worker_queue
-```
-
-On a login machine: `python -m cst.hidden_hf_worker poll --queue-dir outputs/hf_worker_queue --watch`
 
 ---
 
 ## Train CST (`mode=train`)
 
-**Requires** hiddens on Hub from `mode=store store.scope=train` first.
+**Requires** hiddens on Hub from `mode=store store.scope=train` first. Uses **`train.*` + `cst.*`**; Hub lookup is `train.model_path` / `train.scheduler_mode` / `train.gen_length` / `train.steps` (must match the store run) or `train.name_token`.
 
 ```bash
 python hydra_runners/run_cst.py mode=train
@@ -131,19 +111,16 @@ python hydra_runners/run_cst.py mode=train
 
 Training never downloads the full subfolder at once. Each step:
 
-1. Download the next slice of chunks until `train.target_staging_gb`
-2. Train CST on those local `.pt` files
-3. Delete local chunks
+1. Download the next batch `.pt`
+2. Train CST on that file
+3. Delete the local file
 4. Repeat until all batches in the manifest are consumed
 5. If `train.num_epochs > 1`, repeat steps 1–4 for another pass over the **same** stored data
 
-Hub layout is one `{name_token}/` subfolder per model + scheduler + k/w/λ (train) or task (eval). Upload segments in the manifest are bookkeeping only; train uses a **global batch cursor** across them.
-
 | Setting | Default | Meaning |
 |---------|---------|---------|
-| `target_staging_gb` | `1.0` | Max GB per download slice (store upload segments use the same cap) |
-| `num_epochs` | `1` | CST passes over the stored dataset (not store-time epochs) |
-| `samples_per_epoch` | `2048` | Used at **store** time (`store.samples` override); train reads batch count from manifest |
+| `num_epochs` | `1` | CST passes over the stored dataset |
+| `store.samples` | `1000` | How many prompts were collected at **store** time; train reads batch count from the manifest |
 
 **Resume:** `train.resume_from_latest=true` — restores CST weights and batch cursor (`data_next_epoch` = CST pass, `data_next_batch_idx`).
 
@@ -151,39 +128,36 @@ Hub layout is one `{name_token}/` subfolder per model + scheduler + k/w/λ (trai
 
 ## Eval CST (`mode=eval`)
 
-Score a CST checkpoint against saved hiddens (no lm-eval loop):
+Score a CST checkpoint against saved hiddens (no lm-eval loop). Hub lookup uses **`eval.*`**.
 
 ```bash
 # Local folder
 python hydra_runners/run_cst.py mode=eval \
   eval.hidden_dir=outputs/eval_hidden \
-  eval.checkpoint=outputs/cst_ckpt/cst_..._train_best.pt
+  eval.checkpoint=outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt
 
 # From Hub
 python hydra_runners/run_cst.py mode=eval eval.hidden_source=hf_hub eval.task_name=gsm8k \
-  eval.checkpoint=outputs/cst_ckpt/cst_..._train_best.pt
+  eval.checkpoint=outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt
 ```
 
 ---
 
 ## Checkpoints and naming
 
-Paths encode **model**, **scheduler**, **`cst.k`**, **`cst.w`**, and **`train.lambda_sparsity`** (as `ls…` in the token).
+**Hub `name_token`:** `{model}_{scheduler}_{gen_length}_{steps}`  
+Example: `llada_pd_512_256`  
+Eval store: `llada_pd_512_256_task_gsm8k`
 
-Hyperparam segment: `k4096_w4_ls0.001` — from `cst.k`, `cst.w`, and `train.lambda_sparsity`.
+**Hidden chunk files** (`store.scratch_dir` / `train.scratch_dir` / Hub `chunks/`):
 
-**Training `name_token`:** `{model}_scheduler_{sched}_k{K}_w{W}_ls{λ}_train`  
-**Eval `name_token`:** `{model}_scheduler_{sched}_k{K}_w{W}_ls{λ}_task_{task}`
+- `{name_token}_{batch_idx:06d}.pt`
 
-**Hidden chunk files** (`train.staging_dir` / Hub `chunks/`):
+**CST checkpoints** (`train.checkpoint_dir`, default `outputs/cst_ckpt`) add k/w/λ so different CST hypers on the same hiddens do not clobber:
 
-- `{name_token}_seg{segment:03d}_{batch_idx:06d}.pt` — same pattern for train and eval
-
-**CST checkpoints** (`train.checkpoint_dir`, default `outputs/cst_ckpt`):
-
-- `cst_<model>_scheduler_<sched>_k<K>_w<W>_train_latest.pt`
-- `cst_..._train_best.pt`
-- `cst_..._train_state.json`
+- `cst_llada_pd_512_256_k4096_w4_ls0.001_latest.pt`
+- `cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt`
+- `cst_llada_pd_512_256_k4096_w4_ls0.001_state.json`
 
 ---
 
@@ -191,7 +165,7 @@ Hyperparam segment: `k4096_w4_ls0.001` — from `cst.k`, `cst.w`, and `train.lam
 
 ```bash
 python hydra_runners/launch_eval.py task_name=gsm8k \
-  cst_checkpoint=outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_ls0.001_train_best.pt
+  cst_checkpoint=outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt
 ```
 
 See [Evaluation](evaluation.md) for resumable eval and CST aggregates.
@@ -209,8 +183,7 @@ Mixed prompt pools for **train store** only: GSM8K, Minerva, ARC, CSQA, TACO. Se
 | File | Role |
 |------|------|
 | `hydra_runners/run_cst.py` | **`mode=store`** / **`train`** / **`eval`** (single entry point) |
-| `cst/hidden_hf_worker.py` | Hub I/O worker + queue |
-| `config/cst.yaml` | All modes |
+| `config/cst.yaml` | Separate `store.*` / `train.*` / `eval.*` blocks |
 | `scripts/cst.sh` | Shell / Slurm wrapper |
 
 See also: [Setup](setup.md), [Evaluation](evaluation.md).

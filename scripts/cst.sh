@@ -57,7 +57,7 @@ CST launcher — runs `python hydra_runners/run_cst.py` with Hydra (config: conf
 Options:
   --mode store|train|eval
                         store  — collect/upload hiddens to Hub (no CST fit)
-                        train  — download Hub slices -> train CST -> delete local
+                        train  — download each Hub batch -> train CST -> delete local
                         eval   — score CST checkpoint on saved hiddens
   --scope train|eval    store only: sets store.scope=train|eval
   --hidden_dir DIR      mode=eval only: local folder of .pt to score (not used for store)
@@ -69,8 +69,8 @@ Options:
 Examples:
   ./scripts/cst.sh --mode store store.scope=train
   ./scripts/cst.sh --mode store --scope eval --task_name gsm8k
-  ./scripts/cst.sh --mode train train.target_staging_gb=1.0
-  ./scripts/cst.sh --mode eval --checkpoint outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_ls0.001_train_best.pt \
+  ./scripts/cst.sh --mode train train.num_epochs=1
+  ./scripts/cst.sh --mode eval --checkpoint outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt \
       --hidden_dir outputs/eval_hidden
 
 Slurm:
