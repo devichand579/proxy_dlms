@@ -33,6 +33,8 @@ cst:
   k: 4096
   w: 4
   max_steps: 512
+  # Retained for call-site compatibility; GPU residency is train.gpu_pinned_gb
+  # (cst.model.residency), not an LRU cache.
   max_on_gpu: 512
   jumprelu_initial_threshold: 0.03
   jumprelu_bandwidth: 1.0
@@ -93,7 +95,7 @@ train:
   steps: ${store.steps}
   name_token: null      # override auto {model}_{scheduler}_{gen_length}_{steps}
   hidden_source: hf_hub
-  # Resume: explicit .pt, or resume_from_latest=true loads cst_<token>_latest.pt
+  # Resume: sharded dir or legacy .pt; resume_from_latest=true loads cst_<token>_latest
   resume_checkpoint: null
   resume_from_latest: false
   resume_data_from_checkpoint: true
@@ -106,6 +108,12 @@ train:
   c_tanh: 1.0
   # Sparsity ramp: one ramp.step() per training chunk .pt file
   ramp_total_steps: 10000
+  # Anchors per backward. A block of G consecutive anchors touches G+w-1 steps.
+  anchor_block: 16
+  # Bank state pinned on GPU; the rest streams from host RAM. 0 = whole bank on GPU.
+  gpu_pinned_gb: 135
+  # Checkpoints shard per CST. true also writes Adam moments (3x size).
+  save_optimizer_state: false
   wandb: true
   wandb_name: cst-train
   # Hub download uses the same login as store ({whoami}/hiddens-train)
@@ -129,6 +137,8 @@ eval:
   ntf_conf_low: 0.2
   ntf_conf_high: 0.8
   ntf_first_non_eos: false
+  # >0 streams the bank from host RAM instead of placing all of it at once.
+  gpu_pinned_gb: 0.0
   wandb_name: cst-eval
 
 hydra:

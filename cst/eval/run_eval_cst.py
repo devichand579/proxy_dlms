@@ -20,6 +20,7 @@ from cst.eval.metrics import (
     temporal_coherence,
 )
 from cst.model.cst_bank import CSTBank
+from cst.model.residency import CSTResidency
 from cst.train.hidden_chunk import load_chunk_H
 from cst.train.trainer import load_cst_bank_weights
 
@@ -39,8 +40,14 @@ def evaluate_chunk_file(
     ntf_conf_high: float = 0.8,
     ntf_first_non_eos: bool = False,
     eos_id: Optional[int] = None,
+    residency: Optional[CSTResidency] = None,
 ) -> Dict[str, Any]:
-    """NMSE, L0, cos, TC on one chunk; NTF and masks if base_model is given."""
+    """NMSE, L0, cos, TC on one chunk; NTF and masks if base_model is given.
+
+    With ``residency``, steps are streamed in on the anchor sweep instead of the
+    whole bank being resident: anchor ``a`` reads ``a-w .. a`` (the extra step is
+    the temporal-coherence partner), and everything below that is released.
+    """
     H, meta, segs = load_chunk_H(chunk_path)
     T, B, L, D = H.shape
     if T < w:
@@ -97,6 +104,10 @@ def evaluate_chunk_file(
 
     hi = min(T, max_anchor) if max_anchor is not None else T
     for anchor in range(w, hi + 1):
+        if residency is not None:
+            residency.ensure([t for t in range(max(1, anchor - w), anchor + 1)])
+            for t in range(max(1, anchor - w - 4), max(1, anchor - w)):
+                residency.release(t)
         s_target = anchor  # same H row as training (H_full[anchor])
         tgt = H[s_target].to(device)
         H_hat = torch.zeros_like(tgt)
@@ -282,8 +293,14 @@ def run_eval_on_dir(
     ntf_conf_high: float = 0.8,
     ntf_first_non_eos: bool = False,
     eos_id: Optional[int] = None,
+    gpu_pinned_gb: float = 0.0,
 ) -> Dict[str, Any]:
-    """Evaluate all ``*.pt`` under ``hidden_dir``; return per-file list and mean ``summary``."""
+    """Evaluate all ``*.pt`` under ``hidden_dir``; return per-file list and mean ``summary``.
+
+    ``gpu_pinned_gb > 0`` streams the bank instead of placing all of it at once.
+    Eval needs only parameters (no grads, no optimizer state), but that is still
+    ~172 GB at ``max_steps=512, k=4096``; set this if the bank does not fit.
+    """
     dev = torch.device(device)
     base_model: Optional[torch.nn.Module] = None
     eos_id_for_ntf: Optional[int] = eos_id
@@ -307,7 +324,11 @@ def run_eval_on_dir(
         bandwidth=float(cfg_bank.get("jumprelu_bandwidth", 1.0)),
     )
     load_cst_bank_weights(ckpt_path, cst_bank)
-    cst_bank.to_device_all(dev)
+    residency: Optional[CSTResidency] = None
+    if float(gpu_pinned_gb) > 0.0:
+        residency = CSTResidency(cst_bank, dev, pinned_bytes=int(float(gpu_pinned_gb) * 1e9))
+    else:
+        cst_bank.to_device_all(dev)
 
     paths = sorted(Path(hidden_dir).glob("*.pt"))
     if not paths:
@@ -328,6 +349,7 @@ def run_eval_on_dir(
             ntf_conf_high=ntf_conf_high,
             ntf_first_non_eos=ntf_first_non_eos,
             eos_id=eos_id_for_ntf,
+            residency=residency,
         )
         per_file.append(m)
         merge_eval_file_into_agg(agg, m)

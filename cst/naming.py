@@ -142,31 +142,50 @@ def scheduler_short_from_eval_mode(mode: str, strategy: str) -> str:
 
 
 def train_checkpoint_names(name_token: Optional[str]) -> tuple[str, str, str]:
-    """Return ``(latest_pt, best_pt, state_json)``; long names with ``name_token``, or short fixed basenames."""
+    """Return ``(latest, best, state_json)``; long names with ``name_token``, or short fixed basenames.
+
+    ``latest`` / ``best`` name *directories* (sharded checkpoints, see
+    :func:`cst.train.trainer.save_cst_checkpoint`). The resolvers below still
+    accept the legacy single-``.pt`` form.
+    """
     if name_token:
         base = f"cst_{name_token}"
-        return f"{base}_latest.pt", f"{base}_best.pt", f"{base}_state.json"
-    return "cst_latest.pt", "cst_best.pt", "cst_train_state.json"
+        return f"{base}_latest", f"{base}_best", f"{base}_state.json"
+    return "cst_latest", "cst_best", "cst_train_state.json"
 
 
-def resolve_train_resume_latest(ckpt_dir: Path, name_token: str) -> Optional[Path]:
-    """Prefer ``cst_{name_token}_latest.pt``; else ``cst_latest.pt`` if present."""
-    n = Path(ckpt_dir) / f"cst_{name_token}_latest.pt"
-    o = Path(ckpt_dir) / "cst_latest.pt"
-    if n.is_file():
-        return n
-    if o.is_file():
-        return o
+def _first_existing(*cands: Path) -> Optional[Path]:
+    for c in cands:
+        if c.exists():
+            return c
     return None
 
 
-def resolve_train_best_in_dir(ckpt_dir: Path) -> Optional[Path]:
-    """Prefer ``cst_best.pt``; else newest ``cst_*_best.pt`` by mtime (offline eval fallback)."""
+def resolve_train_resume_latest(ckpt_dir: Path, name_token: str) -> Optional[Path]:
+    """Prefer ``cst_{name_token}_latest`` (dir or legacy ``.pt``); else the short ``cst_latest`` form."""
     d = Path(ckpt_dir)
-    leg = d / "cst_best.pt"
-    if leg.is_file():
+    return _first_existing(
+        d / f"cst_{name_token}_latest",
+        d / f"cst_{name_token}_latest.pt",
+        d / "cst_latest",
+        d / "cst_latest.pt",
+    )
+
+
+def resolve_train_best_in_dir(ckpt_dir: Path) -> Optional[Path]:
+    """Prefer ``cst_best`` (dir or ``.pt``); else newest ``cst_*_best`` / ``cst_*_train_best``."""
+    d = Path(ckpt_dir)
+    leg = _first_existing(d / "cst_best", d / "cst_best.pt")
+    if leg is not None:
         return leg
-    cands = sorted(d.glob("cst_*_best.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    cands = sorted(
+        list(d.glob("cst_*_best"))
+        + list(d.glob("cst_*_best.pt"))
+        + list(d.glob("cst_*_train_best"))
+        + list(d.glob("cst_*_train_best.pt")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if cands:
         return cands[0]
     return None

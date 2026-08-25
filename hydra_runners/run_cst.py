@@ -52,6 +52,8 @@ from cst.store_budget import (
     read_model_config_sizes,
 )
 from cst.model.cst_bank import CSTBank
+from cst.model.residency import CSTResidency, budget_report
+from cst.train.adam_bf16 import AdamBF16
 from cst.naming import (
     cst_ckpt_name_token,
     cst_hidden_name_token,
@@ -823,9 +825,11 @@ def _train_cst_on_chunks_and_checkpoint(
     num_epochs: int = 1,
     wandb_run_id_for_meta: Optional[str] = None,
     sampling_state: Optional[Dict[str, Any]] = None,
+    residency: Any = None,
 ) -> int:
     logger.info("=== train on %d hidden files ===", len(batch_paths))
-    cst_bank.to_device_all(device)
+    if residency is None:
+        cst_bank.to_device_all(device)
     stats = train_on_chunk_files(
         batch_paths,
         cst_bank,
@@ -836,7 +840,15 @@ def _train_cst_on_chunks_and_checkpoint(
         c_tanh=float(tr.get("c_tanh", 1.0)),
         lambda_pre_dead=float(tr.get("lambda_pre_dead", 0.0)),
         device=device,
+        anchor_block=int(tr.get("anchor_block", 24)),
+        residency=residency,
     )
+    if torch.cuda.is_available() and str(device).startswith("cuda"):
+        logger.info(
+            "peak GPU memory this phase: %.1f GB (tune train.anchor_block from this)",
+            torch.cuda.max_memory_allocated(device) / 1e9,
+        )
+        torch.cuda.reset_peak_memory_stats(device)
     if log_wandb and wb is not None:
         chunks = stats.get("per_chunk", [])
         n_ch = len(chunks)
@@ -921,6 +933,7 @@ def _train_cst_on_chunks_and_checkpoint(
         train_batches=float(stats.get("train_batches", 0.0)),
         name_token=name_token,
         extra_meta=extra_meta,
+        save_optimizer_state=bool(tr.get("save_optimizer_state", False)),
     )
     if log_wandb and wb is not None:
         wbd: dict[str, Any] = {
@@ -1215,19 +1228,22 @@ def run_train(cfg: DictConfig) -> int:
         initial_threshold=float(cst_cfg.get("jumprelu_initial_threshold", 0.03)),
         bandwidth=float(cst_cfg.get("jumprelu_bandwidth", 1.0)),
     )
-    optimizer = torch.optim.Adam(cst_bank.parameters(), lr=float(tr.get("learning_rate", 3e-4)))
+    # bf16 moments halve optimizer state (172 GB -> 86 GB for a 512-step k=4096
+    # bank), which is what makes the full bank fit across GPU + host RAM.
+    optimizer = AdamBF16(cst_bank.parameters(), lr=float(tr.get("learning_rate", 3e-4)))
     ramp = LambdaRamp(int(tr.get("ramp_total_steps", 10_000)))
 
     ckpt_meta: Dict[str, Any] = {}
     loaded_ckpt_path: Optional[str] = None
     rp_str = str(tr.get("resume_checkpoint") or "").strip()
-    if rp_str and rp_str.lower() not in ("null", "none", "") and Path(rp_str).is_file():
-        ckpt_meta = load_cst_checkpoint(rp_str, cst_bank, optimizer, ramp)
-        loaded_ckpt_path = rp_str
-        logger.info("resumed CST from %s", rp_str)
+    rp = Path(rp_str) if rp_str and rp_str.lower() not in ("null", "none", "") else None
+    if rp is not None and (rp.is_file() or rp.is_dir()):
+        ckpt_meta = load_cst_checkpoint(str(rp), cst_bank, optimizer, ramp)
+        loaded_ckpt_path = str(rp)
+        logger.info("resumed CST from %s", rp)
     elif bool(tr.get("resume_from_latest", False)):
         resume_p = resolve_train_resume_latest(ckpt_dir, ckpt_token)
-        if resume_p is not None and resume_p.is_file():
+        if resume_p is not None and (resume_p.is_file() or resume_p.is_dir()):
             ckpt_meta = load_cst_checkpoint(str(resume_p), cst_bank, optimizer, ramp)
             loaded_ckpt_path = str(resume_p)
             logger.info("resumed CST from %s (train.resume_from_latest)", resume_p)
@@ -1288,6 +1304,43 @@ def run_train(cfg: DictConfig) -> int:
     n_cst_params = sum(p.numel() for p in cst_bank.parameters())
     logger.info("CST parameters: total=%s", f"{n_cst_params:,}")
     logger.info("train from Hub: %s (%s)", hf_train_repo, hidden_token)
+
+    # Residency: pin as much of the bank on GPU as ``gpu_pinned_gb`` allows and
+    # stream the rest from host RAM on the anchor sweep. gpu_pinned_gb=0 keeps
+    # the old behaviour (whole bank resident via to_device_all), which is fine
+    # for small banks but is ~344 GB of state at max_steps=512, k=4096.
+    pinned_gb = float(tr.get("gpu_pinned_gb", 0.0) or 0.0)
+    bud = budget_report(
+        max_steps=int(cst_cfg.max_steps),
+        d=int(cst_cfg.d_model),
+        k=int(cst_cfg.k),
+        w=int(cst_cfg.w),
+        anchor_block=int(tr.get("anchor_block", 24)),
+        pinned_gb=pinned_gb,
+        batch=int(tr.get("inference_batch_size", 2)),
+        seq_len=int(tr.get("gen_length", 256)) + int(tr.get("max_prompt_length", 512)),
+        has_moments=True,
+    )
+    logger.info(
+        "memory budget: bank %.0f GB (%.3f GB/CST) | pinned %.0f GB | %d CSTs live "
+        "| predicted GPU %.0f GB, host %.0f GB",
+        bud["bank_total_gb"], bud["per_cst_gb"], bud["pinned_gb"],
+        int(bud["live_csts"]), bud["gpu_gb"], bud["host_gb"],
+    )
+    logger.info(
+        "  tune with train.anchor_block (GPU) and train.gpu_pinned_gb (splits bank GPU/host); "
+        "seq_len assumed worst-case gen_length + max_prompt_length"
+    )
+    residency: Optional[CSTResidency] = None
+    if pinned_gb > 0.0:
+        residency = CSTResidency(
+            cst_bank,
+            device,
+            optimizer=optimizer,
+            pinned_bytes=int(pinned_gb * 1e9),
+        )
+    else:
+        cst_bank.set_device(device)
 
     if resume_trip is not None:
         r_e, r_b, _r_s = resume_trip
@@ -1410,6 +1463,7 @@ def run_train(cfg: DictConfig) -> int:
                 num_epochs=int(num_epochs),
                 wandb_run_id_for_meta=wandb_run_id_resumed if (not use_wandb or wb is None) else None,
                 sampling_state=sampling_state,
+                residency=residency,
             )
 
     if wb:
@@ -1468,9 +1522,9 @@ def run_eval(cfg: DictConfig) -> int:
 
     ck = str(ev.get("checkpoint", _EVAL_DEFAULTS["checkpoint"]))
     ckp = Path(ck)
-    if not ckp.is_file() and ckp.parent.is_dir():
+    if not ckp.is_file() and not ckp.is_dir() and ckp.parent.is_dir():
         alt = resolve_train_best_in_dir(ckp.parent)
-        if alt is not None and alt.is_file():
+        if alt is not None:
             ck = str(alt)
 
     ntf_1st = ev.get("ntf_first_non_eos", _EVAL_DEFAULTS["ntf_first_non_eos"])
@@ -1490,6 +1544,7 @@ def run_eval(cfg: DictConfig) -> int:
         ntf_conf_low=float(ev.get("ntf_conf_low", 0.2)),
         ntf_conf_high=float(ev.get("ntf_conf_high", 0.8)),
         ntf_first_non_eos=ntf_1st_b,
+        gpu_pinned_gb=float(ev.get("gpu_pinned_gb", 0.0) or 0.0),
     )
     yaml_out = OmegaConf.to_yaml(out)
     print(yaml_out)

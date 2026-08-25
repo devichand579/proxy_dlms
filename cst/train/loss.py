@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -148,3 +148,70 @@ def windowed_cst_loss_full(
         "n_target_terms": n_target_terms,
     }
     return loss, metrics
+
+
+def windowed_cst_loss_block(
+    cst_bank: CSTBank,
+    anchors: Sequence[int],
+    h_windows: Sequence[torch.Tensor],
+    H_full: torch.Tensor,
+    lambda_sparsity: float,
+    c_tanh: float,
+    lambda_ramp: float,
+    lambda_pre_dead: float = 0.0,
+) -> tuple[torch.Tensor, Dict[str, Any]]:
+    """Summed loss over a block of consecutive anchors, plus aggregated metrics.
+
+    A block of ``G`` consecutive anchors touches ``G + w - 1`` distinct bank
+    steps (the windows overlap by ``w-1``), so one backward per block bounds the
+    live gradient set instead of retaining a graph per anchor for the whole
+    chunk. Gradients accumulate across anchors within the block, which is the
+    same sum the per-chunk path used to build.
+    """
+    if len(anchors) != len(h_windows):
+        raise ValueError(f"anchors and h_windows must align, got {len(anchors)} vs {len(h_windows)}")
+    if not anchors:
+        raise ValueError("block must contain at least one anchor")
+
+    device = h_windows[0].device
+    total = torch.zeros((), device=device, dtype=torch.float32)
+    agg: Dict[str, Any] = {
+        "loss": 0.0,
+        "recon_loss": 0.0,
+        "sparsity_loss": 0.0,
+        "pre_dead_raw": 0.0,
+        "pre_dead_term": 0.0,
+        "n_enc_steps": 0,
+        "n_target_terms": 0,
+        "n_anchors": len(anchors),
+    }
+    nmse_acc = 0.0
+    l0_acc = 0.0
+    n_scored = 0
+    lambda_eff = float(lambda_sparsity) * float(lambda_ramp)
+
+    for anchor, h_win in zip(anchors, h_windows):
+        loss, m = windowed_cst_loss_full(
+            cst_bank,
+            anchor,
+            h_win,
+            H_full,
+            lambda_sparsity=lambda_sparsity,
+            c_tanh=c_tanh,
+            lambda_ramp=lambda_ramp,
+            lambda_pre_dead=lambda_pre_dead,
+        )
+        total = total + loss
+        for key in ("loss", "recon_loss", "sparsity_loss", "pre_dead_raw", "pre_dead_term"):
+            agg[key] += float(m.get(key, 0.0))
+        agg["n_enc_steps"] += int(m.get("n_enc_steps", 0))
+        agg["n_target_terms"] += int(m.get("n_target_terms", 0))
+        if int(m.get("n_enc_steps", 0)) > 0:
+            nmse_acc += float(m.get("nmse", 0.0))
+            l0_acc += float(m.get("l0", 0.0))
+            n_scored += 1
+
+    agg["nmse"] = nmse_acc / n_scored if n_scored else 0.0
+    agg["l0"] = l0_acc / n_scored if n_scored else 0.0
+    agg["lambda_eff"] = lambda_eff
+    return total, agg

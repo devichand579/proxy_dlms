@@ -144,7 +144,33 @@ Training never downloads the full subfolder at once. Each step:
 | `num_epochs` | `1` | CST passes over the stored dataset |
 | `store.samples` | `1000` | How many prompts were collected at **store** time; train reads batch count from the manifest |
 
-**Resume:** `train.resume_from_latest=true` — restores CST weights and batch cursor (`data_next_epoch` = CST pass, `data_next_batch_idx`).
+**Resume:** `train.resume_from_latest=true` — restores CST weights and batch cursor (`data_next_epoch` = CST pass, `data_next_batch_idx`). Adam moments are restored only if the checkpoint was written with `train.save_optimizer_state=true`.
+
+### Memory: blocks and bank residency
+
+The bank is one CST per diffusion step. At `max_steps=512, k=4096, d=4096, w=4`
+that is 512 × 83.9 M = 43 B parameters — 172 GB fp32, or ~344 GB with bf16 Adam
+moments. Two mechanisms keep it trainable:
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `anchor_block` | `24` | Anchors per `backward()`. A block of G *consecutive* anchors touches G+w−1 distinct steps (windows overlap), so this bounds live gradients and activations. |
+| `gpu_pinned_gb` | `110` | GB of bank state pinned on GPU; the rest streams from host RAM as the anchor sweep advances. `0` places the whole bank at once (small banks only). |
+| `save_optimizer_state` | `false` | Shard Adam moments alongside params (3× checkpoint size). |
+
+Anchor `t` reads steps `t−w+1 … t`, and the sweep is monotone, so step `s` is
+complete after anchor `s+w−1`: it is updated once with its full gradient, then
+released to host. No later anchor reads it, so this is numerically identical to
+one update per chunk — `anchor_block` is a memory/throughput knob, not a
+hyperparameter.
+
+Each phase logs peak GPU memory; raise `anchor_block` until it approaches the
+card. Streaming costs host↔device bandwidth: every non-pinned step crosses the
+bus once per chunk file, and that volume does *not* depend on `anchor_block`.
+
+The optimizer is `cst.train.adam_bf16.AdamBF16` — fp32 params and grads, bf16
+moments with stochastic rounding (plain bf16 truncation makes the `b2=0.999`
+second moment stagnate).
 
 ---
 
@@ -175,11 +201,13 @@ Eval store: `llada_pd_512_256_task_gsm8k`
 
 - `{name_token}_{batch_idx:06d}.pt`
 
-**CST checkpoints** (`train.checkpoint_dir`, default `outputs/cst_ckpt`) add k/w/λ so different CST hypers on the same hiddens do not clobber:
+**CST checkpoints** (`train.checkpoint_dir`, default `outputs/cst_ckpt`) add k/w/λ so different CST hypers on the same hiddens do not clobber. They are **directories** of per-step shards (`meta.json` written last); a single `.pt` would be tens of GB in host RAM.
 
-- `cst_llada_pd_512_256_k4096_w4_ls0.001_latest.pt`
-- `cst_llada_pd_512_256_k4096_w4_ls0.001_best.pt`
+- `cst_llada_pd_512_256_k4096_w4_ls0.001_latest/` — `meta.json` plus `cst_00001.pt` … `cst_00512.pt`
+- `cst_llada_pd_512_256_k4096_w4_ls0.001_best/`
 - `cst_llada_pd_512_256_k4096_w4_ls0.001_state.json`
+
+Legacy single-`.pt` checkpoints still load; the resolvers in `cst/naming.py` accept either form.
 
 ---
 
