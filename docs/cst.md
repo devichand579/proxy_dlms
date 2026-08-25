@@ -82,7 +82,7 @@ If Hugging Face storage/quota (or local disk) fills mid-run, store **stops early
 
 Runs the **lm-eval task** through the model + scheduler, writing each batch `.pt` and uploading it immediately. Optional `store.samples` caps how many eval instances to capture **per task** (YAML default `1000`; `store.samples=null` for the full test set). Same crash resume as train store (`store.resume=true`).
 
-`store.task_name=all` stores the standard suite in order — GSM8K, Minerva Math500, ARC-Challenge chat, HumanEval, MBPP — each as its own folder in `{whoami}/hiddens-eval`. Comma-separated lists work too (`store.task_name=gsm8k,humaneval`). Re-running `all` after a crash resumes each task independently. Per-task few-shot still follows `launch_eval` defaults unless `store.num_fewshot` is set. `store.samples` (YAML default `1000`) is a **per-task** cap; set `store.samples=null` for full tests.
+`store.task_name=all` stores the standard suite in order — GSM8K, Minerva Math500, ARC-Challenge chat, HumanEval, MBPP — each as its own folder in `{whoami}/hiddens-eval`. Comma-separated lists work too (`store.task_name=gsm8k,humaneval`). Re-running `all` after a crash resumes each task independently. Per-task few-shot still follows `launch_eval` defaults unless `store.num_fewshot` is set. `store.samples` (YAML default `1000`) is a **per-task** cap; set `store.samples=null` for full tests. ARC-Easy, ARC-Challenge chat, and CommonsenseQA collect at **128 gen / 128 steps** even when `store.gen_length` / `store.steps` are 512, so the ARC eval folder is `…_128_128_task_arc_challenge_chat`.
 
 ```bash
 python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k

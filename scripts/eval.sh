@@ -410,8 +410,8 @@ fi
 run_eval_for_task() {
     export TASK_NAME="$1"
 
-    # Set gen_length and steps (arc_challenge_chat: 128; others: 512)
-    if [[ "$TASK_NAME" == *"arc_challenge_chat"* ]]; then
+    # Set gen_length and steps (ARC / CommonsenseQA: 128; others: 512)
+    if [[ "$TASK_NAME" == *"arc_challenge_chat"* ]] || [[ "$TASK_NAME" == *"arc_easy"* ]] || [[ "$TASK_NAME" == *"commonsense"* ]]; then
         export GEN_LENGTH=128
         export STEPS=128
     else

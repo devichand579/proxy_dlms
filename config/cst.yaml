@@ -64,6 +64,7 @@ store:
   task_name: null
   num_fewshot: null     # eval: defaults to launch_eval few-shot for task
   # Hub: huggingface-cli login (or HF_TOKEN). Repos: {whoami}/hiddens-train and {whoami}/hiddens-eval
+  # ARC-Easy / ARC-Challenge chat / CommonsenseQA collect at 128/128 even when gen_length/steps are 512.
   delete_local_after_hf_push: true
 
 # ---------------------------------------------------------------------------

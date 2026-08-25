@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -64,8 +65,9 @@ from cst.train.trainer import (
     save_train_checkpoints,
     train_on_chunk_files,
 )
-from cst.train_data.compose import sample_uniform_batched
 from cst.eval_data.compose import eval_num_fewshot, expand_eval_task_names, load_eval_row_batches
+from cst.train_data.compose import sample_uniform
+from sampling_defaults import effective_gen_length_steps
 
 _CONFIG_DIR = _REPO_ROOT / "config"
 logger = logging.getLogger("run_cst")
@@ -117,6 +119,8 @@ def _hidden_name_token(
     *,
     task_name: Optional[str] = None,
     ignore_name_token_override: bool = False,
+    gen_length: Optional[int] = None,
+    steps: Optional[int] = None,
 ) -> str:
     override = section.get("name_token") if section is not None else None
     if not ignore_name_token_override and not _is_blank(override):
@@ -124,13 +128,15 @@ def _hidden_name_token(
     sched = "pd"
     if section is not None and not _is_blank(section.get("scheduler_mode")):
         sched = str(section.get("scheduler_mode"))
-    gen_length = 256 if section is None else int(section.get("gen_length", 256))
-    steps = 256 if section is None else int(section.get("steps", 256))
+    if gen_length is None:
+        gen_length = 256 if section is None else int(section.get("gen_length", 256))
+    if steps is None:
+        steps = 256 if section is None else int(section.get("steps", 256))
     return cst_hidden_name_token(
         model_label_from_path(model_path),
         sched,
-        gen_length,
-        steps,
+        int(gen_length),
+        int(steps),
         task_name=task_name,
     )
 
@@ -141,11 +147,67 @@ def _optional_int(v: Any) -> Optional[int]:
     return int(v)
 
 
-def _store_generation_fingerprint(store_cfg: Any, sched_m: str) -> Dict[str, Any]:
+def _store_yaml_gen_length_steps(store_cfg: Any) -> tuple[int, int]:
+    return (
+        int(store_cfg.get("gen_length", 512)),
+        int(store_cfg.get("steps", 512)),
+    )
+
+
+def _row_task_name(row: Dict[str, Any]) -> str:
+    src = str(row.get("source") or "").strip()
+    if src:
+        return src
+    meta = row.get("meta") or {}
+    return str(meta.get("task") or meta.get("lmeval_task") or "").strip()
+
+
+def _batch_gen_length_steps(
+    rows: List[Dict[str, Any]],
+    default_gen: int,
+    default_steps: int,
+) -> tuple[int, int]:
+    keys = {
+        effective_gen_length_steps(_row_task_name(r), default_gen, default_steps)
+        for r in rows
+    }
+    if len(keys) == 1:
+        return keys.pop()
+    return int(default_gen), int(default_steps)
+
+
+def _bucket_row_batches_by_gen_length(
+    flat: List[Dict[str, Any]],
+    batch_size: int,
+    default_gen: int,
+    default_steps: int,
+) -> List[List[Dict[str, Any]]]:
+    """Same rows as ``sample_uniform``, batched so ARC/CSQA (128) never mix with 512."""
+    buckets: Dict[tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
+    for row in flat:
+        key = effective_gen_length_steps(
+            _row_task_name(row), default_gen, default_steps
+        )
+        buckets[key].append(row)
+    out: List[List[Dict[str, Any]]] = []
+    for key in sorted(buckets.keys(), reverse=True):
+        chunk = buckets[key]
+        out.extend(chunk[i : i + batch_size] for i in range(0, len(chunk), batch_size))
+    return out
+
+
+def _store_generation_fingerprint(
+    store_cfg: Any,
+    sched_m: str,
+    *,
+    gen_length: Optional[int] = None,
+    steps: Optional[int] = None,
+) -> Dict[str, Any]:
+    yg, ys = _store_yaml_gen_length_steps(store_cfg)
     return {
         "scheduler": str(sched_m),
-        "gen_length": int(store_cfg.get("gen_length", 256)),
-        "steps": int(store_cfg.get("steps", 256)),
+        "gen_length": int(yg if gen_length is None else gen_length),
+        "steps": int(ys if steps is None else steps),
         "block_length": _optional_int(store_cfg.get("block_length")),
         "top_k": int(store_cfg.get("top_k", 1)),
         "use_eos_harness": _coerce_use_eos_harness(store_cfg.get("use_eos_harness", True)),
@@ -173,6 +235,7 @@ def _sampling_state_from_store(
         "train_block_length": gen["block_length"],
         "train_top_k": gen["top_k"],
         "train_use_eos_harness": gen["use_eos_harness"],
+        "train_bucket_by_gen_length": True,
     }
 
 
@@ -298,6 +361,21 @@ def _store_hiddens(
             if bi in skip:
                 continue
             logger.info("=== collect batch %d / %d ===", bi + 1, nbat)
+            b_gen, b_steps = _batch_gen_length_steps(
+                rows,
+                int(store_cfg.get("gen_length", 512)),
+                int(store_cfg.get("steps", 512)),
+            )
+            if (b_gen, b_steps) != (
+                int(store_cfg.get("gen_length", 512)),
+                int(store_cfg.get("steps", 512)),
+            ):
+                logger.info(
+                    "batch %d: gen_length=%d steps=%d (ARC/CSQA override)",
+                    bi + 1,
+                    b_gen,
+                    b_steps,
+                )
             out_path, meta = collect_hidden_row_batch(
                 model,
                 tokenizer,
@@ -308,8 +386,8 @@ def _store_hiddens(
                 name_token=name_token,
                 device=str(device),
                 mode_key=sched_m,
-                gen_length=int(store_cfg.get("gen_length", 256)),
-                steps=int(store_cfg.get("steps", 256)),
+                gen_length=int(b_gen),
+                steps=int(b_steps),
                 block_length=store_cfg.get("block_length"),
                 top_k=int(store_cfg.get("top_k", 1)),
                 capture_context=capture_context,
@@ -549,14 +627,20 @@ def store_train_hiddens(cfg: DictConfig) -> int:
 
     model_path = _section_model_path(cfg, store_cfg)
     sched_m = str(store_cfg.get("scheduler_mode", "pd"))
-    name_token = _hidden_name_token(store_cfg, model_path)
+    yaml_g, yaml_s = _store_yaml_gen_length_steps(store_cfg)
+    name_token = _hidden_name_token(
+        store_cfg, model_path, gen_length=yaml_g, steps=yaml_s
+    )
     hf_train_repo = resolve_train_repo_id(store_cfg)
 
     sampling_state = _sampling_state_from_store(
         store_cfg, n_samples=n_sp, inference_bs=inference_bs, sched_m=sched_m
     )
 
-    row_batches = sample_uniform_batched(n_sp, inference_bs, seed=seed)
+    flat = sample_uniform(n_sp, seed=seed)
+    row_batches = _bucket_row_batches_by_gen_length(
+        flat, inference_bs, yaml_g, yaml_s
+    )
 
     return _store_hiddens(
         cfg,
@@ -617,11 +701,15 @@ def _store_eval_one_task(
 
     model_path = _section_model_path(cfg, store)
     sched_m = str(store.get("scheduler_mode", "pd"))
+    yaml_g, yaml_s = _store_yaml_gen_length_steps(store)
+    gen_length, steps = effective_gen_length_steps(str(task_name), yaml_g, yaml_s)
     name_token = _hidden_name_token(
         store,
         model_path,
         task_name=str(task_name),
         ignore_name_token_override=ignore_name_token_override,
+        gen_length=gen_length,
+        steps=steps,
     )
 
     repo_id = resolve_eval_repo_id(store, store=store)
@@ -646,7 +734,18 @@ def _store_eval_one_task(
         seed=seed,
     )
 
-    gen = _store_generation_fingerprint(store, sched_m)
+    gen = _store_generation_fingerprint(
+        store, sched_m, gen_length=gen_length, steps=steps
+    )
+    if (gen_length, steps) != (yaml_g, yaml_s):
+        logger.info(
+            "eval task %s: gen_length=%d steps=%d (overrode store %d/%d)",
+            task_name,
+            gen_length,
+            steps,
+            yaml_g,
+            yaml_s,
+        )
     sampling_state = {
         "eval_task": str(task_name),
         "eval_num_fewshot": int(num_fewshot),
@@ -965,7 +1064,17 @@ def run_eval(cfg: DictConfig) -> int:
         if _is_blank(task):
             raise ValueError("eval.hidden_source=hf_hub requires eval.task_name (or store.task_name)")
         model_path = _section_model_path(cfg, ev)
-        name_token = _hidden_name_token(ev, model_path, task_name=str(task))
+        yaml_g, yaml_s = _store_yaml_gen_length_steps(ev)
+        if store is not None and not _is_blank(store.get("gen_length")):
+            yaml_g, yaml_s = _store_yaml_gen_length_steps(store)
+        gen_length, steps = effective_gen_length_steps(str(task), yaml_g, yaml_s)
+        name_token = _hidden_name_token(
+            ev,
+            model_path,
+            task_name=str(task),
+            gen_length=gen_length,
+            steps=steps,
+        )
         repo_id = resolve_eval_repo_id(ev, store=store, eval_cfg=ev)
         cache_dir = str(ev.get("hf_local_cache_dir", "outputs/cst_hf_cache"))
         cache = Path(cache_dir) / "eval_dl" / name_token
