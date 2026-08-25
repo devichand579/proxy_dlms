@@ -4,57 +4,33 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from cst.eval_data.lmeval_task import (
+    CST_EVAL_TASKS,
+    eval_num_fewshot,
+    expand_eval_task_names,
+    load_lmeval_task,
+)
 
-def eval_num_fewshot(task_name: str) -> int:
-    """Match ``launch_eval.get_num_fewshot`` for consistent eval prompts."""
-    t = str(task_name).strip().lower()
-    if "humaneval" in t:
-        return 0
-    if "gsm8k" in t:
-        return 4
-    if "math500" in t or "minerva_math500" in t:
-        return 4
-    if "mbpp3" in t:
-        return 3
-    if "mbpp" in t:
-        return 3
-    if "arc_challenge_chat" in t:
-        return 5
-    return 0
+__all__ = [
+    "CST_EVAL_TASKS",
+    "eval_num_fewshot",
+    "expand_eval_task_names",
+    "load_eval_rows",
+    "load_eval_row_batches",
+]
 
 
-def _resolve_task(task_dict: Dict[str, Any], task_name: str):
-    if task_name in task_dict:
-        return task_dict[task_name]
-    if len(task_dict) == 1:
-        return next(iter(task_dict.values()))
-    keys = ", ".join(sorted(task_dict.keys()))
-    raise ValueError(f"lm-eval task {task_name!r} not found (available: {keys})")
-
-
-def load_eval_row_batches(
+def load_eval_rows(
     task_name: str,
-    batch_size: int,
     *,
     limit: Optional[int] = None,
     num_fewshot: Optional[int] = None,
     seed: int = 0,
-) -> List[List[Dict[str, Any]]]:
-    """All eval instances for ``task_name``, batched for hidden capture."""
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    from lm_eval.tasks import TaskManager
-
-    ns = int(num_fewshot) if num_fewshot is not None else eval_num_fewshot(task_name)
-    tm = TaskManager()
-    task_dict = tm.load_task_or_group(str(task_name).strip())
-    task = _resolve_task(task_dict, str(task_name).strip())
-    if hasattr(task, "set_fewshot_seed"):
-        task.set_fewshot_seed(int(seed))
-    if hasattr(task, "config") and hasattr(task.config, "num_fewshot"):
-        task.config.num_fewshot = ns
-
-    instances = task.build_all_requests(limit=limit, rank=0, world_size=1)
+) -> List[Dict[str, Any]]:
+    """All eval instances for ``task_name`` (unbatched)."""
+    task, ns = load_lmeval_task(task_name, num_fewshot=num_fewshot, seed=int(seed))
+    task.build_all_requests(limit=limit, rank=0, world_size=1)
+    instances = task.instances
     rows: List[Dict[str, Any]] = []
     for inst in instances:
         if not inst.args:
@@ -73,4 +49,21 @@ def load_eval_row_batches(
         )
     if not rows:
         raise RuntimeError(f"lm-eval task {task_name!r} produced no instances")
+    return rows
+
+
+def load_eval_row_batches(
+    task_name: str,
+    batch_size: int,
+    *,
+    limit: Optional[int] = None,
+    num_fewshot: Optional[int] = None,
+    seed: int = 0,
+) -> List[List[Dict[str, Any]]]:
+    """All eval instances for ``task_name``, consecutive batches (no length bucketing)."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    rows = load_eval_rows(
+        task_name, limit=limit, num_fewshot=num_fewshot, seed=seed
+    )
     return [rows[i : i + batch_size] for i in range(0, len(rows), batch_size)]

@@ -1,6 +1,6 @@
 # SchedulerLens
 
-SchedulerLens analyzes **masked diffusion schedulers** from generation traces. It reports M̂/Ĵ caps and sub-proxies, commit / oracle perplexity, optional oracle–proxy correlations (PCFG), and comparison plots across runs.
+SchedulerLens analyzes **masked diffusion schedulers** from generation traces. It reports M̂/Ĵ caps and sub-proxies, commit / oracle perplexity, and optional oracle–proxy correlations (PCFG).
 
 | Proxy | Role | Lower is better? |
 | ----- | ---- | ---------------- |
@@ -46,10 +46,10 @@ All commands go through `python -m schedulerlens.run` (or `python -m schedulerle
 
 | Subcommand | Role |
 | ---------- | ---- |
-| `file` | One local NPZ → metrics + plots |
+| `file` | One local NPZ → metrics CSV/JSON |
 | `inventory` | List Hub NPZs (no download) |
 | `analyze` | One Hub NPZ (download→analyze→delete) or `--local` |
-| `compare` | Batch Hub/local → CSV + plots (`analyze-all` alias) |
+| `compare` | Batch Hub/local → CSV (`analyze-all` alias) |
 | `pos` | POS-stratified unmask analysis |
 
 ```bash
@@ -91,7 +91,7 @@ Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp downlo
 | ---- | ----------- |
 | `-o` | Output directory |
 | `--max-samples N` | First N samples only |
-| `--bucket-size N` | Bucketed trends + plots |
+| `--bucket-size N` | Bucketed trend aggregation |
 | `--no-perplexity` | Skip PPL (`file` only) |
 | `--replay-oracle` | Exact Mt/Jt (PCFG; needs `--model-path`) |
 | `--pcfg` | Force PCFG oracle gating |
@@ -104,8 +104,7 @@ Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp downlo
 | `metrics.json` | Caps, trends, meta, optional perplexity / correlations |
 | `metrics.csv` | One unified row (same schema as compare) |
 | `perplexity.json` | Model commit / oracle PPL (and Mt/Jt when replayed) |
-| `{stem}_M_trends.png` / `_J_trends.png` | Per-step proxy panels |
-| `compare_surfaces.png` | Step × token heatmaps (confidence, entropy) |
+| `oracle.npz` | Full oracle replay dump when `--replay-oracle` |
 
 ---
 
@@ -133,7 +132,7 @@ Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp downlo
 | `--resume` | Skip stems already in output CSV |
 | `--no-purge-cache` | Skip Hub cache purge at batch start |
 
-**Oracle gating:** exact Mt/Jt and proxy correlations run only when the trace is PCFG (`-pcfg_` / `pcfg_` in the name, or `--pcfg`) **and** `--replay-oracle` is set. Non-PCFG runs still get M̂/Ĵ + model commit PPL + overview/surface plots.
+**Oracle gating:** exact Mt/Jt and proxy correlations run only when the trace is PCFG (`-pcfg_` / `pcfg_` in the name, or `--pcfg`) **and** `--replay-oracle` is set. Non-PCFG runs still get M̂/Ĵ + model commit PPL.
 
 NPZ samples are streamed via `traces.trace_npz.iter_npz_traces` (one sample in RAM at a time for proxies).
 
@@ -141,33 +140,9 @@ NPZ samples are streamed via `traces.trace_npz.iter_npz_traces` (one sample in R
 
 | File | Contents |
 | ---- | -------- |
-| `schedulerlens_metrics.csv` | All runs, unified columns |
-| `compare_summary.json` | Same rows as JSON |
-| `compare_overview.png` | Scheduler × model bars for M̂, Ĵ, PPL |
-| `compare_ppl.png` | Model vs oracle PPL (when oracle present) |
-| `compare_proxy_corr.png` | Mean ρ by early/mid/late block |
-| `compare_proxy_fidelity.png` | Scatter Mt vs M̂_t, Jt vs Ĵ_t |
-| `compare_surfaces.png` | Step × token heatmaps |
-| `plot_artifacts/<stem>/oracle.npz` | **Full oracle replay dump** (see below) — keep this; replaying Mt/Jt is expensive |
-| `plot_artifacts/<stem>/fidelity.npz` | Mean step trends for fidelity scatter (also inside `oracle.npz`) |
-| `plot_artifacts/<stem>/surfaces.npz` | Confidence/entropy surfaces (optional; cheap to recompute) |
-| `run_plots/<stem>/` | Per-run PNGs written at analyze time |
+| `schedulerlens_metrics.csv` | All runs, unified columns (flushed after each NPZ) |
 
-### Oracle artifact (`oracle.npz`)
-
-Written whenever `--replay-oracle` produces per-sample detail. Prefer this over re-running oracle.
-
-| Level | Arrays | Contents |
-| ----- | ------ | -------- |
-| Meta | `jt_exact_max`, `jt_markov_order`, `n_samples`, `stem` | Jt policy used |
-| Task | `oracle_ppl`, `model_commit_ppl`, `Mt_total`, `Jt_total`, … | Same as CSV caps |
-| Sample | `sample_oracle_nll/ppl`, `sample_model_nll/ppl`, `sample_Mt`, `sample_Jt` | One row per NPZ sample |
-| Step | `step_sample_idx`, `step`, `step_Mt`, `step_Jt`, `step_oracle_nll`, `step_model_nll`, `step_n_selected` | Per-sample × step |
-| Token | `tok_sample_idx`, `tok_step`, `tok_gen_pos`, `tok_content_pos`, `tok_sel`, `tok_ref`, `tok_mt_kl`, `tok_oracle_nll`, `tok_model_nll` | Per commit |
-
-`Jt` is set-level (one value per step); `Mt` / NLLs are stored per token. Proxy M̂/Ĵ caps are **not** stored here — recompute from traces if needed.
-
-Load: `from schedulerlens.oracle import load_oracle_artifacts`.
+Compare writes `schedulerlens_metrics.csv` only. `file` writes the per-run CSV/JSON files above.
 
 ### CSV schema (unified)
 
@@ -217,20 +192,6 @@ Raise `exact_max` only if you have the RAM. Concurrent exact CKY `Jt` calls are 
 | `hub.py` | Hub inventory / download→analyze→delete / batch compare |
 | `run.py` | **Single CLI** (`file` / `inventory` / `analyze` / `compare` / `pos`) |
 | `pos.py` | POS analysis library |
-| `plots/viz.py` | All M/J/compare/quad/eval-join/surface plots |
-| `plots/pos.py` | POS unmask timing plots |
-
-Compare also writes:
-
-| File | Contents |
-| ---- | -------- |
-| `compare_quad_bars.png` | Faceted bars: M̂/Ĵ by scheduler, hue = step budget |
-| `compare_quad_heat_M.png` / `_J.png` | Heatmaps scheduler × steps per (model, task) |
-| `compare_accuracy_vs_proxy.png` | Accuracy vs M̂/Ĵ (from strace_metrics) |
-| `compare_nfe_pareto.png` | NFE vs accuracy colored by M̂/Ĵ |
-| `compare_budget_curves.png` | Proxies / accuracy / NFE vs steps when multiple budgets exist |
-
-Join key: NPZ stem == strace `name` (fallback: model+task+steps+mode). Override path with `--strace-metrics`.
 
 ---
 

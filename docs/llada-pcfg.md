@@ -409,7 +409,7 @@ python -m schedulerlens.run file \
   eval_outputs/pcfg/llada-100m-pcfg-pcfg_pd_s128/trace_outputs/llada-100m-pcfg_pd_s128.npz \
   -o outputs/schedulerlens/pcfg_pd --replay-oracle --model-path /path/to/llada-100m-pcfg
 
-# Hub: inventory → download→analyze→delete → CSV + plots
+# Hub: inventory → download→analyze→delete → CSV
 python -m schedulerlens.run inventory --repo schedulerlens-npz --pcfg-only
 python -m schedulerlens.run compare \
   --repo schedulerlens-npz --pattern '*-pcfg_*.npz' \

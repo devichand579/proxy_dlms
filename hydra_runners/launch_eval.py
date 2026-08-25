@@ -17,6 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from repo_env_defaults import apply_offline_env, apply_repo_env_defaults, resolve_eval_device
 from sampling_defaults import resolve_gen_length_steps
+from cst.eval_data.lmeval_task import eval_num_fewshot as get_num_fewshot
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -74,22 +75,6 @@ def _eval_output_basename(
     if include_steps:
         base = f"{base}_s{int(steps)}"
     return base
-
-
-def get_num_fewshot(task_name: str) -> int:
-    if "humaneval" in task_name:
-        return 0
-    if "gsm8k" in task_name:
-        return 4
-    if "math500" in task_name or "minerva_math500" in task_name:
-        return 4
-    if "mbpp3" in task_name:
-        return 3
-    if "mbpp" in task_name:
-        return 3
-    if "arc_challenge_chat" in task_name:
-        return 5
-    return 0
 
 
 def _apply_trace_hf_env(env: dict[str, str], cfg: dict, *, offline: bool = False) -> None:

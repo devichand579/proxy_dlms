@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from datasets import Dataset, load_dataset
 
+from cst.eval_data.lmeval_task import eval_num_fewshot
+
 from .taco import _load_taco_train_rows
-from .gsm8k import (
-    _gsm8k_text,
-    _load_gsm8k_test_rows_for_fewshot,
-    _load_gsm8k_train,
-)
+from .gsm8k import _gsm8k_text, _load_gsm8k_train
 from .minerva_math import (
     _load_minerva_math_train,
     _minerva_math_text,
@@ -21,9 +19,7 @@ from .minerva_math import (
 )
 from .mcqa import (
     _format_mcqa_challenge_chat_row,
-    _load_arc_challenge_test_rows_for_fewshot,
     _load_arc_challenge_train,
-    _load_arc_easy_test_rows_for_fewshot,
     _load_arc_easy_train,
     _load_commonsense_qa_test_rows_for_fewshot,
     _load_commonsense_qa_train,
@@ -32,11 +28,11 @@ from .mcqa import (
 from .pool_helpers import (
     _arc_csqa_pool_train_with_fewshot_from_test,
     _dataset_to_pool,
-    _gsm8k_pool_with_fewshot,
     _index_id,
     _minerva_math_pool_with_fixed_fewshot,
     _rows_to_pool,
     _sample_rows_k,
+    pool_from_lmeval_task,
 )
 
 
@@ -51,13 +47,6 @@ class SourceSpec:
 def _empty_dataset() -> Dataset:
     """Unused placeholder for ``taco`` in ``SourceSpec``."""
     return load_dataset("openai/gsm8k", "main", split="train[:0]")
-
-
-_MCQA_LOADERS: Dict[str, Tuple[Callable[[], Any], Callable[[], List[Dict[str, Any]]]]] = {
-    "arc_easy": (_load_arc_easy_train, _load_arc_easy_test_rows_for_fewshot),
-    "arc_challenge": (_load_arc_challenge_train, _load_arc_challenge_test_rows_for_fewshot),
-    "commonsense_qa": (_load_commonsense_qa_train, _load_commonsense_qa_test_rows_for_fewshot),
-}
 
 
 def _allocation_proportional(n_total: int, pool_sizes: List[int]) -> List[int]:
@@ -116,53 +105,105 @@ def default_source_specs() -> List[SourceSpec]:
 def load_pools(
     specs: Optional[Sequence[SourceSpec]] = None,
     *,
-    gsm8k_num_fewshot: int = 4,
-    gsm8k_fewshot_seed: int = 0,
+    fewshot_seed: int = 0,
+    gsm8k_num_fewshot: Optional[int] = None,
+    minerva_math_num_fewshot: Optional[int] = None,
+    arc_csqa_num_fewshot: Optional[int] = None,
+    gsm8k_fewshot_seed: Optional[int] = None,
+    arc_csqa_fewshot_seed: Optional[int] = None,
     minerva_math_fixed_fewshot: bool = True,
-    arc_csqa_num_fewshot: int = 5,
-    arc_csqa_fewshot_seed: int = 0,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Load full pools: ``{id, source, text, meta}``. TACO: train rows, prompt = question + starter_code; large fields dropped from meta."""
+    """Load full pools: ``{id, source, text, meta}``.
+
+    GSM8K / Minerva / ARC-Challenge / ARC-Easy prompts use lm-eval ``fewshot_context``
+    (same sampler, templates, and ``k`` as ``launch_eval``). TACO stays 0-shot
+    (HumanEval). CommonsenseQA has no matching generate-until eval task, so it
+    keeps the 5-shot chat formatter with labeled validation demos.
+    """
     specs = list(specs) if specs is not None else default_source_specs()
     pools: Dict[str, List[Dict[str, Any]]] = {}
-    rng_gsm8k = random.Random(gsm8k_fewshot_seed)
-    rng_arc = random.Random(arc_csqa_fewshot_seed)
+    seed = int(fewshot_seed)
+    if gsm8k_fewshot_seed is not None:
+        seed = int(gsm8k_fewshot_seed)
+    elif arc_csqa_fewshot_seed is not None:
+        seed = int(arc_csqa_fewshot_seed)
+
+    gsm_n = eval_num_fewshot("gsm8k") if gsm8k_num_fewshot is None else int(gsm8k_num_fewshot)
+    math_n = (
+        eval_num_fewshot("minerva_math500")
+        if minerva_math_num_fewshot is None
+        else int(minerva_math_num_fewshot)
+    )
+    arc_n = (
+        eval_num_fewshot("arc_challenge_chat")
+        if arc_csqa_num_fewshot is None
+        else int(arc_csqa_num_fewshot)
+    )
 
     for spec in specs:
         name = spec.name
         try:
             if name == "gsm8k":
-                ds_train = _load_gsm8k_train()
-                if gsm8k_num_fewshot > 0:
-                    test_rows = _load_gsm8k_test_rows_for_fewshot()
-                    pools[name] = _gsm8k_pool_with_fewshot(
-                        ds_train, test_rows, rng_gsm8k, gsm8k_num_fewshot
-                    )
+                pools[name] = pool_from_lmeval_task(
+                    "gsm8k", "gsm8k", seed=seed, num_fewshot=gsm_n
+                )
+            elif name == "minerva_math":
+                if minerva_math_fixed_fewshot:
+                    try:
+                        pools[name] = pool_from_lmeval_task(
+                            "minerva_math",
+                            "minerva_math500",
+                            seed=seed,
+                            num_fewshot=math_n,
+                            query_docs=_load_minerva_math_train(),
+                        )
+                    except Exception as e:
+                        print(
+                            "[cst.train_data] Warning: lm-eval minerva_math500 unavailable "
+                            f"({e}); using local first_n 4-shot demos."
+                        )
+                        pools[name] = _minerva_math_pool_with_fixed_fewshot(
+                            _load_minerva_math_train(),
+                            list_minerva_math_fewshot_samples(),
+                        )
                 else:
-                    pools[name] = _dataset_to_pool(ds_train, "gsm8k", _gsm8k_text, _index_id)
-            elif name == "minerva_math" and minerva_math_fixed_fewshot:
-                pools[name] = _minerva_math_pool_with_fixed_fewshot(
-                    _load_minerva_math_train(), list_minerva_math_fewshot_samples()
+                    pools[name] = _dataset_to_pool(
+                        _load_minerva_math_train(),
+                        "minerva_math",
+                        _minerva_math_text,
+                        _index_id,
+                    )
+            elif name == "arc_challenge":
+                pools[name] = pool_from_lmeval_task(
+                    "arc_challenge",
+                    "arc_challenge_chat",
+                    seed=seed,
+                    num_fewshot=arc_n,
+                    id_fn=_mcqa_hf_id,
                 )
-            elif name == "minerva_math" and not minerva_math_fixed_fewshot:
-                pools[name] = _dataset_to_pool(
-                    _load_minerva_math_train(), "minerva_math", _minerva_math_text, _index_id
+            elif name == "arc_easy":
+                pools[name] = pool_from_lmeval_task(
+                    "arc_easy",
+                    "arc_challenge_chat",
+                    seed=seed,
+                    num_fewshot=arc_n,
+                    query_docs=_load_arc_easy_train(),
+                    id_fn=_mcqa_hf_id,
                 )
-            elif name in _MCQA_LOADERS:
-                load_train, load_test_fs = _MCQA_LOADERS[name]
-                if arc_csqa_num_fewshot > 0:
+            elif name == "commonsense_qa":
+                if arc_n > 0:
                     pools[name] = _arc_csqa_pool_train_with_fewshot_from_test(
-                        load_train(),
-                        load_test_fs(),
-                        rng_arc,
-                        name,
+                        _load_commonsense_qa_train(),
+                        _load_commonsense_qa_test_rows_for_fewshot(),
+                        random.Random(seed),
+                        "commonsense_qa",
                         _mcqa_hf_id,
-                        arc_csqa_num_fewshot,
+                        arc_n,
                     )
                 else:
                     pools[name] = _dataset_to_pool(
-                        load_train(),
-                        name,
+                        _load_commonsense_qa_train(),
+                        "commonsense_qa",
                         _format_mcqa_challenge_chat_row,
                         _mcqa_hf_id,
                     )
@@ -174,7 +215,7 @@ def load_pools(
                     taco_rows,
                     "taco",
                     _index_id,
-                    meta_extra={"python_format": "taco_direct"},
+                    meta_extra={"python_format": "taco_direct", "num_fewshot": 0},
                 )
             else:
                 ds = spec.loader()
@@ -190,10 +231,11 @@ def sample_uniform(
     *,
     seed: int = 0,
     specs: Optional[Sequence[SourceSpec]] = None,
-    gsm8k_num_fewshot: int = 4,
+    gsm8k_num_fewshot: Optional[int] = None,
     gsm8k_fewshot_seed: Optional[int] = None,
     minerva_math_fixed_fewshot: bool = True,
-    arc_csqa_num_fewshot: int = 5,
+    minerva_math_num_fewshot: Optional[int] = None,
+    arc_csqa_num_fewshot: Optional[int] = None,
     arc_csqa_fewshot_seed: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """``num_samples`` distinct rows: proportional split across pools, random sample per pool, then shuffle (seeded)."""
@@ -202,14 +244,15 @@ def sample_uniform(
     spec_list = list(specs) if specs is not None else default_source_specs()
     rng = random.Random(seed)
     fs_seed = int(gsm8k_fewshot_seed) if gsm8k_fewshot_seed is not None else seed
-    arc_seed = int(arc_csqa_fewshot_seed) if arc_csqa_fewshot_seed is not None else seed
+    if arc_csqa_fewshot_seed is not None:
+        fs_seed = int(arc_csqa_fewshot_seed)
     pools = load_pools(
         spec_list,
+        fewshot_seed=fs_seed,
         gsm8k_num_fewshot=gsm8k_num_fewshot,
-        gsm8k_fewshot_seed=fs_seed,
+        minerva_math_num_fewshot=minerva_math_num_fewshot,
         minerva_math_fixed_fewshot=minerva_math_fixed_fewshot,
         arc_csqa_num_fewshot=arc_csqa_num_fewshot,
-        arc_csqa_fewshot_seed=arc_seed,
     )
     names = [s.name for s in spec_list]
     active = [n for n in names if pools.get(n)]
@@ -240,10 +283,11 @@ def sample_uniform_batched(
     *,
     seed: int = 0,
     specs: Optional[Sequence[SourceSpec]] = None,
-    gsm8k_num_fewshot: int = 4,
+    gsm8k_num_fewshot: Optional[int] = None,
     gsm8k_fewshot_seed: Optional[int] = None,
     minerva_math_fixed_fewshot: bool = True,
-    arc_csqa_num_fewshot: int = 5,
+    minerva_math_num_fewshot: Optional[int] = None,
+    arc_csqa_num_fewshot: Optional[int] = None,
     arc_csqa_fewshot_seed: Optional[int] = None,
 ) -> List[List[Dict[str, Any]]]:
     """Same draw as :func:`sample_uniform`, but split into consecutive batches of up to ``batch_size`` rows."""
@@ -256,6 +300,7 @@ def sample_uniform_batched(
         gsm8k_num_fewshot=gsm8k_num_fewshot,
         gsm8k_fewshot_seed=gsm8k_fewshot_seed,
         minerva_math_fixed_fewshot=minerva_math_fixed_fewshot,
+        minerva_math_num_fewshot=minerva_math_num_fewshot,
         arc_csqa_num_fewshot=arc_csqa_num_fewshot,
         arc_csqa_fewshot_seed=arc_csqa_fewshot_seed,
     )

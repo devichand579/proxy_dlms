@@ -2,10 +2,10 @@
 """Single SchedulerLens CLI.
 
 Subcommands:
-  file         Analyze one local NPZ (metrics + plots)
+  file         Analyze one local NPZ (metrics CSV/JSON)
   inventory    List Hub NPZs (no download)
   analyze      Download/analyze one Hub NPZ (or --local path)
-  compare      Batch Hub/local compare → CSV + plots
+  compare      Batch Hub/local compare → CSV
   pos          POS-stratified unmask analysis
 """
 
@@ -17,8 +17,6 @@ import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
-
-import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -63,7 +61,7 @@ def run_schedulerlens(
     jt_large_set: Optional[int] = None,
     skip_jt: bool = False,
 ) -> Dict[str, Any]:
-    """Compute metrics, write metrics.json / metrics.csv and plots to output_dir."""
+    """Compute metrics and write metrics.json / metrics.csv to output_dir."""
     _ensure_pcfg_path()
     trace_path = Path(trace_path)
     output_dir = Path(output_dir)
@@ -103,7 +101,6 @@ def run_schedulerlens(
 
     ppl = None
     correlations = None
-    fidelity = None
     do_replay = replay_oracle and (meta.is_pcfg or force_pcfg)
 
     if compute_perplexity:
@@ -156,7 +153,7 @@ def run_schedulerlens(
             or any(s is not None for s in ppl.sample_oracle)
         ):
             oracle_path = save_oracle_artifacts(
-                output_dir / "plot_artifacts" / meta.stem / "oracle.npz",
+                output_dir / "oracle.npz",
                 ppl,
                 stem=meta.stem,
             )
@@ -176,12 +173,6 @@ def run_schedulerlens(
                 sample_oracle_nll=ppl.sample_oracle_nll,
                 sample_model_nll=ppl.sample_model_nll,
             )
-            fidelity = {
-                "mt": np.asarray(ppl.mt_trend[:n], dtype=float),
-                "m_hat": np.asarray(m_hat[:n], dtype=float),
-                "jt": np.asarray(ppl.jt_trend[:n], dtype=float),
-                "j_hat": np.asarray(j_hat[:n], dtype=float),
-            }
             result["correlations"] = correlations
 
         with metrics_path.open("r", encoding="utf-8") as f:
@@ -201,57 +192,6 @@ def run_schedulerlens(
     )
     csv_path = write_metrics_csv(output_dir / "metrics.csv", [row])
     result["csv_path"] = str(csv_path.resolve())
-
-    try:
-        from schedulerlens.plots import compute_trace_surfaces, save_compare_plots
-
-        surfaces = compute_trace_surfaces(trace_path, max_samples=max_samples)
-    except ImportError:
-        surfaces = None
-    if surfaces is not None and surfaces.n_samples > 0:
-        surface_paths = save_compare_plots(
-            [row],
-            output_dir,
-            surfaces_by_stem={meta.stem: surfaces},
-            fidelity_points={meta.stem: fidelity} if fidelity else None,
-        )
-        result["surface_plots"] = {k: str(v) for k, v in surface_paths.items()}
-
-    if metrics.n_steps > 0:
-        try:
-            from schedulerlens.plots import save_bucket_plots, save_trend_plots
-
-            prefix = trace_path.stem
-            m_plot, j_plot, unmasked_plot = save_trend_plots(
-                metrics, output_dir, prefix=prefix
-            )
-            result["M_t_plot"] = str(m_plot.resolve())
-            result["J_t_plot"] = str(j_plot.resolve())
-            result["unmasked_count_plot"] = str(unmasked_plot.resolve())
-            if bucket_size is not None:
-                bucket_all, bucket_unmasked = save_bucket_plots(
-                    metrics, output_dir, prefix=prefix
-                )
-                result["bucket_all_trends_plot"] = str(bucket_all.resolve())
-                result["bucket_unmasked_plot"] = str(bucket_unmasked.resolve())
-            else:
-                result["bucket_all_trends_plot"] = None
-                result["bucket_unmasked_plot"] = None
-        except ImportError as e:
-            logger.warning("Skipping trend plots (missing dependency): %s", e)
-            result["M_t_plot"] = None
-            result["J_t_plot"] = None
-            result["unmasked_count_plot"] = None
-            result["bucket_all_trends_plot"] = None
-            result["bucket_unmasked_plot"] = None
-    else:
-        result["M_t_plot"] = None
-        result["J_t_plot"] = None
-        result["unmasked_count_plot"] = None
-        result["bucket_all_trends_plot"] = None
-        result["bucket_unmasked_plot"] = None
-        logger.warning("Skipped trend plots: no valid steps in trace.")
-
     return result
 
 
@@ -383,7 +323,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p_cmp = sub.add_parser(
         "compare",
         aliases=["analyze-all"],
-        help="Batch Hub/local compare → CSV + plots",
+        help="Batch Hub/local compare → CSV",
     )
     src = p_cmp.add_mutually_exclusive_group(required=True)
     src.add_argument("--repo", "--repo-id", dest="repo_id", default=None)
@@ -398,7 +338,6 @@ def build_argparser() -> argparse.ArgumentParser:
     p_cmp.add_argument("-o", "--output-dir", type=Path, required=True)
     _add_filter_args(p_cmp)
     _add_oracle_args(p_cmp)
-    p_cmp.add_argument("--strace-metrics", type=Path, default=None)
     p_cmp.add_argument("--limit", type=int, default=None)
     p_cmp.add_argument("--resume", action="store_true")
     p_cmp.add_argument("--no-purge-cache", action="store_true")
@@ -477,6 +416,8 @@ def _cmd_file(args: argparse.Namespace) -> int:
     print(f"\nOutput dir: {args.output_dir.resolve()}")
     print(f"  metrics.json : {result['metrics_path']}")
     print(f"  metrics.csv  : {result['csv_path']}")
+    if result.get("oracle_artifacts_path"):
+        print(f"  oracle.npz   : {result['oracle_artifacts_path']}")
     return 0
 
 
@@ -596,7 +537,6 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             replay_oracle=args.replay_oracle,
             model_path=args.model_path,
             hf_model=args.hf_model,
-            strace_metrics_path=args.strace_metrics,
             max_samples=args.max_samples,
             limit=args.limit,
             resume=args.resume,
@@ -619,8 +559,6 @@ def _cmd_compare(args: argparse.Namespace) -> int:
 
     print(f"Runs: {len(result['rows'])}")
     print(f"CSV : {result['csv_path']}")
-    for name, path in result.get("plot_paths", {}).items():
-        print(f"  {name}: {path}")
     return 0
 
 

@@ -57,12 +57,12 @@ CST launcher — runs `python hydra_runners/run_cst.py` with Hydra (config: conf
 Options:
   --mode store|train|eval
                         store  — collect/upload hiddens to Hub (no CST fit)
-                        train  — download Hub slices -> train CST -> delete local
+                        train  — download each Hub batch -> train CST -> delete local
                         eval   — score CST checkpoint on saved hiddens
   --scope train|eval    store only: sets store.scope=train|eval
   --hidden_dir DIR      mode=eval only: local folder of .pt to score (not used for store)
   --checkpoint PATH     eval: CST checkpoint (sharded dir, or legacy .pt)
-  --task_name NAME      store/eval: lm-eval task (e.g. gsm8k)
+  --task_name NAME      store/eval: lm-eval task (gsm8k, all, or gsm8k,humaneval)
   --anchor_block N      train: anchors per backward (memory/throughput knob)
   --gpu_pinned_gb N     train: GB of bank state pinned on GPU; rest streams from host RAM
   --save_optimizer_state
@@ -74,12 +74,10 @@ Options:
 Examples:
   ./scripts/cst.sh --mode store store.scope=train
   ./scripts/cst.sh --mode store --scope eval --task_name gsm8k
-  ./scripts/cst.sh --mode train train.target_staging_gb=1.0
+  ./scripts/cst.sh --mode store --scope eval --task_name all
+  ./scripts/cst.sh --mode train train.num_epochs=1
   ./scripts/cst.sh --mode train --anchor_block 32 --gpu_pinned_gb 110
-  # Tiny smoke run (CPU-sized bank, no streaming):
-  ./scripts/cst.sh --mode train cst.max_steps=8 train.steps=8 train.gen_length=8 \
-      train.anchor_block=2 train.gpu_pinned_gb=0
-  ./scripts/cst.sh --mode eval --checkpoint outputs/cst_ckpt/cst_llada_scheduler_pd_k4096_w4_ls0.001_train_best.pt \
+  ./scripts/cst.sh --mode eval --checkpoint outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best \
       --hidden_dir outputs/eval_hidden
 
 Slurm:

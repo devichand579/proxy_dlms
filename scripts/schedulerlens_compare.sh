@@ -60,7 +60,7 @@ unset _script_dir
 
 usage() {
   cat <<'EOF'
-SchedulerLens compare launcher (Hub or local NPZ → CSV + plots).
+SchedulerLens compare launcher (Hub or local NPZ → CSV).
 
   ./scripts/schedulerlens_compare.sh [OPTIONS]
 
@@ -141,7 +141,6 @@ ORACLE_JT_EXACT_MAX=""
 ORACLE_JT_MARKOV_ORDER=""
 ORACLE_JT_LARGE_SET=""
 ORACLE_NO_JT=false
-STRACE_METRICS=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -257,10 +256,6 @@ while [[ $# -gt 0 ]]; do
       ORACLE_NO_JT=true
       shift
       ;;
-    --strace-metrics)
-      STRACE_METRICS="$2"
-      shift 2
-      ;;
     -q|--quiet)
       QUIET=true
       shift
@@ -369,7 +364,6 @@ fi
 [[ -n "$ORACLE_JT_MARKOV_ORDER" ]] && CMD+=(--oracle-jt-markov-order "$ORACLE_JT_MARKOV_ORDER")
 [[ -n "$ORACLE_JT_LARGE_SET" ]] && CMD+=(--oracle-jt-large-set "$ORACLE_JT_LARGE_SET")
 [[ "$ORACLE_NO_JT" == "true" ]] && CMD+=(--oracle-no-jt)
-[[ -n "$STRACE_METRICS" ]] && CMD+=(--strace-metrics "$STRACE_METRICS")
 
 echo "SchedulerLens compare"
 echo "  cwd: $REPO_ROOT"

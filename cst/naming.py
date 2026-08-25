@@ -1,4 +1,4 @@
-"""Path tokens for CST train/eval: model, scheduler, k/w/lambda_sparsity, task (staged hiddens and aggregates)."""
+"""Path tokens for CST store/train/eval: hidden Hub folders and checkpoint names."""
 
 from __future__ import annotations
 
@@ -40,26 +40,38 @@ def cst_hyper_suffix(k: int, w: int, lambda_sparsity: float) -> str:
     return f"k{int(k)}_w{int(w)}_{lambda_sparsity_token(lambda_sparsity)}"
 
 
-def cst_train_name_token(
+def cst_hidden_name_token(
     model_label: str,
     scheduler_mode_short: str,
+    gen_length: int,
+    steps: int,
+    *,
+    task_name: Optional[str] = None,
+) -> str:
+    """Hub folder / chunk prefix: ``{model}_{scheduler}_{gen_length}_{steps}``."""
+    base = (
+        f"{fs_token(model_label)}_"
+        f"{fs_token(scheduler_mode_short)}_"
+        f"{int(gen_length)}_{int(steps)}"
+    )
+    if task_name is not None and str(task_name).strip():
+        return f"{base}_task_{fs_token(str(task_name))}"
+    return base
+
+
+def cst_ckpt_name_token(
+    hidden_token: str,
     k: int,
     w: int,
     lambda_sparsity: float,
 ) -> str:
-    """Token for training staging files and ``cst_*_train_*.pt``."""
-    hyp = cst_hyper_suffix(k, w, lambda_sparsity)
-    return f"{fs_token(model_label)}_scheduler_{fs_token(scheduler_mode_short)}_{hyp}_train"
+    """Checkpoint basename token: hidden token plus CST hypers (k/w/λ)."""
+    return f"{fs_token(hidden_token, max_len=200)}_{cst_hyper_suffix(k, w, lambda_sparsity)}"
 
 
-def cst_hidden_segment_prefix(name_token: str, segment: int) -> str:
-    """Segment prefix shared by train and eval hidden chunks."""
-    return f"{fs_token(name_token, max_len=200)}_seg{int(segment):03d}"
-
-
-def cst_hidden_chunk_basename(name_token: str, segment: int, batch_idx: int) -> str:
-    """Unified hidden chunk filename: ``{name_token}_seg{seg}_{batch:06d}.pt``."""
-    return f"{cst_hidden_segment_prefix(name_token, segment)}_{int(batch_idx):06d}.pt"
+def cst_hidden_chunk_basename(name_token: str, batch_idx: int) -> str:
+    """Hidden chunk filename: ``{name_token}_{batch:06d}.pt``."""
+    return f"{fs_token(name_token, max_len=200)}_{int(batch_idx):06d}.pt"
 
 
 _HIDDEN_CHUNK_BATCH_SUFFIX = re.compile(r"_(\d{6})\.pt$")
@@ -75,15 +87,16 @@ def cst_eval_task_name_token(
     model_label: str,
     scheduler_tag: str,
     task_name: str,
-    k: int,
-    w: int,
-    lambda_sparsity: float,
+    gen_length: int,
+    steps: int,
 ) -> str:
-    """Token for eval hidden files (includes ``k``, ``w``, ``lambda_sparsity``, task name)."""
-    hyp = cst_hyper_suffix(k, w, lambda_sparsity)
-    return (
-        f"{fs_token(model_label)}_scheduler_{fs_token(scheduler_tag)}_{hyp}"
-        f"_task_{fs_token(str(task_name))}"
+    """Eval hidden token: ``{model}_{scheduler}_{gen_length}_{steps}_task_{task}``."""
+    return cst_hidden_name_token(
+        model_label,
+        scheduler_tag,
+        gen_length,
+        steps,
+        task_name=task_name,
     )
 
 
@@ -160,16 +173,16 @@ def resolve_train_resume_latest(ckpt_dir: Path, name_token: str) -> Optional[Pat
 
 
 def resolve_train_best_in_dir(ckpt_dir: Path) -> Optional[Path]:
-    """Prefer ``cst_best``; else newest ``cst_*_train_best`` by mtime (offline eval fallback).
-
-    Matches both sharded directories and legacy ``.pt`` files.
-    """
+    """Prefer ``cst_best`` (dir or ``.pt``); else newest ``cst_*_best`` / ``cst_*_train_best``."""
     d = Path(ckpt_dir)
     leg = _first_existing(d / "cst_best", d / "cst_best.pt")
     if leg is not None:
         return leg
     cands = sorted(
-        list(d.glob("cst_*_train_best")) + list(d.glob("cst_*_train_best.pt")),
+        list(d.glob("cst_*_best"))
+        + list(d.glob("cst_*_best.pt"))
+        + list(d.glob("cst_*_train_best"))
+        + list(d.glob("cst_*_train_best.pt")),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )

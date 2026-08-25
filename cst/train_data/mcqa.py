@@ -119,20 +119,8 @@ def _load_arc_easy_train() -> Dataset:
     return load_dataset("allenai/ai2_arc", "ARC-Easy", split="train")
 
 
-def _load_arc_easy_test_rows_for_fewshot() -> List[Dict[str, Any]]:
-    """ARC-Easy test rows for few-shot."""
-    ds = load_dataset("allenai/ai2_arc", "ARC-Easy", split="test")
-    return [dict(r) for r in ds]
-
-
 def _load_arc_challenge_train() -> Dataset:
     return load_dataset("allenai/ai2_arc", "ARC-Challenge", split="train")
-
-
-def _load_arc_challenge_test_rows_for_fewshot() -> List[Dict[str, Any]]:
-    """ARC-Challenge test rows for few-shot."""
-    ds = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="test")
-    return [dict(r) for r in ds]
 
 
 def _load_commonsense_qa_train() -> Dataset:

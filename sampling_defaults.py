@@ -3,17 +3,38 @@
 Loaded by the lm-eval launcher and hidden-state capture.
 """
 
+SHORT_GEN_LENGTH_STEPS = (128, 128)
+DEFAULT_GEN_LENGTH_STEPS = (512, 512)
+
 
 def get_gen_length_steps(task_name: str) -> tuple[int, int]:
-    """Default (gen_length, steps) for this task when YAML does not set them."""
-    if "arc_challenge_chat" in task_name:
-        return 128, 128
-    return 512, 512
+    """Default (gen_length, steps) for this task when YAML does not set them.
+
+    ARC-Easy, ARC-Challenge chat, and CommonsenseQA use 128/128 (short
+    multiple-choice answers). Everything else is 512/512.
+    """
+    t = str(task_name or "").strip().lower().replace("-", "_")
+    if "arc_easy" in t or "arc_challenge" in t:
+        return SHORT_GEN_LENGTH_STEPS
+    if "commonsense" in t or t in ("csqa",):
+        return SHORT_GEN_LENGTH_STEPS
+    return DEFAULT_GEN_LENGTH_STEPS
+
+
+def effective_gen_length_steps(
+    task_name: str,
+    gen_length: int,
+    steps: int,
+) -> tuple[int, int]:
+    """Keep YAML 512/512 except ARC-Easy / ARC-chat / CommonsenseQA, which stay 128/128."""
+    task_g, task_s = get_gen_length_steps(task_name)
+    if (task_g, task_s) == SHORT_GEN_LENGTH_STEPS:
+        return task_g, task_s
+    return int(gen_length), int(steps)
 
 
 def resolve_gen_length_steps(cfg, task_name: str) -> tuple[int, int]:
-    """Pick gen_length and steps from cfg, or use task defaults.
-    """
+    """Pick gen_length and steps from cfg, or use task defaults."""
     gen_d, steps_d = get_gen_length_steps(task_name)
     gl_raw = cfg.get("gen_length") if cfg is not None else None
     st_raw = cfg.get("steps") if cfg is not None else None
