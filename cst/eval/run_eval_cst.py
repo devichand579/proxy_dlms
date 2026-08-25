@@ -42,7 +42,6 @@ def evaluate_chunk_file(
 ) -> Dict[str, Any]:
     """NMSE, L0, cos, TC on one chunk; NTF and masks if base_model is given."""
     H, meta, segs = load_chunk_H(chunk_path)
-    H = H.to(device)
     T, B, L, D = H.shape
     if T < w:
         return {"error": "T < w", "path": str(chunk_path), "T": T, "w": w}
@@ -99,7 +98,7 @@ def evaluate_chunk_file(
     hi = min(T, max_anchor) if max_anchor is not None else T
     for anchor in range(w, hi + 1):
         s_target = anchor  # same H row as training (H_full[anchor])
-        tgt = H[s_target]
+        tgt = H[s_target].to(device)
         H_hat = torch.zeros_like(tgt)
         u_tgt, m_tgt = row_um(anchor)
 
@@ -113,7 +112,7 @@ def evaluate_chunk_file(
             cst = cst_bank.get(enc_step)
             if offset > cst.w:
                 continue
-            H_enc = H[enc_step - 1]
+            H_enc = H[enc_step - 1].to(device)
             A = cst.encode(H_enc.to(dtype=cst.W_enc.weight.dtype))
             H_hat = H_hat + cst.decode(A, offset)
             l0_list.append(compute_l0(A))
@@ -128,7 +127,9 @@ def evaluate_chunk_file(
 
             if enc_step > 1:
                 c_prev = cst_bank.get(enc_step - 1)
-                A_prev = c_prev.encode(H[enc_step - 2].to(dtype=c_prev.W_enc.weight.dtype))
+                A_prev = c_prev.encode(
+                    H[enc_step - 2].to(device=device, dtype=c_prev.W_enc.weight.dtype)
+                )
                 if A.shape == A_prev.shape:
                     tc_list.append(temporal_coherence(A_prev, A))
 

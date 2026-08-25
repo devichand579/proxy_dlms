@@ -87,7 +87,7 @@ def windowed_cst_loss_full(
     for tau in range(w_eff):
         s_step = anchor - w_eff + 1 + tau
         t_row = s_step
-        tgt = H_full[t_row].float()
+        tgt = H_full[t_row].to(device=device, dtype=torch.float32)
         H_hat = torch.zeros_like(tgt)
         n_contrib = 0
 
@@ -114,11 +114,23 @@ def windowed_cst_loss_full(
         if n_target_terms > 0:
             rms = (total_recon / max(n_target_terms * B * L * D, 1)).sqrt()
             ref_norms = [
-                H_full[anchor - w_eff + 1 + tau].float().norm(dim=(1, 2)).clamp_min(1e-8).mean()
+                H_full[anchor - w_eff + 1 + tau]
+                .to(device=device, dtype=torch.float32)
+                .norm(dim=(1, 2))
+                .clamp_min(1e-8)
+                .mean()
                 for tau in range(w_eff)
                 if anchor - w_eff + 1 + tau >= 1
             ]
-            ref = torch.stack(ref_norms).mean() if ref_norms else H_full[anchor].float().norm(dim=(1, 2)).clamp_min(1e-8).mean()
+            ref = (
+                torch.stack(ref_norms).mean()
+                if ref_norms
+                else H_full[anchor]
+                .to(device=device, dtype=torch.float32)
+                .norm(dim=(1, 2))
+                .clamp_min(1e-8)
+                .mean()
+            )
             nmse = float((rms / ref).item())
         else:
             nmse = 0.0

@@ -27,6 +27,7 @@ STORE_TRAIN_FINGERPRINT_REQUIRED = (
     "train_samples_per_epoch",
     "train_inference_batch_size",
     "train_bucket_by_gen_length",
+    "train_bucket_by_prompt_length",
 )
 STORE_EVAL_FINGERPRINT_REQUIRED = (
     "eval_task",
@@ -34,6 +35,7 @@ STORE_EVAL_FINGERPRINT_REQUIRED = (
     "eval_inference_batch_size",
     "eval_num_fewshot",
     "eval_limit",
+    "eval_bucket_by_prompt_length",
 )
 
 

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from cst import save_hidden_records
 from cst.naming import cst_hidden_chunk_basename
+from cst.pre_logits import DiskFullError, HiddenStepSink, save_hidden_records
 from load_model import (
     infer_diffusion_token_ids,
     is_dream_model_dir,
@@ -16,6 +19,8 @@ from load_model import (
     prepend_bos_for_dream,
 )
 from schedulers.generate import generate
+
+logger = logging.getLogger("cst.collect")
 
 
 def _mode_map(short: str) -> tuple[str, Optional[str]]:
@@ -49,6 +54,124 @@ def resolve_block_length(mode: str, gen_length: int, block_length: Optional[int]
     return gen_length
 
 
+def few_shot_prefix_len(text: str, tokenizer) -> int:
+    """Token length of everything before the last ``\\n\\n``-separated block (0 if none)."""
+    parts = text.split("\n\n")
+    if len(parts) <= 1:
+        return 0
+    prefix_str = "\n\n".join(parts[:-1]) + "\n\n"
+    return len(tokenizer.encode(prefix_str, add_special_tokens=False))
+
+
+@dataclass
+class QuestionGenPackPlan:
+    """Drop left-pad + few-shot; keep left-padded questions + generation region."""
+
+    few_shot_lens: List[int]
+    q_lens: List[int]
+    left_pads: List[int]
+    orig_prompt_len: int
+    new_prompt_len: int
+    gen_len: int
+    new_seq_len: int
+    n_question_tokens: int
+    n_gen_tokens: int
+
+    def pack(self, t: torch.Tensor) -> torch.Tensor:
+        if t.dim() != 3:
+            return t
+        b = int(t.shape[0])
+        d = int(t.shape[2])
+        new_t = torch.zeros(
+            (b, self.new_seq_len, d),
+            dtype=t.dtype,
+            device=t.device,
+        )
+        orig_p = self.orig_prompt_len
+        gen = self.gen_len
+        new_p = self.new_prompt_len
+        src_len = int(t.shape[1])
+        g_take = max(0, min(gen, src_len - orig_p, self.new_seq_len - new_p))
+        if g_take > 0:
+            new_t[:, new_p : new_p + g_take, :] = t[:, orig_p : orig_p + g_take, :]
+        for i in range(b):
+            fs = self.few_shot_lens[i]
+            q = self.q_lens[i]
+            src = self.left_pads[i] + fs
+            dst = new_p - q
+            q_take = max(0, min(q, src_len - src, self.new_seq_len - dst))
+            if q_take > 0:
+                new_t[i, dst : dst + q_take, :] = t[i, src : src + q_take, :]
+        return new_t
+
+
+def build_question_gen_pack_plan(
+    texts: List[str],
+    tokenizer,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    gen_length: int,
+) -> QuestionGenPackPlan:
+    """Pack plan from the padded prompt batch (before generation)."""
+    b = len(texts)
+    orig_prompt_len = int(input_ids.shape[1])
+    gen_len = int(gen_length)
+    few_shot_lens = [few_shot_prefix_len(text, tokenizer) for text in texts]
+    unpadded_lens = attention_mask.sum(dim=1).tolist()
+    left_pads = [orig_prompt_len - int(u) for u in unpadded_lens]
+    q_lens: List[int] = []
+    for i in range(b):
+        fs = min(few_shot_lens[i], max(0, int(unpadded_lens[i]) - 1))
+        few_shot_lens[i] = fs
+        q_lens.append(int(unpadded_lens[i]) - fs)
+    new_prompt_len = max(q_lens) if q_lens else 0
+    if new_prompt_len <= 0:
+        new_prompt_len = orig_prompt_len
+        new_seq_len = orig_prompt_len + gen_len
+    else:
+        new_seq_len = new_prompt_len + gen_len
+    return QuestionGenPackPlan(
+        few_shot_lens=few_shot_lens,
+        q_lens=q_lens,
+        left_pads=left_pads,
+        orig_prompt_len=orig_prompt_len,
+        new_prompt_len=int(new_prompt_len),
+        gen_len=gen_len,
+        new_seq_len=int(new_seq_len),
+        n_question_tokens=int(sum(q_lens)),
+        n_gen_tokens=int(b) * gen_len,
+    )
+
+
+def _hidden_d_model(model: torch.nn.Module) -> int:
+    cfg = getattr(model, "config", None)
+    src = cfg if cfg is not None else model
+    for key in ("d_model", "hidden_size"):
+        val = getattr(src, key, None)
+        if val is not None:
+            return int(val)
+    return 4096
+
+
+def require_store_disk(
+    scratch: Path,
+    chunk_bytes: int,
+    *,
+    headroom_gb: float,
+    label: str,
+) -> None:
+    """Refuse a collect if the chunk plus headroom would not fit."""
+    need = int(1.15 * max(int(chunk_bytes), 1) + float(headroom_gb) * 1e9)
+    free = int(shutil.disk_usage(scratch).free)
+    if free < need:
+        raise DiskFullError(
+            f"need {need / 1e9:.1f} GB free at {scratch} for {label} "
+            f"(chunk ~{chunk_bytes / 1e9:.1f} GB plus {headroom_gb:.0f} GB headroom); "
+            f"have {free / 1e9:.1f} GB. Delete leftover staging files or lower "
+            "store.inference_batch_size, then re-run the same command to resume."
+        )
+
+
 @torch.no_grad()
 def collect_hidden_batch_loaded(
     model: torch.nn.Module,
@@ -67,6 +190,10 @@ def collect_hidden_batch_loaded(
     staging_name_token: Optional[str] = None,
     use_eos_harness: bool = True,
     capture_context: str = "train",
+    stream_to_disk: bool = True,
+    disk_headroom_gb: Optional[float] = None,
+    scratch_dir: Optional[str | Path] = None,
+    disk_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run one batch and write a hidden chunk file."""
     mode, strategy = _mode_map(mode_key)
@@ -92,96 +219,99 @@ def collect_hidden_batch_loaded(
     input_ids = enc["input_ids"].to(device)
     attention_mask = enc["attention_mask"].to(device)
 
-    _, steps_taken, blocks, gen_time = generate(
-        model,
-        input_ids,
-        attention_mask,
-        steps=steps,
-        gen_length=gen_length,
-        block_length=bl,
-        mode=mode,
-        strategy=strategy,
-        top_k=top_k,
-        trace_name=trace_name,
-        upload_to_wandb=False,
-        mask_id=mask_id,
-        eos_id=eos_id,
-        eot_id=eot_id,
-        use_eos_harness=use_eos_harness,
-        model_path=model_path,
+    plan = build_question_gen_pack_plan(
+        texts, tokenizer, input_ids, attention_mask, gen_length
     )
-
-    if not hasattr(model, "records"):
-        raise RuntimeError("Model must use PreLogitsCaptureWrapper (capture_pre_logits=True).")
-    rec = model.records
-    orig_prompt_len = int(input_ids.shape[1])
-
-    # === NEW TENSOR SLICING LOGIC ===
-    B = len(texts)
-    few_shot_lens = []
-
-    # 1. Calculate few-shot lengths dynamically
-    for text in texts:
-        parts = text.split("\n\n")
-        if len(parts) > 1:
-            prefix_str = "\n\n".join(parts[:-1]) + "\n\n"
-            fs_len = len(tokenizer.encode(prefix_str, add_special_tokens=False))
-            few_shot_lens.append(fs_len)
-        else:
-            few_shot_lens.append(0)
-
-    orig_seq_len = rec[0].shape[1] if len(rec) > 0 else orig_prompt_len
-    gen_len = orig_seq_len - orig_prompt_len
-
-    # 2. Find actual unpadded lengths using the existing attention_mask.
-    # Left pad: [PAD × left][few-shot][question][GEN]; content starts at left_pad.
-    unpadded_lens = attention_mask.sum(dim=1).tolist()
-    left_pads = [orig_prompt_len - int(u) for u in unpadded_lens]
-
-    q_lens = []
-    for b in range(B):
-        # Safeguard: ensure fs_len never swallows the actual question
-        fs = min(few_shot_lens[b], max(0, int(unpadded_lens[b]) - 1))
-        few_shot_lens[b] = fs
-        q_lens.append(int(unpadded_lens[b]) - fs)
-
-    # 3. Packed layout matches generate: left-pad questions, gen on the right.
-    #    [zeros][question][GEN]; prompt_len = max question length in the batch.
-    new_prompt_len = max(q_lens) if q_lens else 0
-    new_seq_len = new_prompt_len + gen_len
-    prompt_len = new_prompt_len if new_prompt_len > 0 else orig_prompt_len
-
-    if rec and new_prompt_len > 0:
-        for i in range(len(rec)):
-            t = rec[i]
-            if t.dim() != 3:
-                continue
-            new_t = torch.zeros((B, new_seq_len, t.shape[2]), dtype=t.dtype, device=t.device)
-            for b in range(B):
-                fs = few_shot_lens[b]
-                q = q_lens[b]
-                src = left_pads[b] + fs
-                dst = new_prompt_len - q
-                new_t[b, dst : dst + q, :] = t[b, src : src + q, :]
-                new_t[b, new_prompt_len : new_prompt_len + gen_len, :] = t[
-                    b, orig_prompt_len : orig_prompt_len + gen_len, :
-                ]
-            rec[i] = new_t
-
-    n_question_tokens = int(sum(q_lens))
-    n_gen_tokens = int(B) * int(gen_len)
+    prompt_len = plan.new_prompt_len
+    n_question_tokens = plan.n_question_tokens
+    n_gen_tokens = plan.n_gen_tokens
     cst_train_tokens = n_question_tokens + n_gen_tokens
-    save_hidden_records(
-        rec,
-        out_path,
-        prompt_len=prompt_len,
-        extra_meta={
-            "n_samples": int(B),
-            "n_question_tokens": n_question_tokens,
-            "n_gen_tokens": n_gen_tokens,
-            "cst_train_tokens": cst_train_tokens,
-        },
-    )
+    extra_meta = {
+        "n_samples": int(len(texts)),
+        "n_question_tokens": n_question_tokens,
+        "n_gen_tokens": n_gen_tokens,
+        "cst_train_tokens": cst_train_tokens,
+    }
+    if disk_headroom_gb is not None:
+        est_bytes = (
+            (int(steps) + 1)
+            * int(input_ids.shape[0])
+            * int(plan.new_seq_len)
+            * _hidden_d_model(model)
+            * 2
+        )
+        logger.info(
+            "packed_L=%d T<=%d B=%d est_chunk=%.2f GB (bf16, before EOS-early-stop)",
+            int(plan.new_seq_len),
+            int(steps) + 1,
+            int(input_ids.shape[0]),
+            est_bytes / 1e9,
+        )
+        require_store_disk(
+            Path(scratch_dir) if scratch_dir is not None else Path(out_path).parent,
+            est_bytes,
+            headroom_gb=float(disk_headroom_gb),
+            label=disk_label or Path(out_path).name,
+        )
+    out_p = Path(out_path)
+    sink: Optional[HiddenStepSink] = None
+    if stream_to_disk and hasattr(model, "configure_capture"):
+        sink = HiddenStepSink(out_p)
+        model.configure_capture(pack_fn=plan.pack, sink=sink)
+    elif hasattr(model, "configure_capture"):
+        model.configure_capture(pack_fn=plan.pack, sink=None)
+    elif hasattr(model, "clear_records"):
+        model.clear_records()
+
+    success = False
+    try:
+        _, steps_taken, blocks, gen_time = generate(
+            model,
+            input_ids,
+            attention_mask,
+            steps=steps,
+            gen_length=gen_length,
+            block_length=bl,
+            mode=mode,
+            strategy=strategy,
+            top_k=top_k,
+            trace_name=trace_name,
+            upload_to_wandb=False,
+            mask_id=mask_id,
+            eos_id=eos_id,
+            eot_id=eot_id,
+            use_eos_harness=use_eos_harness,
+            model_path=model_path,
+        )
+
+        if sink is not None:
+            sink.finalize({"prompt_len": int(prompt_len), **extra_meta})
+        else:
+            if hasattr(model, "finish_capture"):
+                rec = model.finish_capture()
+            elif hasattr(model, "records"):
+                rec = model.records
+            else:
+                raise RuntimeError(
+                    "Model must use PreLogitsCaptureWrapper (capture_pre_logits=True)."
+                )
+            save_hidden_records(
+                rec,
+                out_path,
+                prompt_len=prompt_len,
+                extra_meta=extra_meta,
+            )
+        success = True
+    finally:
+        if sink is not None and not success:
+            sink.unlink()
+        elif not success:
+            Path(out_path).unlink(missing_ok=True)
+        if hasattr(model, "configure_capture"):
+            model.configure_capture(pack_fn=None, sink=None)
+        elif hasattr(model, "clear_records"):
+            model.clear_records()
+
     meta: Dict[str, Any] = {
         "steps_taken": int(steps_taken),
         "blocks": int(blocks),
@@ -199,8 +329,6 @@ def collect_hidden_batch_loaded(
     if staging_name_token:
         meta["cst_name_token"] = str(staging_name_token)
         meta["context"] = str(capture_context)
-    if hasattr(model, "clear_records"):
-        model.clear_records()
     return meta
 
 
@@ -241,6 +369,10 @@ def collect_hidden_row_batch(
     top_k: int = 1,
     capture_context: str = "train",
     use_eos_harness: bool = True,
+    stream_to_disk: bool = True,
+    disk_headroom_gb: Optional[float] = None,
+    scratch_dir: Optional[str | Path] = None,
+    disk_label: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """Collect one inference batch and write ``{name_token}_{batch:06d}.pt``."""
     texts = [str(r.get("text", "")) for r in rows]
@@ -268,5 +400,9 @@ def collect_hidden_row_batch(
         staging_name_token=name_token,
         use_eos_harness=use_eos_harness,
         capture_context=capture_context,
+        stream_to_disk=stream_to_disk,
+        disk_headroom_gb=disk_headroom_gb,
+        scratch_dir=scratch_dir,
+        disk_label=disk_label,
     )
     return str(out_path), meta

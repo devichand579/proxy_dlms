@@ -15,22 +15,19 @@ __all__ = [
     "CST_EVAL_TASKS",
     "eval_num_fewshot",
     "expand_eval_task_names",
+    "load_eval_rows",
     "load_eval_row_batches",
 ]
 
 
-def load_eval_row_batches(
+def load_eval_rows(
     task_name: str,
-    batch_size: int,
     *,
     limit: Optional[int] = None,
     num_fewshot: Optional[int] = None,
     seed: int = 0,
-) -> List[List[Dict[str, Any]]]:
-    """All eval instances for ``task_name``, batched for hidden capture."""
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-
+) -> List[Dict[str, Any]]:
+    """All eval instances for ``task_name`` (unbatched)."""
     task, ns = load_lmeval_task(task_name, num_fewshot=num_fewshot, seed=int(seed))
     task.build_all_requests(limit=limit, rank=0, world_size=1)
     instances = task.instances
@@ -52,4 +49,21 @@ def load_eval_row_batches(
         )
     if not rows:
         raise RuntimeError(f"lm-eval task {task_name!r} produced no instances")
+    return rows
+
+
+def load_eval_row_batches(
+    task_name: str,
+    batch_size: int,
+    *,
+    limit: Optional[int] = None,
+    num_fewshot: Optional[int] = None,
+    seed: int = 0,
+) -> List[List[Dict[str, Any]]]:
+    """All eval instances for ``task_name``, consecutive batches (no length bucketing)."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    rows = load_eval_rows(
+        task_name, limit=limit, num_fewshot=num_fewshot, seed=seed
+    )
     return [rows[i : i + batch_size] for i in range(0, len(rows), batch_size)]

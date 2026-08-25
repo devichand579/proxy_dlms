@@ -297,7 +297,7 @@ Add `--slurm` only if your cluster requires `srun` for GPU binding inside `sbatc
 
 | File             | When              | Contents                                      |
 | ---------------- | ----------------- | --------------------------------------------- |
-| `tag_trace.pt`   | Full run          | Hidden chunk (`save_hidden_records` format)   |
+| `tag_trace.pt`   | Full run          | Hidden chunk (CSTHID01 or legacy `save_hidden_records`) |
 | `tag_graph.json` | Always            | `nodes` / `edges` with weights and `meta`     |
 | `tag_view.html`  | `write_html=true` | Static vis-network viewer (CDN on first open) |
 

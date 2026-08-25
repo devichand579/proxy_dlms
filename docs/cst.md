@@ -41,14 +41,11 @@ python hydra_runners/run_cst.py mode=eval eval.hidden_dir=/path/to/hiddens eval.
 
 Representations **immediately before the vocabulary projection** (post final norm). Implementation: `cst/pre_logits.py`.
 
-Each `.pt` file (minimal on-disk schema):
+Each `.pt` file is a CSTHID01 blob: 64 KB header (`meta.prompt_len` and shape) plus raw bfloat16 `[T, B, L, D]`. Older Hub chunks may still be `torch.save` payloads (`hidden_states` stacked or a per-step list). Loaders accept both.
 
-- `hidden_states` — bfloat16 tensors (one per forward during generation)
-- `meta.prompt_len` — padded prompt length for eval splits and TAG
+Legacy chunks may still include extra `meta` fields or `token_unmasked` / `token_diffusion_masked`.
 
-Legacy chunks may still include extra `meta` fields or `token_unmasked` / `token_diffusion_masked`; loaders accept both.
-
-Loaded as `[T, B, L, D]` float32 via `cst.train.hidden_chunk.load_chunk_H`.
+Loaded as `[T, B, L, D]` (on-disk dtype, usually bf16) via `cst.train.hidden_chunk.load_chunk_H`. Training and CST eval move **windows / rows** to GPU; they do not copy the whole chunk.
 
 **Filename examples:**
 
@@ -67,6 +64,10 @@ Uses **`store.*` only** (scheduler, gen length, steps, batch size, Hub credentia
 
 Runs the collect loop (sample prompts -> LM + scheduler -> one `.pt` per inference batch) and **uploads each batch to Hub**. Does **not** train CST.
 
+The sample draw is still seeded (`store.seed` / `store.samples`). Batches are **not** consecutive slices of that shuffle. Rows are grouped by gen length (so ARC/CSQA 128 never mix with 512), then by the same **prompt-length buckets as `eval.py`** (0–32, 32–64, …), sorted by length inside a bucket, then cut at `store.inference_batch_size`. Similar prompt lengths share a batch, so left-pad in `generate()` is smaller — less GPU time and smaller packed chunks. A sparse bucket can produce a last batch smaller than `inference_batch_size`.
+
+This changes which rows sit in batch `i` versus the old random chunks. Resume of an older Hub folder (no `train_bucket_by_prompt_length` in the fingerprint) is refused; use a new `store.name_token` or `store.resume=false`.
+
 ```bash
 huggingface-cli login
 python hydra_runners/run_cst.py mode=store store.scope=train
@@ -74,13 +75,22 @@ python hydra_runners/run_cst.py mode=store store.scope=train
 
 Default repo: **`{whoami}/hiddens-train`**.
 
-**Resume after a crash:** `store.resume=true` (default). Re-run the **same** command (`store.seed`, `store.samples`, `store.inference_batch_size`, scheduler / gen length / steps). Sampling is deterministic, so batch `i` is the same rows; batches already listed in that `name_token`'s Hub `manifest.json` are skipped. A chunk uploaded but not yet recorded in the manifest is collected again (at most the last batch). If the fingerprint does not match, store refuses to skip — use the original settings, a new `store.name_token`, or `store.resume=false` to overwrite.
+**Memory / disk (store):** each generation step used to keep **all** transformer layers on GPU as float32, then hold every step on CPU until save. That is what OOMs 192 GB VRAM / 240 GB RAM and fills ~500 GB scratch (chunks were 10–87 GB). Store now:
+
+- hooks **only the final pre-logit norm** (no `output_hidden_states=True`)
+- writes **bfloat16**, packed to question + gen (few-shot dropped at capture time)
+- **streams each step into the final `.pt`** (async disk write overlaps the next forward; no second `torch.save` copy)
+- refuses a batch with a clean resume if disk would fill (`store.disk_headroom_gb`, default 40); same as Hub-quota early stop
+
+Keep `store.inference_batch_size` at a size the machine can hold (8 is a good default for 512/512). Do not jump to 32–64: one 512-step batch at B=64 is tens of GB even after packing.
+
+**Resume after a crash:** `store.resume=true` (default). Re-run the **same** command (`store.seed`, `store.samples`, `store.inference_batch_size`, scheduler / gen length / steps). Sampling and prompt-length batching are deterministic, so batch `i` is the same rows; batches already listed in that `name_token`'s Hub `manifest.json` **or already present as `{name_token}/chunks/*.pt`** are skipped (the .pt is not re-uploaded). If a chunk landed on Hub but the manifest write did not, resume records it in the manifest and continues. If the fingerprint does not match, store refuses to skip — use the original settings, a new `store.name_token`, or `store.resume=false` to overwrite.
 
 If Hugging Face storage/quota (or local disk) fills mid-run, store **stops early with exit 0**. Already-uploaded batches stay on Hub; free space and re-run the same command to resume. Remaining eval tasks in `store.task_name=all` are skipped.
 
 ### Eval hiddens (`store.scope=eval`)
 
-Runs the **lm-eval task** through the model + scheduler, writing each batch `.pt` and uploading it immediately. Optional `store.samples` caps how many eval instances to capture **per task** (YAML default `1000`; `store.samples=null` for the full test set). Same crash resume as train store (`store.resume=true`).
+Runs the **lm-eval task** through the model + scheduler, writing each batch `.pt` and uploading it immediately. Optional `store.samples` caps how many eval instances to capture **per task** (YAML default `1000`; `store.samples=null` for the full test set). Same prompt-length buckets as train store / `eval.py`. Same crash resume as train store (`store.resume=true`).
 
 `store.task_name=all` stores the standard suite in order — GSM8K, Minerva Math500, ARC-Challenge chat, HumanEval, MBPP — each as its own folder in `{whoami}/hiddens-eval`. Comma-separated lists work too (`store.task_name=gsm8k,humaneval`). Re-running `all` after a crash resumes each task independently. Per-task few-shot still follows `launch_eval` defaults unless `store.num_fewshot` is set. `store.samples` (YAML default `1000`) is a **per-task** cap; set `store.samples=null` for full tests. ARC-Easy, ARC-Challenge chat, and CommonsenseQA collect at **128 gen / 128 steps** even when `store.gen_length` / `store.steps` are 512, so the ARC eval folder is `…_128_128_task_arc_challenge_chat`.
 

@@ -10,6 +10,8 @@
 #
 # Shell: ./scripts/cst.sh --mode store|train|eval [hydra overrides...]
 #
+# Logger output: logs/cst_store_{scope}_{task}_*.log, logs/cst_train_*.log, logs/cst_eval_*.log
+#
 # Hub folder name_token: {model}_{scheduler}_{gen_length}_{steps}
 #   e.g. llada_pd_512_256   (eval store appends _task_{task})
 # Hub auth: huggingface-cli login (or HF_TOKEN). Repos: {whoami}/hiddens-train, {whoami}/hiddens-eval
@@ -49,10 +51,11 @@ store:
   block_length: null
   top_k: 2
   inference_batch_size: 8
-  samples: 1000
+  samples: null
   seed: 0
   # Re-run the same store job after a crash: skip Hub chunks already in the
-  # manifest when seed / samples / batch size / generation settings match.
+  # manifest *or* already uploaded as .pt (even if the manifest write failed)
+  # when seed / samples / batch size / generation settings match.
   # store.resume=false re-collects every batch (overwrites those files).
   resume: true
   compile_model: false
@@ -66,6 +69,10 @@ store:
   # Hub: huggingface-cli login (or HF_TOKEN). Repos: {whoami}/hiddens-train and {whoami}/hiddens-eval
   # ARC-Easy / ARC-Challenge chat / CommonsenseQA collect at 128/128 even when gen_length/steps are 512.
   delete_local_after_hf_push: true
+  # Capture: last-layer hook (not all hidden_states), bf16, pack question+gen during
+  # the forward, stream each step into the final .pt (no second copy).
+  stream_to_disk: true
+  disk_headroom_gb: 20      # refuse a batch if free disk would drop below this after the write
 
 # ---------------------------------------------------------------------------
 # mode=train — download Hub hiddens and fit CST. No LM inference.

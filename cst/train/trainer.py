@@ -309,7 +309,6 @@ def train_on_chunk_files(
     min_frames = 2
     for p in paths:
         H, _meta, _ = load_chunk_H(p)
-        H = H.to(device)
         n_frames = H.shape[0]
         if n_frames < min_frames:
             logger.warning(

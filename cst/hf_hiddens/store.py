@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 from huggingface_hub.errors import HfHubHTTPError
 
 from cst.hf_hiddens.manifest import MANIFEST_VERSION, ChunkRecord, HiddenManifest
-from cst.hf_hiddens.naming import chunk_hub_path, manifest_hub_path
+from cst.hf_hiddens.naming import chunk_hub_path, chunks_dir_hub, manifest_hub_path
 from cst.naming import parse_hidden_chunk_batch_idx
 
 logger = logging.getLogger("cst.hf_hiddens.store")
@@ -112,7 +113,7 @@ def download_hub_file(
     )
     src = Path(cached)
     if src.resolve() != local_path.resolve():
-        local_path.write_bytes(src.read_bytes())
+        shutil.copyfile(src, local_path)
     return local_path
 
 
@@ -174,6 +175,74 @@ def fetch_manifest(
         raise
 
 
+def hub_chunk_exists(
+    repo_id: str,
+    name_token: str,
+    filename: str,
+    *,
+    revision: str = "main",
+    token: bool | str | None = True,
+) -> bool:
+    """True if ``{name_token}/chunks/{filename}`` is already on the Hub."""
+    api = _api(token)
+    path = chunk_hub_path(name_token, filename)
+    try:
+        infos = api.get_paths_info(
+            repo_id, [path], repo_type="dataset", revision=revision
+        )
+    except Exception as e:
+        logger.info("get_paths_info(%s) note: %s", path, e)
+        return False
+    return bool(infos)
+
+
+def list_hub_chunks(
+    repo_id: str,
+    name_token: str,
+    *,
+    revision: str = "main",
+    token: bool | str | None = True,
+) -> list[ChunkRecord]:
+    """Chunk files currently under ``{name_token}/chunks/`` on the Hub (may be ahead of the manifest)."""
+    prefix = chunks_dir_hub(name_token).rstrip("/") + "/"
+    api = _api(token)
+    try:
+        files = api.list_repo_files(repo_id=repo_id, repo_type="dataset", revision=revision)
+    except Exception as e:
+        logger.info("list_repo_files(%s) note: %s", repo_id, e)
+        return []
+    paths = [
+        p
+        for p in files
+        if p.startswith(prefix)
+        and p.endswith(".pt")
+        and parse_hidden_chunk_batch_idx(Path(p).name) is not None
+    ]
+    if not paths:
+        return []
+    sizes: Dict[str, int] = {}
+    for i in range(0, len(paths), 50):
+        batch = paths[i : i + 50]
+        try:
+            infos = api.get_paths_info(
+                repo_id, batch, repo_type="dataset", revision=revision
+            )
+        except Exception as e:
+            logger.warning("get_paths_info for Hub chunks failed: %s", e)
+            continue
+        for info in infos:
+            sizes[str(info.path)] = int(getattr(info, "size", 0) or 0)
+    out: list[ChunkRecord] = []
+    for p in paths:
+        base = Path(p).name
+        bi = parse_hidden_chunk_batch_idx(base)
+        if bi is None:
+            continue
+        out.append(ChunkRecord(batch_idx=bi, filename=base, bytes=int(sizes.get(p, 0))))
+    out.sort(key=lambda c: int(c.batch_idx))
+    return out
+
+
 def push_manifest(
     manifest: HiddenManifest,
     repo_id: str,
@@ -210,8 +279,13 @@ def upload_hidden_chunk(
     private_repo: bool = False,
     delete_local_after: bool = True,
     scope: str = "train",
+    skip_if_exists: bool = False,
 ) -> ChunkRecord:
-    """Upload one hidden .pt and update the Hub manifest."""
+    """Upload one hidden .pt and update the Hub manifest.
+
+    With ``skip_if_exists``, a .pt already at that Hub path is not re-uploaded
+    (avoids a second LFS blob after a crash between chunk and manifest commits).
+    """
     ensure_dataset_repo(repo_id, token=token, private=private_repo)
     local_path = Path(local_path)
     if not local_path.is_file():
@@ -220,14 +294,19 @@ def upload_hidden_chunk(
     if bi is None:
         raise ValueError(f"chunk filename has no batch index: {local_path.name}")
     rec = ChunkRecord(batch_idx=bi, filename=local_path.name, bytes=local_path.stat().st_size)
-    upload_file(
-        repo_id,
-        local_path,
-        chunk_hub_path(name_token, rec.filename),
-        revision=revision,
-        token=token,
-        commit_message=f"chunk {rec.filename}",
-    )
+    if skip_if_exists and hub_chunk_exists(
+        repo_id, name_token, rec.filename, revision=revision, token=token
+    ):
+        logger.info("Hub already has %s; skipping re-upload, updating manifest only", rec.filename)
+    else:
+        upload_file(
+            repo_id,
+            local_path,
+            chunk_hub_path(name_token, rec.filename),
+            revision=revision,
+            token=token,
+            commit_message=f"chunk {rec.filename}",
+        )
     manifest.scope = str(scope)
     manifest.name_token = name_token
     manifest.schema_version = MANIFEST_VERSION
