@@ -50,7 +50,11 @@ store:
   steps: 512
   block_length: null
   top_k: 2
-  inference_batch_size: 8
+  inference_batch_size: 128
+  auto_batch_size: true     # lower B to fit free disk / RAM / VRAM (never raises yaml cap)
+  max_chunk_gb: null        # optional cap on one .pt; null = only free disk/RAM/VRAM
+  cpu_headroom_gb: 16
+  vram_headroom_gb: 8
   samples: null
   seed: 0
   # Re-run the same store job after a crash: skip Hub chunks already in the

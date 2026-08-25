@@ -64,7 +64,7 @@ Uses **`store.*` only** (scheduler, gen length, steps, batch size, Hub credentia
 
 Runs the collect loop (sample prompts -> LM + scheduler -> one `.pt` per inference batch) and **uploads each batch to Hub**. Does **not** train CST.
 
-The sample draw is still seeded (`store.seed` / `store.samples`). Batches are **not** consecutive slices of that shuffle. Rows are grouped by gen length (so ARC/CSQA 128 never mix with 512), then by the same **prompt-length buckets as `eval.py`** (0–32, 32–64, …), sorted by length inside a bucket, then cut at `store.inference_batch_size`. Similar prompt lengths share a batch, so left-pad in `generate()` is smaller — less GPU time and smaller packed chunks. A sparse bucket can produce a last batch smaller than `inference_batch_size`.
+The sample draw is still seeded (`store.seed` / `store.samples`). Batches are **not** consecutive slices of that shuffle. Rows are grouped by gen length (so ARC/CSQA 128 never mix with 512), then by the same **prompt-length buckets as `eval.py`** (0–32, 32–64, …), sorted by length inside a bucket, then cut at the **chosen** batch size (`store.inference_batch_size` is a maximum; auto-batch may lower it). Similar prompt lengths share a batch, so left-pad in `generate()` is smaller. A sparse bucket can produce a last batch smaller than that size.
 
 This changes which rows sit in batch `i` versus the old random chunks. Resume of an older Hub folder (no `train_bucket_by_prompt_length` in the fingerprint) is refused; use a new `store.name_token` or `store.resume=false`.
 
@@ -80,9 +80,10 @@ Default repo: **`{whoami}/hiddens-train`**.
 - hooks **only the final pre-logit norm** (no `output_hidden_states=True`)
 - writes **bfloat16**, packed to question + gen (few-shot dropped at capture time)
 - **streams each step into the final `.pt`** (async disk write overlaps the next forward; no second `torch.save` copy)
-- refuses a batch with a clean resume if disk would fill (`store.disk_headroom_gb`, default 40); same as Hub-quota early stop
+- refuses a batch with a clean resume if disk would fill (`store.disk_headroom_gb`, default 20); same as Hub-quota early stop
+- **`store.auto_batch_size=true`** (default) lowers B from `store.inference_batch_size` so the estimated chunk fits free disk / RAM / VRAM (`store.disk_headroom_gb` / `cpu_headroom_gb` / `vram_headroom_gb`). Optional `store.max_chunk_gb` caps one `.pt`. Resume **reuses the fingerprint B** and does not recompute from current free space.
 
-Keep `store.inference_batch_size` at a size the machine can hold (8 is a good default for 512/512). Do not jump to 32–64: one 512-step batch at B=64 is tens of GB even after packing.
+Keep `store.inference_batch_size` as an upper bound (8 is a good default for 512/512). Auto-batch will drop it if a full batch would not fit.
 
 **Resume after a crash:** `store.resume=true` (default). Re-run the **same** command (`store.seed`, `store.samples`, `store.inference_batch_size`, scheduler / gen length / steps). Sampling and prompt-length batching are deterministic, so batch `i` is the same rows; batches already listed in that `name_token`'s Hub `manifest.json` **or already present as `{name_token}/chunks/*.pt`** are skipped (the .pt is not re-uploaded). If a chunk landed on Hub but the manifest write did not, resume records it in the manifest and continues. If the fingerprint does not match, store refuses to skip — use the original settings, a new `store.name_token`, or `store.resume=false` to overwrite.
 

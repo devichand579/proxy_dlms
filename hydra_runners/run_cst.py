@@ -46,6 +46,11 @@ from cst.hf_hiddens.store import (
     upload_hidden_chunk,
 )
 from cst.pre_logits import DiskFullError
+from cst.store_budget import (
+    max_inference_batch_size,
+    model_weight_bytes,
+    read_model_config_sizes,
+)
 from cst.model.cst_bank import CSTBank
 from cst.naming import (
     cst_ckpt_name_token,
@@ -315,6 +320,148 @@ def _log_store_batching(row_batches: List[List[Dict[str, Any]]], batch_size: int
         mid,
         max(sizes),
     )
+
+
+def _peek_hub_inference_batch_size(
+    store_cfg: Any,
+    repo_id: str,
+    name_token: str,
+    *,
+    scope: str,
+) -> Optional[int]:
+    """Fingerprint B already on Hub, or None if this is a fresh folder."""
+    if not bool(store_cfg.get("resume", True)):
+        return None
+    try:
+        manifest = fetch_manifest(
+            repo_id,
+            name_token,
+            cache_dir=Path(str(store_cfg.get("hf_local_cache_dir", "outputs/cst_hf_cache"))),
+            revision=str(store_cfg.get("hf_hiddens_revision", "main")),
+            token=hf_token(store_cfg),
+            create_if_missing=True,
+        )
+    except Exception as e:
+        logger.info("store auto-batch: could not read Hub fingerprint (%s)", e)
+        return None
+    fp = manifest.sampling_fingerprint
+    if not fp:
+        return None
+    key = (
+        "train_inference_batch_size"
+        if str(scope).strip().lower() == "train"
+        else "eval_inference_batch_size"
+    )
+    raw = fp.get(key)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _worst_store_seq_stats(
+    rows: List[Dict[str, Any]],
+    tokenizer,
+    model_path: str,
+    default_gen: int,
+    default_steps: int,
+) -> tuple[int, int, int]:
+    """``(packed_L, full_L, T)`` worst case over this draw (few-shot drop can only shrink L)."""
+    if not rows:
+        g, s = int(default_gen), int(default_steps)
+        return g, g, s + 1
+    lengths = _prompt_token_lengths(
+        [str(r.get("text", "")) for r in rows], tokenizer, model_path
+    )
+    packed = 1
+    full = 1
+    t_max = 1
+    for i, row in enumerate(rows):
+        g, s = effective_gen_length_steps(
+            _row_task_name(row), default_gen, default_steps
+        )
+        p = int(lengths[i]) if i < len(lengths) else int(g)
+        packed = max(packed, p + int(g))
+        full = max(full, p + int(g))
+        t_max = max(t_max, int(s) + 1)
+    return packed, full, t_max
+
+
+def _choose_store_batch_size(
+    store_cfg: Any,
+    *,
+    yaml_bs: int,
+    rows: List[Dict[str, Any]],
+    tokenizer,
+    model_path: str,
+    default_gen: int,
+    default_steps: int,
+    repo_id: str,
+    name_token: str,
+    scope: str,
+) -> int:
+    """YAML cap, or lower from free disk/RAM/VRAM. Resume keeps the fingerprint B."""
+    requested = max(int(yaml_bs), 1)
+    raw_auto = store_cfg.get("auto_batch_size", True)
+    if _is_blank(raw_auto):
+        auto = True
+    elif isinstance(raw_auto, str):
+        auto = raw_auto.strip().lower() in ("true", "1", "yes")
+    else:
+        auto = bool(raw_auto)
+    if not auto:
+        return requested
+    peeked = _peek_hub_inference_batch_size(
+        store_cfg, repo_id, name_token, scope=scope
+    )
+    if peeked is not None:
+        logger.info(
+            "store resume: using fingerprint batch size %d (auto-batch not recomputed)",
+            peeked,
+        )
+        return max(int(peeked), 1)
+    packed, full, n_rec = _worst_store_seq_stats(
+        rows, tokenizer, model_path, default_gen, default_steps
+    )
+    d_model, vocab, n_layers = read_model_config_sizes(model_path)
+    mcg = store_cfg.get("max_chunk_gb", None)
+    max_chunk_gb: Optional[float]
+    if _is_blank(mcg):
+        max_chunk_gb = None
+    else:
+        max_chunk_gb = float(mcg)
+    dh = store_cfg.get("disk_headroom_gb", 20)
+    ch = store_cfg.get("cpu_headroom_gb", 16)
+    vh = store_cfg.get("vram_headroom_gb", 8)
+    scratch = Path(str(store_cfg.get("scratch_dir", "outputs/cst_staging")))
+    chosen, _limits = max_inference_batch_size(
+        requested=requested,
+        packed_seq_len=packed,
+        full_seq_len=full,
+        d_model=d_model,
+        vocab_size=vocab,
+        n_layers=n_layers,
+        n_records=n_rec,
+        scratch=scratch,
+        stream_to_disk=bool(store_cfg.get("stream_to_disk", True)),
+        disk_headroom_gb=20.0 if _is_blank(dh) else float(dh),
+        cpu_headroom_gb=16.0 if _is_blank(ch) else float(ch),
+        vram_headroom_gb=8.0 if _is_blank(vh) else float(vh),
+        max_chunk_gb=max_chunk_gb,
+        model_bytes=model_weight_bytes(model_path),
+        device=str(store_cfg.get("device", "cuda")),
+    )
+    if chosen != requested:
+        logger.info(
+            "store auto-batch: lowered inference_batch_size %d -> %d "
+            "(fingerprint will record %d; resume keeps that B)",
+            requested,
+            chosen,
+            chosen,
+        )
+    return chosen
 
 
 def _store_generation_fingerprint(
@@ -816,12 +963,23 @@ def store_train_hiddens(cfg: DictConfig) -> int:
     )
     hf_train_repo = resolve_train_repo_id(store_cfg)
 
+    flat = sample_uniform(n_sp, seed=seed)
+    tokenizer = load_tokenizer(model_path)
+    inference_bs = _choose_store_batch_size(
+        store_cfg,
+        yaml_bs=inference_bs,
+        rows=flat,
+        tokenizer=tokenizer,
+        model_path=model_path,
+        default_gen=yaml_g,
+        default_steps=yaml_s,
+        repo_id=hf_train_repo,
+        name_token=name_token,
+        scope="train",
+    )
     sampling_state = _sampling_state_from_store(
         store_cfg, n_samples=n_sp, inference_bs=inference_bs, sched_m=sched_m
     )
-
-    flat = sample_uniform(n_sp, seed=seed)
-    tokenizer = load_tokenizer(model_path)
     row_batches = _bucket_row_batches(
         flat,
         inference_bs,
@@ -923,6 +1081,18 @@ def _store_eval_one_task(
         seed=seed,
     )
     tokenizer = load_tokenizer(model_path)
+    inference_bs = _choose_store_batch_size(
+        store,
+        yaml_bs=inference_bs,
+        rows=rows,
+        tokenizer=tokenizer,
+        model_path=model_path,
+        default_gen=gen_length,
+        default_steps=steps,
+        repo_id=repo_id,
+        name_token=name_token,
+        scope="eval",
+    )
     row_batches = _bucket_row_batches(
         rows,
         inference_bs,
