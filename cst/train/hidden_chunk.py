@@ -67,6 +67,45 @@ def load_chunk_H(
     return H, meta, seg
 
 
+def window_len(n_frames: int, w: int) -> int:
+    """Effective CST window for a chunk with ``n_frames`` rows."""
+    if w < 1:
+        raise ValueError("w must be >= 1")
+    t_max = int(n_frames) - 1
+    if t_max < 1:
+        return 0
+    return min(int(w), t_max)
+
+
+def iter_anchors(n_frames: int, w: int) -> List[int]:
+    """Anchor indices matching :func:`iter_anchor_samples`."""
+    w_eff = window_len(n_frames, w)
+    if w_eff < 1:
+        return []
+    t_max = int(n_frames) - 1
+    return list(range(w_eff, t_max + 1))
+
+
+def stack_h_window(
+    H: torch.Tensor,
+    anchor: int,
+    w: int,
+    *,
+    b0: int = 0,
+    b1: Optional[int] = None,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Build ``[mb, w_eff, L, D]`` for one anchor, optionally a row slice."""
+    n = int(H.shape[0])
+    w_eff = window_len(n, w)
+    b1_i = int(H.shape[1]) if b1 is None else int(b1)
+    slots = [H[anchor - w_eff + j, b0:b1_i] for j in range(w_eff)]
+    h_win = torch.stack(slots, dim=1)
+    if device is not None:
+        h_win = h_win.to(device, non_blocking=True)
+    return h_win
+
+
 def iter_anchor_samples(
     H: torch.Tensor,
     w: int,
@@ -74,16 +113,5 @@ def iter_anchor_samples(
     device: torch.device | None = None,
 ) -> Iterator[Tuple[int, torch.Tensor]]:
     """Yield each training anchor and its [B, w, L, D] window."""
-    n, B, L, D = H.shape
-    if w < 1:
-        raise ValueError("w must be >= 1")
-    t_max = n - 1
-    if t_max < 1:
-        return
-    w_eff = min(w, t_max)
-    for anchor in range(w_eff, t_max + 1):
-        slots = [H[anchor - w_eff + j] for j in range(w_eff)]
-        h_win = torch.stack(slots, dim=1)
-        if device is not None:
-            h_win = h_win.to(device)
-        yield anchor, h_win
+    for anchor in iter_anchors(int(H.shape[0]), w):
+        yield anchor, stack_h_window(H, anchor, w, device=device)

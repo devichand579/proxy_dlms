@@ -16,6 +16,7 @@ import logging
 import math
 import sys
 from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -52,8 +53,9 @@ from cst.store_budget import (
     read_model_config_sizes,
 )
 from cst.model.cst_bank import CSTBank
-from cst.model.residency import CSTResidency, budget_report
+from cst.model.residency import CSTResidency
 from cst.train.adam_bf16 import AdamBF16
+from cst.train.memory_budget import plan_from_train_cfg
 from cst.naming import (
     cst_ckpt_name_token,
     cst_hidden_name_token,
@@ -214,6 +216,85 @@ def _optional_int(v: Any) -> Optional[int]:
     if _is_blank(v):
         return None
     return int(v)
+
+
+def _should_write_train_ckpt(index: int, n_total: int, every: int) -> bool:
+    """First file, last file, and every ``every`` files in between."""
+    if n_total <= 0:
+        return True
+    if index <= 0 or index >= n_total - 1:
+        return True
+    ev = max(int(every), 1)
+    if ev <= 1:
+        return True
+    return (index + 1) % ev == 0
+
+
+class _HubChunkPrefetch:
+    """Download the next Hub chunk on a background thread while we train."""
+
+    def __init__(
+        self,
+        *,
+        repo_id: str,
+        hidden_token: str,
+        dl_dir: Path,
+        revision: str,
+        token: Any,
+        enabled: bool,
+    ) -> None:
+        self.repo_id = repo_id
+        self.hidden_token = hidden_token
+        self.dl_dir = dl_dir
+        self.revision = revision
+        self.token = token
+        self.enabled = bool(enabled)
+        self._ex: Optional[ThreadPoolExecutor] = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="cst-hub")
+            if self.enabled
+            else None
+        )
+        self._fut: Optional[Future] = None
+        self._want: Optional[str] = None
+
+    def _download(self, filename: str, expected_bytes: Optional[int]) -> Path:
+        return download_hidden_chunk(
+            str(self.repo_id),
+            self.hidden_token,
+            filename,
+            self.dl_dir,
+            expected_bytes=expected_bytes,
+            revision=self.revision,
+            token=self.token,
+        )
+
+    def prime(self, filename: str, expected_bytes: Optional[int]) -> None:
+        if not self.enabled or self._ex is None:
+            return
+        if self._fut is not None:
+            return
+        self._want = filename
+        self._fut = self._ex.submit(self._download, filename, expected_bytes)
+
+    def take(self, filename: str, expected_bytes: Optional[int]) -> Path:
+        if self._fut is not None and self._want == filename:
+            dest = self._fut.result()
+            self._fut = None
+            self._want = None
+            return dest
+        if self._fut is not None:
+            try:
+                self._fut.result()
+            except Exception:
+                logger.warning("discarding mismatched Hub prefetch", exc_info=True)
+            self._fut = None
+            self._want = None
+        return self._download(filename, expected_bytes)
+
+    def close(self) -> None:
+        if self._ex is not None:
+            self._ex.shutdown(wait=False)
+            self._ex = None
 
 
 def _store_yaml_gen_length_steps(store_cfg: Any) -> tuple[int, int]:
@@ -826,10 +907,17 @@ def _train_cst_on_chunks_and_checkpoint(
     wandb_run_id_for_meta: Optional[str] = None,
     sampling_state: Optional[Dict[str, Any]] = None,
     residency: Any = None,
+    memory_plan: Any = None,
+    write_checkpoint: bool = True,
 ) -> int:
     logger.info("=== train on %d hidden files ===", len(batch_paths))
     if residency is None:
         cst_bank.to_device_all(device)
+    g_cap = 24
+    if memory_plan is not None and memory_plan.cap_anchor_block is not None:
+        g_cap = int(memory_plan.cap_anchor_block)
+    elif not _is_blank(tr.get("anchor_block")):
+        g_cap = int(tr.get("anchor_block"))
     stats = train_on_chunk_files(
         batch_paths,
         cst_bank,
@@ -840,12 +928,19 @@ def _train_cst_on_chunks_and_checkpoint(
         c_tanh=float(tr.get("c_tanh", 1.0)),
         lambda_pre_dead=float(tr.get("lambda_pre_dead", 0.0)),
         device=device,
-        anchor_block=int(tr.get("anchor_block", 24)),
+        anchor_block=g_cap,
+        microbatch_rows=(
+            int(memory_plan.cap_microbatch)
+            if memory_plan is not None and memory_plan.cap_microbatch is not None
+            else None
+        ),
         residency=residency,
+        memory_plan=memory_plan,
+        prefetch_block=bool(memory_plan.prefetch_block) if memory_plan is not None else True,
     )
     if torch.cuda.is_available() and str(device).startswith("cuda"):
         logger.info(
-            "peak GPU memory this phase: %.1f GB (tune train.anchor_block from this)",
+            "peak GPU memory this phase: %.1f GB (auto-memory sizes G/microbatch from remaining VRAM)",
             torch.cuda.max_memory_allocated(device) / 1e9,
         )
         torch.cuda.reset_peak_memory_stats(device)
@@ -923,27 +1018,34 @@ def _train_cst_on_chunks_and_checkpoint(
             train_gsm8k_num_fewshot=int(sampling_state["train_gsm8k_num_fewshot"]),
             train_arc_csqa_num_fewshot=int(sampling_state["train_arc_csqa_num_fewshot"]),
         )
-    ck_info = save_train_checkpoints(
-        ckpt_dir,
-        cst_bank=cst_bank,
-        optimizer=optimizer,
-        ramp=ramp,
-        phase=ckpt_phase,
-        train_loss=float(stats.get("train_loss", 0.0)),
-        train_batches=float(stats.get("train_batches", 0.0)),
-        name_token=name_token,
-        extra_meta=extra_meta,
-        save_optimizer_state=bool(tr.get("save_optimizer_state", False)),
-    )
-    if log_wandb and wb is not None:
-        wbd: dict[str, Any] = {
-            "train/ckpt_new_best": 1.0 if ck_info.get("updated_best") else 0.0,
-            "train/legacy_phases_removed": float(ck_info.get("legacy_phase_removed", 0)),
-        }
-        lm = ck_info.get("loss_mean", float("inf"))
-        if isinstance(lm, (int, float)) and math.isfinite(float(lm)):
-            wbd["train/ckpt_loss_mean"] = float(lm)
-        wb.log(wbd, step=global_step)
+    if write_checkpoint:
+        ck_info = save_train_checkpoints(
+            ckpt_dir,
+            cst_bank=cst_bank,
+            optimizer=optimizer,
+            ramp=ramp,
+            phase=ckpt_phase,
+            train_loss=float(stats.get("train_loss", 0.0)),
+            train_batches=float(stats.get("train_batches", 0.0)),
+            name_token=name_token,
+            extra_meta=extra_meta,
+            save_optimizer_state=bool(tr.get("save_optimizer_state", False)),
+        )
+        if log_wandb and wb is not None:
+            wbd: dict[str, Any] = {
+                "train/ckpt_new_best": 1.0 if ck_info.get("updated_best") else 0.0,
+                "train/legacy_phases_removed": float(ck_info.get("legacy_phase_removed", 0)),
+            }
+            lm = ck_info.get("loss_mean", float("inf"))
+            if isinstance(lm, (int, float)) and math.isfinite(float(lm)):
+                wbd["train/ckpt_loss_mean"] = float(lm)
+            wb.log(wbd, step=global_step)
+    else:
+        logger.info(
+            "skipping full checkpoint this chunk (cursor %s / batch %s); next dump on schedule",
+            data_next_epoch,
+            data_next_batch_idx,
+        )
     if bool(tr.get("delete_local_chunks_after_train", True)):
         delete_files(batch_paths)
     return global_step
@@ -1305,39 +1407,36 @@ def run_train(cfg: DictConfig) -> int:
     logger.info("CST parameters: total=%s", f"{n_cst_params:,}")
     logger.info("train from Hub: %s (%s)", hf_train_repo, hidden_token)
 
-    # Residency: pin as much of the bank on GPU as ``gpu_pinned_gb`` allows and
-    # stream the rest from host RAM on the anchor sweep. gpu_pinned_gb=0 keeps
-    # the old behaviour (whole bank resident via to_device_all), which is fine
-    # for small banks but is ~344 GB of state at max_steps=512, k=4096.
-    pinned_gb = float(tr.get("gpu_pinned_gb", 0.0) or 0.0)
-    bud = budget_report(
+    all_chunks = manifest.all_chunks_sorted()
+    nbat = manifest.total_batch_count()
+    if nbat == 0:
+        raise FileNotFoundError(
+            f"no hiddens in manifest for {hidden_token} @ {hf_train_repo}. "
+            "Run: python hydra_runners/run_cst.py mode=store store.scope=train"
+        )
+
+    mem = plan_from_train_cfg(
+        tr,
         max_steps=int(cst_cfg.max_steps),
         d=int(cst_cfg.d_model),
         k=int(cst_cfg.k),
         w=int(cst_cfg.w),
-        anchor_block=int(tr.get("anchor_block", 24)),
-        pinned_gb=pinned_gb,
-        batch=int(tr.get("inference_batch_size", 2)),
-        seq_len=int(tr.get("gen_length", 256)) + int(tr.get("max_prompt_length", 512)),
-        has_moments=True,
-    )
-    logger.info(
-        "memory budget: bank %.0f GB (%.3f GB/CST) | pinned %.0f GB | %d CSTs live "
-        "| predicted GPU %.0f GB, host %.0f GB",
-        bud["bank_total_gb"], bud["per_cst_gb"], bud["pinned_gb"],
-        int(bud["live_csts"]), bud["gpu_gb"], bud["host_gb"],
-    )
-    logger.info(
-        "  tune with train.anchor_block (GPU) and train.gpu_pinned_gb (splits bank GPU/host); "
-        "seq_len assumed worst-case gen_length + max_prompt_length"
+        device=device,
+        n_chunks=nbat,
+        next_chunk_bytes=(
+            int(all_chunks[0].bytes)
+            if getattr(all_chunks[0], "bytes", None)
+            else None
+        ),
+        scratch=scratch,
     )
     residency: Optional[CSTResidency] = None
-    if pinned_gb > 0.0:
+    if mem.use_residency:
         residency = CSTResidency(
             cst_bank,
             device,
             optimizer=optimizer,
-            pinned_bytes=int(pinned_gb * 1e9),
+            pinned_bytes=int(mem.pinned_bytes),
         )
     else:
         cst_bank.set_device(device)
@@ -1384,14 +1483,6 @@ def run_train(cfg: DictConfig) -> int:
                     wbd["data/cst_train_samples"] = float(sampling_state["cst_train_samples"])
                 wb.log(wbd, step=global_step)
 
-    all_chunks = manifest.all_chunks_sorted()
-    nbat = manifest.total_batch_count()
-    if nbat == 0:
-        raise FileNotFoundError(
-            f"no hiddens in manifest for {hidden_token} @ {hf_train_repo}. "
-            "Run: python hydra_runners/run_cst.py mode=store store.scope=train"
-        )
-
     for cst_pass in range(num_epochs):
         logger.info("=== CST pass %d / %d (%d batches) ===", cst_pass + 1, num_epochs, nbat)
         if resume_trip is not None and cst_pass < r_e:
@@ -1405,66 +1496,76 @@ def run_train(cfg: DictConfig) -> int:
         bi = r_b if resume_trip is not None and cst_pass == r_e else 0
         pending = [c for c in all_chunks if int(c.batch_idx) >= int(bi)]
         dl_dir = scratch / "hf_dl" / hidden_token
-        for ch in pending:
-            logger.info(
-                "=== download pass %d batch %d / %d (%s) ===",
-                cst_pass + 1,
-                int(ch.batch_idx),
-                nbat,
-                ch.filename,
-            )
-            try:
-                dest = download_hidden_chunk(
-                    str(hf_train_repo),
-                    hidden_token,
+        prefetcher = _HubChunkPrefetch(
+            repo_id=str(hf_train_repo),
+            hidden_token=hidden_token,
+            dl_dir=dl_dir,
+            revision=str(tr.get("hf_hiddens_revision", "main")),
+            token=hf_token(tr),
+            enabled=bool(mem.prefetch_chunks),
+        )
+        try:
+            for i_ch, ch in enumerate(pending):
+                logger.info(
+                    "=== download pass %d batch %d / %d (%s) ===",
+                    cst_pass + 1,
+                    int(ch.batch_idx),
+                    nbat,
                     ch.filename,
-                    dl_dir,
-                    expected_bytes=ch.bytes,
-                    revision=str(tr.get("hf_hiddens_revision", "main")),
-                    token=hf_token(tr),
                 )
-            except FileNotFoundError as e:
-                logger.error("Hub data missing — run mode=store first: %s", e)
-                break
+                try:
+                    dest = prefetcher.take(ch.filename, ch.bytes)
+                except FileNotFoundError as e:
+                    logger.error("Hub data missing — run mode=store first: %s", e)
+                    break
+                if i_ch + 1 < len(pending):
+                    nxt = pending[i_ch + 1]
+                    prefetcher.prime(nxt.filename, nxt.bytes)
 
-            if wb:
-                wb.log(
-                    {
-                        "download/pass": cst_pass,
-                        "download/batch_idx": int(ch.batch_idx),
-                        "download/bytes": float(ch.bytes),
-                    },
-                    step=global_step,
+                if wb:
+                    wb.log(
+                        {
+                            "download/pass": cst_pass,
+                            "download/batch_idx": int(ch.batch_idx),
+                            "download/bytes": float(ch.bytes),
+                        },
+                        step=global_step,
+                    )
+                global_step += 1
+
+                next_bi = int(ch.batch_idx) + 1
+                d_ne = int(cst_pass) + 1 if next_bi >= nbat else int(cst_pass)
+                d_nb = 0 if next_bi >= nbat else int(next_bi)
+
+                global_step = _train_cst_on_chunks_and_checkpoint(
+                    [str(dest)],
+                    ckpt_phase=int(cst_pass) * 100_000 + int(ch.batch_idx) + 1,
+                    cst_cfg=cst_cfg,
+                    cst_bank=cst_bank,
+                    optimizer=optimizer,
+                    ramp=ramp,
+                    tr=tr,
+                    device=device,
+                    wb=wb,
+                    global_step=global_step,
+                    ckpt_dir=ckpt_dir,
+                    log_wandb=use_wandb and wb is not None,
+                    name_token=ckpt_token,
+                    epoch=cst_pass,
+                    batch_idx=int(ch.batch_idx),
+                    data_next_epoch=d_ne,
+                    data_next_batch_idx=d_nb,
+                    num_epochs=int(num_epochs),
+                    wandb_run_id_for_meta=wandb_run_id_resumed if (not use_wandb or wb is None) else None,
+                    sampling_state=sampling_state,
+                    residency=residency,
+                    memory_plan=mem,
+                    write_checkpoint=_should_write_train_ckpt(
+                        i_ch, len(pending), mem.checkpoint_every
+                    ),
                 )
-            global_step += 1
-
-            next_bi = int(ch.batch_idx) + 1
-            d_ne = int(cst_pass) + 1 if next_bi >= nbat else int(cst_pass)
-            d_nb = 0 if next_bi >= nbat else int(next_bi)
-
-            global_step = _train_cst_on_chunks_and_checkpoint(
-                [str(dest)],
-                ckpt_phase=int(cst_pass) * 100_000 + int(ch.batch_idx) + 1,
-                cst_cfg=cst_cfg,
-                cst_bank=cst_bank,
-                optimizer=optimizer,
-                ramp=ramp,
-                tr=tr,
-                device=device,
-                wb=wb,
-                global_step=global_step,
-                ckpt_dir=ckpt_dir,
-                log_wandb=use_wandb and wb is not None,
-                name_token=ckpt_token,
-                epoch=cst_pass,
-                batch_idx=int(ch.batch_idx),
-                data_next_epoch=d_ne,
-                data_next_batch_idx=d_nb,
-                num_epochs=int(num_epochs),
-                wandb_run_id_for_meta=wandb_run_id_resumed if (not use_wandb or wb is None) else None,
-                sampling_state=sampling_state,
-                residency=residency,
-            )
+        finally:
+            prefetcher.close()
 
     if wb:
         wandb.finish()

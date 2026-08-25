@@ -133,44 +133,54 @@ python hydra_runners/run_cst.py mode=train
 
 Training never downloads the full subfolder at once. Each step:
 
-1. Download the next batch `.pt`
-2. Train CST on that file
-3. Delete the local file
-4. Repeat until all batches in the manifest are consumed
-5. If `train.num_epochs > 1`, repeat steps 1–4 for another pass over the **same** stored data
+1. Download the next batch `.pt` (the *following* file prefetches in the background)
+2. Train CST on that file (microbatch rows so a `B=128` chunk fits)
+3. Periodically write a sharded checkpoint (not necessarily every file)
+4. Delete the local file
+5. Repeat until all batches in the manifest are consumed
+6. If `train.num_epochs > 1`, repeat steps 1–5 for another pass over the **same** stored data
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
 | `num_epochs` | `1` | CST passes over the stored dataset |
 | `store.samples` | `1000` | How many prompts were collected at **store** time; train reads batch count from the manifest |
+| `auto_memory` | `true` | Pick pin / `anchor_block` / microbatch from free **RAM + VRAM** (disk is not the limiter) |
+| `prefetch_chunks` | `true` | Download the next Hub file while training the current one |
 
 **Resume:** `train.resume_from_latest=true` — restores CST weights and batch cursor (`data_next_epoch` = CST pass, `data_next_batch_idx`). Adam moments are restored only if the checkpoint was written with `train.save_optimizer_state=true`.
 
-### Memory: blocks and bank residency
+### Memory: auto pin, blocks, microbatch
 
 The bank is one CST per diffusion step. At `max_steps=512, k=4096, d=4096, w=4`
 that is 512 × 83.9 M = 43 B parameters — 172 GB fp32, or ~344 GB with bf16 Adam
-moments. Two mechanisms keep it trainable:
+moments. **`train.auto_memory=true` (default)** sizes the following from free host RAM and GPU VRAM, the same way store auto-batch sizes `B`. YAML values are optional *caps*; leave them `null` to fully auto. Disk is only checked to skip Hub prefetch if scratch cannot hold a second file.
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
-| `anchor_block` | `24` | Anchors per `backward()`. A block of G *consecutive* anchors touches G+w−1 distinct steps (windows overlap), so this bounds live gradients and activations. |
-| `gpu_pinned_gb` | `110` | GB of bank state pinned on GPU; the rest streams from host RAM as the anchor sweep advances. `0` places the whole bank at once (small banks only). |
+| `gpu_pinned_gb` | auto | GB of bank state pinned on GPU; the rest streams from host RAM. Manual `0` with `auto_memory=false` places the whole bank on GPU (small banks only). |
+| `anchor_block` | auto per chunk | Anchors per `backward()`. A block of G *consecutive* anchors touches G+w−1 distinct steps. |
+| `microbatch_rows` | auto per chunk | Row slices inside a Hub file so `B=128` activations fit. Grads accumulate; the CST update matches full-B if the loss stays a sum. |
+| `checkpoint_every` | auto (~8 dumps/epoch) | Full sharded save every N files (always first and last). |
 | `save_optimizer_state` | `false` | Shard Adam moments alongside params (3× checkpoint size). |
+| `cpu_headroom_gb` / `vram_headroom_gb` | `16` / `8` | Slack auto-memory leaves on host / GPU. |
 
 Anchor `t` reads steps `t−w+1 … t`, and the sweep is monotone, so step `s` is
 complete after anchor `s+w−1`: it is updated once with its full gradient, then
 released to host. No later anchor reads it, so this is numerically identical to
-one update per chunk — `anchor_block` is a memory/throughput knob, not a
-hyperparameter.
+one update per chunk — `anchor_block` and `microbatch_rows` are memory/throughput knobs, not hyperparameters.
 
-Each phase logs peak GPU memory; raise `anchor_block` until it approaches the
-card. Streaming costs host↔device bandwidth: every non-pinned step crosses the
-bus once per chunk file, and that volume does *not* depend on `anchor_block`.
+Each phase logs peak GPU memory; auto-memory uses remaining VRAM to pick G and microbatch for that file's `[T,B,L,D]`. Streaming costs host↔device bandwidth: every non-pinned step crosses the bus once per chunk file.
 
 The optimizer is `cst.train.adam_bf16.AdamBF16` — fp32 params and grads, bf16
 moments with stochastic rounding (plain bf16 truncation makes the `b2=0.999`
 second moment stagnate).
+
+Override examples:
+
+```bash
+python hydra_runners/run_cst.py mode=train
+python hydra_runners/run_cst.py mode=train train.auto_memory=false train.gpu_pinned_gb=135 train.anchor_block=16
+```
 
 ---
 

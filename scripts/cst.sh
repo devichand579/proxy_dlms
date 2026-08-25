@@ -63,8 +63,8 @@ Options:
   --hidden_dir DIR      mode=eval only: local folder of .pt to score (not used for store)
   --checkpoint PATH     eval: CST checkpoint (sharded dir, or legacy .pt)
   --task_name NAME      store/eval: lm-eval task (gsm8k, all, or gsm8k,humaneval)
-  --anchor_block N      train: anchors per backward (memory/throughput knob)
-  --gpu_pinned_gb N     train: GB of bank state pinned on GPU; rest streams from host RAM
+  --anchor_block N      train: cap on anchors per backward (default: auto from VRAM)
+  --gpu_pinned_gb N     train: cap on bank GB pinned on GPU (default: auto from RAM+VRAM)
   --save_optimizer_state
                         train: also shard Adam moments into checkpoints (3x size)
   --device DEV          local only: 0|1|cuda|cuda:0|cpu
@@ -76,7 +76,7 @@ Examples:
   ./scripts/cst.sh --mode store --scope eval --task_name gsm8k
   ./scripts/cst.sh --mode store --scope eval --task_name all
   ./scripts/cst.sh --mode train train.num_epochs=1
-  ./scripts/cst.sh --mode train --anchor_block 32 --gpu_pinned_gb 110
+  ./scripts/cst.sh --mode train train.auto_memory=false train.anchor_block=16 train.gpu_pinned_gb=110
   ./scripts/cst.sh --mode eval --checkpoint outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best \
       --hidden_dir outputs/eval_hidden
 

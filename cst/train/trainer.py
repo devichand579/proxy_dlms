@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-from itertools import islice
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -15,8 +14,9 @@ from cst.model.cst_bank import CSTBank
 from cst.model.residency import CSTResidency, steps_for_anchors
 from cst.naming import train_checkpoint_names
 from cst.storage_dtype import map_float_tensors
-from cst.train.hidden_chunk import iter_anchor_samples, load_chunk_H
+from cst.train.hidden_chunk import iter_anchors, load_chunk_H, stack_h_window
 from cst.train.loss import windowed_cst_loss_block
+from cst.train.memory_budget import TrainMemoryPlan, bytes_per_cst, choose_chunk_compute
 
 logger = logging.getLogger("cst.train")
 
@@ -310,11 +310,21 @@ class _DeviceRows:
         self._lo = 0
         self._buf: Optional[torch.Tensor] = None
 
-    def prepare(self, lo: int, hi: int) -> None:
+    def prepare(
+        self,
+        lo: int,
+        hi: int,
+        *,
+        b0: int = 0,
+        b1: Optional[int] = None,
+    ) -> None:
         lo = max(0, int(lo))
         hi = min(int(hi), self._H.shape[0] - 1)
         self._lo = lo
-        self._buf = self._H[lo : hi + 1].to(self._device, non_blocking=True)
+        b1_i = int(self._H.shape[1]) if b1 is None else int(b1)
+        self._buf = self._H[lo : hi + 1, int(b0) : b1_i].to(
+            self._device, non_blocking=True
+        )
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         if self._buf is None:
@@ -344,19 +354,20 @@ def train_on_chunk_files(
     lambda_pre_dead: float = 0.0,
     device: torch.device,
     anchor_block: int = 24,
+    microbatch_rows: Optional[int] = None,
     residency: Optional[CSTResidency] = None,
+    memory_plan: Optional[TrainMemoryPlan] = None,
+    prefetch_block: bool = True,
 ) -> Dict[str, Any]:
-    """Train on each hidden file in blocks of ``anchor_block`` consecutive anchors.
+    """Train on each hidden file in blocks of consecutive anchors.
 
-    One backward per block, not one per chunk file: the previous code stacked a
-    loss tensor per anchor and called ``backward()`` once at the end, holding
-    every anchor's autograd graph simultaneously.
+    One backward per ``(anchor_block, microbatch)`` so a Hub chunk with large B
+    does not retain G full-batch graphs. Anchor ``t`` touches steps
+    ``t-w+1 .. t``; step ``s`` is updated once its window closes, then residency
+    can release it. Numerically this is the same sum as one update per chunk.
 
-    Anchor ``t`` touches steps ``t-w+1 .. t``, so step ``s`` is complete once
-    anchor ``s+w-1`` has run. Each step is therefore updated exactly once per
-    chunk with its full gradient, then released back to host by ``residency``.
-    Because reconstructions sum decoder outputs across steps, steps update at
-    staggered points within a chunk rather than simultaneously.
+    When ``memory_plan`` is set, G and microbatch are chosen from free VRAM for
+    each file's ``[T,B,L,D]``. YAML caps on the plan still apply.
 
     Returns loss stats and ``per_chunk``.
     """
@@ -365,6 +376,20 @@ def train_on_chunk_files(
     n_items = 0
     per_chunk: List[Dict[str, Any]] = []
     min_frames = 2
+    copy_stream = None
+    if (
+        prefetch_block
+        and residency is not None
+        and torch.cuda.is_available()
+        and str(device).startswith("cuda")
+    ):
+        copy_stream = torch.cuda.Stream(device=device)
+    bps = (
+        residency.bytes_per_step
+        if residency is not None
+        else bytes_per_cst(cst_bank.d, cst_bank.k, cst_bank.w, has_moments=True)
+    )
+
     for p in paths:
         H, _meta, _ = load_chunk_H(p)
         n_frames = H.shape[0]
@@ -376,64 +401,101 @@ def train_on_chunk_files(
                 n_frames,
             )
             continue
-        # H stays on host when streaming; only the rows a block needs are shipped.
-        rows: Any = H.to(device) if residency is None else _DeviceRows(H, device)
+        B = int(H.shape[1])
+        L = int(H.shape[2])
+        g_use = max(int(anchor_block), 1)
+        mb_use = min(B, max(int(microbatch_rows), 1)) if microbatch_rows else B
+        if memory_plan is not None:
+            g_use, mb_use = choose_chunk_compute(
+                batch=B,
+                seq_len=L,
+                d=int(cst_bank.d),
+                k=int(cst_bank.k),
+                w=int(w),
+                bytes_per_step=int(bps),
+                device=device,
+                cap_anchor_block=memory_plan.cap_anchor_block,
+                cap_microbatch=memory_plan.cap_microbatch,
+                prefetch_block=bool(prefetch_block and residency is not None),
+                vram_headroom_gb=float(memory_plan.vram_headroom_gb),
+            )
+        mb_use = max(min(int(mb_use), B), 1)
+        g_use = max(int(g_use), 1)
+
+        # Always stage windows; never ``H.to(device)`` for the full chunk.
+        rows = _DeviceRows(H, device)
         lam = ramp.step()
         optimizer.zero_grad(set_to_none=True)
 
-        # Windows overlap by w-1, so materialising them all would cost ~w times
-        # the chunk in host RAM. Pull them a block at a time instead.
-        sample_iter = iter_anchor_samples(H, w, device=None)
-        anchors_all: List[int] = []
+        anchors_all = iter_anchors(n_frames, w)
+        blocks: List[List[int]] = [
+            anchors_all[i : i + g_use] for i in range(0, len(anchors_all), g_use)
+        ]
         chunk_loss_val = 0.0
         n_anchors_in_file = 0
         n_blocks = 0
+        n_micro = 0
         stepped: set[int] = set()
 
-        while True:
-            batch = list(islice(sample_iter, max(1, int(anchor_block))))
-            if not batch:
-                break
-            block = [a for a, _ in batch]
-            anchors_all.extend(block)
-            n_blocks += 1
+        for bi, block in enumerate(blocks):
+            nxt = blocks[bi + 1] if bi + 1 < len(blocks) else None
             need = steps_for_anchors(block, w)
+            need_next = steps_for_anchors(nxt, w) if nxt else []
+            n_blocks += 1
             if residency is not None:
                 residency.ensure(need)
-            h_wins = [hw.to(device, non_blocking=True) for _, hw in batch]
-            if isinstance(rows, _DeviceRows):
-                rows.prepare(block[0] - w + 1, block[-1])
+                if prefetch_block and need_next:
+                    if copy_stream is not None:
+                        with torch.cuda.stream(copy_stream):
+                            residency.ensure(need_next)
+                    else:
+                        residency.ensure(need_next)
 
-            loss, m = windowed_cst_loss_block(
-                cst_bank,
-                block,
-                h_wins,
-                rows,
-                lambda_sparsity=lambda_sparsity,
-                c_tanh=c_tanh,
-                lambda_ramp=lam,
-                lambda_pre_dead=lambda_pre_dead,
-            )
-            if loss.requires_grad and loss.numel() > 0:
-                loss.backward()
+            lo = block[0] - w + 1
+            hi = block[-1]
+            for b0 in range(0, B, mb_use):
+                b1 = min(B, b0 + mb_use)
+                h_wins = [
+                    stack_h_window(H, a, w, b0=b0, b1=b1, device=device) for a in block
+                ]
+                rows.prepare(lo, hi, b0=b0, b1=b1)
+                loss, m = windowed_cst_loss_block(
+                    cst_bank,
+                    block,
+                    h_wins,
+                    rows,
+                    lambda_sparsity=lambda_sparsity,
+                    c_tanh=c_tanh,
+                    lambda_ramp=lam,
+                    lambda_pre_dead=lambda_pre_dead,
+                )
+                if loss.requires_grad and loss.numel() > 0:
+                    loss.backward()
+                total_loss += float(m.get("loss", 0.0))
+                chunk_loss_val += float(m.get("loss", 0.0))
+                n_micro += 1
+                del loss, h_wins
 
-            total_loss += float(m.get("loss", 0.0))
-            chunk_loss_val += float(m.get("loss", 0.0))
             n_items += len(block)
             n_anchors_in_file += len(block)
 
-            # Steps whose window closed inside this block are done for this chunk.
             last_anchor = block[-1]
-            closed = [s for s in need if s <= last_anchor - w + 1 and s not in stepped]
+            keep_next = set(need_next)
+            closed = [
+                s
+                for s in need
+                if s <= last_anchor - w + 1 and s not in stepped
+            ]
             if closed:
                 _step_subset(optimizer, cst_bank, closed)
                 stepped.update(closed)
                 if residency is not None:
                     for s in closed:
-                        residency.release(s)
-            del loss, h_wins, batch
+                        if s not in keep_next:
+                            residency.release(s)
+            if copy_stream is not None and need_next:
+                copy_stream.synchronize()
 
-        # Trailing steps (the last w-1) never see a closing anchor in this chunk.
         trailing = [s for s in steps_for_anchors(anchors_all, w) if s not in stepped]
         if trailing:
             _step_subset(optimizer, cst_bank, trailing)
@@ -452,11 +514,17 @@ def train_on_chunk_files(
                 }
             )
             logger.info(
-                "train chunk %s loss=%.6f n_anchors=%d blocks=%d (per-step optimizer updates)",
+                "train chunk %s loss=%.6f n_anchors=%d blocks=%d microbatches=%d "
+                "G=%d mb=%d B=%d L=%d (per-step optimizer updates)",
                 Path(p).name,
                 chunk_loss_val,
                 n_anchors_in_file,
                 n_blocks,
+                n_micro,
+                g_use,
+                mb_use,
+                B,
+                L,
             )
         del H, rows
     return {
