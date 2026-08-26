@@ -349,25 +349,25 @@ def _prompt_token_lengths(
     return [len(ids) for ids in enc["input_ids"]]
 
 
-def _bucket_row_batches(
+def _store_row_groups(
     flat: List[Dict[str, Any]],
-    batch_size: int,
     default_gen: int,
     default_steps: int,
     *,
     tokenizer,
     model_path: str,
 ) -> List[List[Dict[str, Any]]]:
-    """Batch by gen_length, then eval.py prompt-length buckets (sorted within bucket)."""
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
+    """Rows grouped by gen_length, then eval.py prompt-length buckets (sorted by length).
+
+    Order does not depend on B; B only cuts inside each group.
+    """
     gen_groups: Dict[tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
     for row in flat:
         key = effective_gen_length_steps(
             _row_task_name(row), default_gen, default_steps
         )
         gen_groups[key].append(row)
-    out: List[List[Dict[str, Any]]] = []
+    groups: List[List[Dict[str, Any]]] = []
     for gen_key in sorted(gen_groups.keys(), reverse=True):
         rows = gen_groups[gen_key]
         lengths = _prompt_token_lengths(
@@ -381,10 +381,104 @@ def _bucket_row_batches(
         ):
             indices = by_bucket[bkey]
             indices.sort(key=lambda idx: lengths[idx])
-            for start in range(0, len(indices), batch_size):
-                chunk_idx = indices[start : start + batch_size]
-                out.append([rows[i] for i in chunk_idx])
+            groups.append([rows[i] for i in indices])
+    return groups
+
+
+def _cut_row_groups(
+    groups: List[List[Dict[str, Any]]], batch_size: int
+) -> List[List[Dict[str, Any]]]:
+    """Cut each length-bucket group into batches of at most ``batch_size``."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    out: List[List[Dict[str, Any]]] = []
+    for grp in groups:
+        for start in range(0, len(grp), batch_size):
+            out.append(grp[start : start + batch_size])
     return out
+
+
+def _bucket_row_batches(
+    flat: List[Dict[str, Any]],
+    batch_size: int,
+    default_gen: int,
+    default_steps: int,
+    *,
+    tokenizer,
+    model_path: str,
+) -> List[List[Dict[str, Any]]]:
+    """Batch by gen_length, then eval.py prompt-length buckets (sorted within bucket)."""
+    return _cut_row_groups(
+        _store_row_groups(
+            flat,
+            default_gen,
+            default_steps,
+            tokenizer=tokenizer,
+            model_path=model_path,
+        ),
+        batch_size,
+    )
+
+
+def _flatten_row_groups(groups: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    return [r for g in groups for r in g]
+
+
+def _consecutive_prefix_len(present: set[int]) -> int:
+    """Largest k such that {0,1,...,k-1} ⊆ present."""
+    k = 0
+    while k in present:
+        k += 1
+    return k
+
+
+def _fingerprint_batch_size(fp: Optional[Dict[str, Any]], scope: str) -> Optional[int]:
+    if not fp:
+        return None
+    key = (
+        "train_inference_batch_size"
+        if str(scope).strip().lower() == "train"
+        else "eval_inference_batch_size"
+    )
+    raw = fp.get(key)
+    if raw is None:
+        return None
+    try:
+        return max(int(raw), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _n_done_store_rows(
+    *,
+    prefix_len: int,
+    groups: List[List[Dict[str, Any]]],
+    present_chunks: List[Any],
+    fingerprint: Optional[Dict[str, Any]],
+    scope: str,
+) -> int:
+    """How many canonical-order rows Hub already holds (contiguous prefix of files).
+
+    Prefers each chunk's ``n_rows``. Files that predate that field are reconstructed
+    as the original fingerprint-B cut (those Hub indices must still match that cut).
+    """
+    if prefix_len <= 0:
+        return 0
+    by_idx = {int(c.batch_idx): c for c in present_chunks}
+    old_b = _fingerprint_batch_size(fingerprint, scope)
+    old_batches = _cut_row_groups(groups, old_b) if old_b is not None else []
+    n = 0
+    for i in range(prefix_len):
+        rec = by_idx.get(i)
+        n_rows = getattr(rec, "n_rows", None) if rec is not None else None
+        if n_rows is not None:
+            n += int(n_rows)
+        elif old_b is not None and i < len(old_batches):
+            n += len(old_batches[i])
+        else:
+            prog = fingerprint_progress(fingerprint)
+            return int(prog.get("cst_train_samples", 0) or 0)
+    return n
 
 
 def _log_store_batching(row_batches: List[List[Dict[str, Any]]], batch_size: int) -> None:
@@ -403,45 +497,6 @@ def _log_store_batching(row_batches: List[List[Dict[str, Any]]], batch_size: int
         mid,
         max(sizes),
     )
-
-
-def _peek_hub_inference_batch_size(
-    store_cfg: Any,
-    repo_id: str,
-    name_token: str,
-    *,
-    scope: str,
-) -> Optional[int]:
-    """Fingerprint B already on Hub, or None if this is a fresh folder."""
-    if not bool(store_cfg.get("resume", True)):
-        return None
-    try:
-        manifest = fetch_manifest(
-            repo_id,
-            name_token,
-            cache_dir=Path(str(store_cfg.get("hf_local_cache_dir", "outputs/cst_hf_cache"))),
-            revision=str(store_cfg.get("hf_hiddens_revision", "main")),
-            token=hf_token(store_cfg),
-            create_if_missing=True,
-        )
-    except Exception as e:
-        logger.info("store auto-batch: could not read Hub fingerprint (%s)", e)
-        return None
-    fp = manifest.sampling_fingerprint
-    if not fp:
-        return None
-    key = (
-        "train_inference_batch_size"
-        if str(scope).strip().lower() == "train"
-        else "eval_inference_batch_size"
-    )
-    raw = fp.get(key)
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
 
 
 def _worst_store_seq_stats(
@@ -485,7 +540,7 @@ def _choose_store_batch_size(
     name_token: str,
     scope: str,
 ) -> int:
-    """YAML cap, or lower from free disk/RAM/VRAM. Resume keeps the fingerprint B."""
+    """YAML cap, or lower from free disk/RAM/VRAM for this row set."""
     requested = max(int(yaml_bs), 1)
     raw_auto = store_cfg.get("auto_batch_size", True)
     if _is_blank(raw_auto):
@@ -496,15 +551,6 @@ def _choose_store_batch_size(
         auto = bool(raw_auto)
     if not auto:
         return requested
-    peeked = _peek_hub_inference_batch_size(
-        store_cfg, repo_id, name_token, scope=scope
-    )
-    if peeked is not None:
-        logger.info(
-            "store resume: using fingerprint batch size %d (auto-batch not recomputed)",
-            peeked,
-        )
-        return max(int(peeked), 1)
     packed, full, n_rec = _worst_store_seq_stats(
         rows, tokenizer, model_path, default_gen, default_steps
     )
@@ -539,7 +585,7 @@ def _choose_store_batch_size(
     if chosen != requested:
         logger.info(
             "store auto-batch: lowered inference_batch_size %d -> %d "
-            "(fingerprint will record %d; resume keeps that B)",
+            "(this run records B=%d; resume keeps uploaded files and re-batches the rest)",
             requested,
             chosen,
             chosen,
@@ -597,17 +643,20 @@ def _store_hiddens(
     scope: str,
     name_token: str,
     repo_id: str,
-    row_batches: List[List[Dict[str, Any]]],
+    rows: List[Dict[str, Any]],
+    tokenizer,
+    yaml_bs: int,
+    default_gen: int,
+    default_steps: int,
     sampling_state: Dict[str, Any],
     sched_m: str,
 ) -> int:
     """Collect each inference batch and upload that .pt to the Hub.
 
-    With ``store.resume=true`` (default), batches already on Hub are skipped
-    when the sampling fingerprint matches this run (same seed, sample count,
-    batch size, and generation settings). Skip uses the manifest *and* chunk
-    files under ``{name_token}/chunks/``, so a crash after the .pt commit but
-    before the manifest write does not re-upload that batch.
+    With ``store.resume=true`` (default), a contiguous prefix of Hub chunks is
+    kept. Remaining rows are auto-batched for *this* machine (B can change).
+    Holes in batch_idx fall back to the fingerprint B and skip-by-index.
+    Skip uses the manifest *and* ``{name_token}/chunks/*.pt``.
     """
     store_cfg = cfg.get("store") or OmegaConf.create({})
     device = torch.device(str(store_cfg.get("device", "cuda")))
@@ -618,17 +667,8 @@ def _store_hiddens(
     delete_local = bool(store_cfg.get("delete_local_after_hf_push", True))
     resume = bool(store_cfg.get("resume", True))
     model_path = _section_model_path(cfg, store_cfg)
-
-    nbat = len(row_batches)
-    logger.info(
-        "store %s hiddens -> %s (%s): %d batches (upload each batch)",
-        scope,
-        repo_id,
-        name_token,
-        nbat,
-    )
-    if nbat == 0:
-        raise RuntimeError(f"store.scope={scope}: no row batches to collect")
+    if not rows:
+        raise RuntimeError(f"store.scope={scope}: no rows to collect")
 
     hub_revision = str(store_cfg.get("hf_hiddens_revision", "main"))
     hub_tok = hf_token(store_cfg)
@@ -647,12 +687,25 @@ def _store_hiddens(
         else []
     )
     hub_idx = {int(c.batch_idx) for c in hub_chunks}
-    present_idx = stored_idx | hub_idx
+    present_idx = stored_idx | hub_idx if resume else set()
     skip: set[int] = set()
     total_question_tokens = 0
     total_gen_tokens = 0
     total_cst_train_tokens = 0
     total_samples = 0
+    start_idx = 0
+    groups = _store_row_groups(
+        rows,
+        default_gen,
+        default_steps,
+        tokenizer=tokenizer,
+        model_path=model_path,
+    )
+    flat_ordered = _flatten_row_groups(groups)
+    bs_key = (
+        "train_inference_batch_size" if scope == "train" else "eval_inference_batch_size"
+    )
+
     if present_idx and resume:
         if stored_idx or manifest.sampling_fingerprint:
             conflicts = fingerprint_conflicts(
@@ -664,8 +717,8 @@ def _store_hiddens(
                 raise RuntimeError(
                     f"store resume refused for {repo_id}/{name_token}: Hub data is not "
                     f"the same draw. Re-run with the original store.seed / store.samples / "
-                    f"store.inference_batch_size (and generation settings), use a new "
-                    f"store.name_token, or pass store.resume=false to overwrite. "
+                    f"generation settings, use a new store.name_token, or pass "
+                    f"store.resume=false to overwrite. "
                     + "; ".join(conflicts)
                 )
         else:
@@ -674,9 +727,15 @@ def _store_hiddens(
                 ".pt upload, before manifest); skipping re-upload",
                 len(hub_idx),
             )
-        skip = {i for i in present_idx if 0 <= i < nbat}
         hub_by_idx = {int(c.batch_idx): c for c in hub_chunks}
-        orphans = [hub_by_idx[i] for i in sorted(skip) if i not in stored_idx and i in hub_by_idx]
+        k = _consecutive_prefix_len(present_idx)
+        extras = sorted(i for i in present_idx if i >= k)
+        orig_fp_b = _fingerprint_batch_size(manifest.sampling_fingerprint, scope)
+        orphans = [
+            hub_by_idx[i]
+            for i in sorted(present_idx)
+            if i not in stored_idx and i in hub_by_idx
+        ]
         if orphans:
             for rec in orphans:
                 manifest.upsert_chunk(rec)
@@ -707,37 +766,159 @@ def _store_hiddens(
         total_gen_tokens = prog["cst_gen_tokens"]
         total_cst_train_tokens = prog["cst_train_tokens"]
         total_samples = prog["cst_train_samples"]
+        present_recs = list(manifest.all_chunks_sorted()) + [
+            c for c in hub_chunks if int(c.batch_idx) not in stored_idx
+        ]
+        if extras:
+            logger.warning(
+                "store resume: Hub chunk indices are not a prefix (kept 0..%d, extra %s); "
+                "filling holes with fingerprint B (not re-batching)",
+                k - 1,
+                extras,
+            )
+            inference_bs = (
+                int(orig_fp_b)
+                if orig_fp_b is not None
+                else _choose_store_batch_size(
+                    store_cfg,
+                    yaml_bs=yaml_bs,
+                    rows=rows,
+                    tokenizer=tokenizer,
+                    model_path=model_path,
+                    default_gen=default_gen,
+                    default_steps=default_steps,
+                    repo_id=repo_id,
+                    name_token=name_token,
+                    scope=scope,
+                )
+            )
+            row_batches = _cut_row_groups(groups, inference_bs)
+            skip = {i for i in present_idx if 0 <= i < len(row_batches)}
+            start_idx = 0
+        else:
+            n_done = _n_done_store_rows(
+                prefix_len=k,
+                groups=groups,
+                present_chunks=present_recs,
+                fingerprint=manifest.sampling_fingerprint,
+                scope=scope,
+            )
+            n_done = min(max(int(n_done), 0), len(flat_ordered))
+            remaining_rows = flat_ordered[n_done:]
+            total_samples = max(int(total_samples), n_done)
+            start_idx = k
+            skip = set()
+            if not remaining_rows:
+                inference_bs = int(orig_fp_b) if orig_fp_b is not None else max(int(yaml_bs), 1)
+                row_batches = []
+                logger.info(
+                    "store resume: keeping %d Hub file(s) (%d rows); nothing remaining",
+                    k,
+                    n_done,
+                )
+            else:
+                inference_bs = _choose_store_batch_size(
+                    store_cfg,
+                    yaml_bs=yaml_bs,
+                    rows=remaining_rows,
+                    tokenizer=tokenizer,
+                    model_path=model_path,
+                    default_gen=default_gen,
+                    default_steps=default_steps,
+                    repo_id=repo_id,
+                    name_token=name_token,
+                    scope=scope,
+                )
+                row_batches = _bucket_row_batches(
+                    remaining_rows,
+                    inference_bs,
+                    default_gen,
+                    default_steps,
+                    tokenizer=tokenizer,
+                    model_path=model_path,
+                )
+                logger.info(
+                    "store resume: keeping %d Hub file(s) (%d rows); "
+                    "auto-batch B=%d for %d remaining rows (%d new files, Hub index %d+)",
+                    k,
+                    n_done,
+                    inference_bs,
+                    len(remaining_rows),
+                    len(row_batches),
+                    start_idx,
+                )
+        # Keep the original cut B in the fingerprint so files without n_rows
+        # (older Hub chunks) still reconstruct. New files write n_rows.
+        sampling_state[bs_key] = (
+            int(orig_fp_b) if orig_fp_b is not None else int(inference_bs)
+        )
         sampling_state["cst_question_tokens"] = int(total_question_tokens)
         sampling_state["cst_gen_tokens"] = int(total_gen_tokens)
         sampling_state["cst_train_tokens"] = int(total_cst_train_tokens)
         sampling_state["cst_train_samples"] = int(total_samples)
-        extra = sorted(i for i in present_idx if i >= nbat)
-        if extra:
-            logger.warning(
-                "store resume: Hub has %d chunk(s) with batch_idx >= %d; leaving them in the manifest",
-                len(extra),
-                nbat,
-            )
-        logger.info(
-            "store resume: skipping %d / %d batches already on Hub; collecting %d remaining",
-            len(skip),
-            nbat,
-            nbat - len(skip),
-        )
     elif stored_idx and not resume:
+        inference_bs = _choose_store_batch_size(
+            store_cfg,
+            yaml_bs=yaml_bs,
+            rows=rows,
+            tokenizer=tokenizer,
+            model_path=model_path,
+            default_gen=default_gen,
+            default_steps=default_steps,
+            repo_id=repo_id,
+            name_token=name_token,
+            scope=scope,
+        )
+        row_batches = _cut_row_groups(groups, inference_bs)
+        sampling_state[bs_key] = int(inference_bs)
         logger.warning(
             "store.resume=false: Hub already has %d chunks for %s; re-collecting all %d batches",
             len(stored_idx),
             name_token,
-            nbat,
+            len(row_batches),
         )
+    else:
+        inference_bs = _choose_store_batch_size(
+            store_cfg,
+            yaml_bs=yaml_bs,
+            rows=rows,
+            tokenizer=tokenizer,
+            model_path=model_path,
+            default_gen=default_gen,
+            default_steps=default_steps,
+            repo_id=repo_id,
+            name_token=name_token,
+            scope=scope,
+        )
+        row_batches = _cut_row_groups(groups, inference_bs)
+        sampling_state[bs_key] = int(inference_bs)
 
-    remaining = [i for i in range(nbat) if i not in skip]
-    if not remaining:
+    _log_store_batching(row_batches, inference_bs)
+    nbat = start_idx + len(row_batches)
+    logger.info(
+        "store %s hiddens -> %s (%s): %d batches (upload each batch, start_idx=%d)",
+        scope,
+        repo_id,
+        name_token,
+        nbat,
+        start_idx,
+    )
+    if nbat == 0 or (start_idx >= nbat and not row_batches):
         logger.info(
-            "store resume: all %d batches already on Hub (%s / %s); nothing to collect | "
+            "store resume: all rows already on Hub (%s / %s); nothing to collect | "
             "samples=%d cst_train_tokens=%d (question=%d + gen=%d)",
-            nbat,
+            name_token,
+            repo_id,
+            total_samples,
+            total_cst_train_tokens,
+            total_question_tokens,
+            total_gen_tokens,
+        )
+        return 0
+    if not row_batches:
+        logger.info(
+            "store resume: all rows already on Hub (%s / %s); nothing to collect | "
+            "samples=%d cst_train_tokens=%d (question=%d + gen=%d)",
             name_token,
             repo_id,
             total_samples,
@@ -747,7 +928,7 @@ def _store_hiddens(
         )
         return 0
 
-    model, tokenizer = load_model_for_collect(
+    model, _tok = load_model_for_collect(
         model_path,
         device=str(device),
         compile_model=bool(store_cfg.get("compile_model", False)),
@@ -758,12 +939,13 @@ def _store_hiddens(
 
     ueh = _coerce_use_eos_harness(store_cfg.get("use_eos_harness", True))
     try:
-        for bi, rows in enumerate(row_batches):
+        for offset, batch_rows in enumerate(row_batches):
+            bi = start_idx + offset
             if bi in skip:
                 continue
             logger.info("=== collect batch %d / %d ===", bi + 1, nbat)
             b_gen, b_steps = _batch_gen_length_steps(
-                rows,
+                batch_rows,
                 int(store_cfg.get("gen_length", 512)),
                 int(store_cfg.get("steps", 512)),
             )
@@ -783,7 +965,7 @@ def _store_hiddens(
                     tokenizer,
                     model_path,
                     scratch,
-                    rows=rows,
+                    rows=batch_rows,
                     batch_idx=bi,
                     name_token=name_token,
                     device=str(device),
@@ -804,7 +986,7 @@ def _store_hiddens(
             b_q = int(meta.get("n_question_tokens", 0))
             b_g = int(meta.get("n_gen_tokens", 0))
             b_t = int(meta.get("cst_train_tokens", b_q + b_g))
-            b_n = int(meta.get("batch_size", len(rows)))
+            b_n = int(meta.get("batch_size", len(batch_rows)))
             nbytes = Path(out_path).stat().st_size
             try:
                 rec = upload_hidden_chunk(
@@ -826,6 +1008,7 @@ def _store_hiddens(
                     delete_local_after=delete_local,
                     scope=scope,
                     skip_if_exists=resume,
+                    n_rows=int(b_n),
                 )
             except (HubStorageFullError, DiskFullError) as e:
                 try:
@@ -868,7 +1051,6 @@ def _store_hiddens(
                 torch.cuda.empty_cache()
     finally:
         del model
-        del tokenizer
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -1080,37 +1262,19 @@ def store_train_hiddens(cfg: DictConfig) -> int:
 
     flat = sample_uniform(n_sp, seed=seed)
     tokenizer = load_tokenizer(model_path)
-    inference_bs = _choose_store_batch_size(
-        store_cfg,
-        yaml_bs=inference_bs,
-        rows=flat,
-        tokenizer=tokenizer,
-        model_path=model_path,
-        default_gen=yaml_g,
-        default_steps=yaml_s,
-        repo_id=hf_train_repo,
-        name_token=name_token,
-        scope="train",
-    )
     sampling_state = _sampling_state_from_store(
         store_cfg, n_samples=n_sp, inference_bs=inference_bs, sched_m=sched_m
     )
-    row_batches = _bucket_row_batches(
-        flat,
-        inference_bs,
-        yaml_g,
-        yaml_s,
-        tokenizer=tokenizer,
-        model_path=model_path,
-    )
-    _log_store_batching(row_batches, inference_bs)
-
     return _store_hiddens(
         cfg,
         scope="train",
         name_token=name_token,
         repo_id=hf_train_repo,
-        row_batches=row_batches,
+        rows=flat,
+        tokenizer=tokenizer,
+        yaml_bs=inference_bs,
+        default_gen=yaml_g,
+        default_steps=yaml_s,
         sampling_state=sampling_state,
         sched_m=sched_m,
     )
@@ -1196,28 +1360,6 @@ def _store_eval_one_task(
         seed=seed,
     )
     tokenizer = load_tokenizer(model_path)
-    inference_bs = _choose_store_batch_size(
-        store,
-        yaml_bs=inference_bs,
-        rows=rows,
-        tokenizer=tokenizer,
-        model_path=model_path,
-        default_gen=gen_length,
-        default_steps=steps,
-        repo_id=repo_id,
-        name_token=name_token,
-        scope="eval",
-    )
-    row_batches = _bucket_row_batches(
-        rows,
-        inference_bs,
-        yaml_g,
-        yaml_s,
-        tokenizer=tokenizer,
-        model_path=model_path,
-    )
-    _log_store_batching(row_batches, inference_bs)
-
     gen = _store_generation_fingerprint(
         store, sched_m, gen_length=gen_length, steps=steps
     )
@@ -1250,7 +1392,11 @@ def _store_eval_one_task(
         scope="eval",
         name_token=name_token,
         repo_id=repo_id,
-        row_batches=row_batches,
+        rows=rows,
+        tokenizer=tokenizer,
+        yaml_bs=inference_bs,
+        default_gen=gen_length,
+        default_steps=steps,
         sampling_state=sampling_state,
         sched_m=sched_m,
     )

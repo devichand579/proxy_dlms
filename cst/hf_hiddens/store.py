@@ -280,6 +280,7 @@ def upload_hidden_chunk(
     delete_local_after: bool = True,
     scope: str = "train",
     skip_if_exists: bool = False,
+    n_rows: Optional[int] = None,
 ) -> ChunkRecord:
     """Upload one hidden .pt and update the Hub manifest.
 
@@ -293,7 +294,12 @@ def upload_hidden_chunk(
     bi = parse_hidden_chunk_batch_idx(local_path.name)
     if bi is None:
         raise ValueError(f"chunk filename has no batch index: {local_path.name}")
-    rec = ChunkRecord(batch_idx=bi, filename=local_path.name, bytes=local_path.stat().st_size)
+    rec = ChunkRecord(
+        batch_idx=bi,
+        filename=local_path.name,
+        bytes=local_path.stat().st_size,
+        n_rows=int(n_rows) if n_rows is not None else None,
+    )
     if skip_if_exists and hub_chunk_exists(
         repo_id, name_token, rec.filename, revision=revision, token=token
     ):

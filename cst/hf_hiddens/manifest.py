@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence
 MANIFEST_VERSION = 2
 
 # Running totals written during store; ignored when checking whether a resume
-# is the same draw (seed / sample count / batching / generation settings).
+# is the same draw (seed / sample count / generation settings).
 FINGERPRINT_PROGRESS_KEYS = frozenset(
     {
         "cst_question_tokens",
@@ -22,17 +22,31 @@ FINGERPRINT_PROGRESS_KEYS = frozenset(
     }
 )
 
+# May change on resume (auto-batch on a different machine); not part of draw identity.
+FINGERPRINT_VOLATILE_KEYS = frozenset(
+    {
+        "train_inference_batch_size",
+        "eval_inference_batch_size",
+    }
+)
+
+
+def fingerprint_identity(fp: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Fingerprint fields that must match for store resume, excluding running totals and B."""
+    if not fp:
+        return {}
+    skip = FINGERPRINT_PROGRESS_KEYS | FINGERPRINT_VOLATILE_KEYS
+    return {k: v for k, v in fp.items() if k not in skip}
+
 STORE_TRAIN_FINGERPRINT_REQUIRED = (
     "train_seed",
     "train_samples_per_epoch",
-    "train_inference_batch_size",
     "train_bucket_by_gen_length",
     "train_bucket_by_prompt_length",
 )
 STORE_EVAL_FINGERPRINT_REQUIRED = (
     "eval_task",
     "eval_seed",
-    "eval_inference_batch_size",
     "eval_num_fewshot",
     "eval_limit",
     "eval_bucket_by_prompt_length",
@@ -60,13 +74,6 @@ def normalize_fingerprint_value(v: Any) -> Any:
     if isinstance(v, int):
         return int(v)
     return v
-
-
-def fingerprint_identity(fp: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Fingerprint fields that must match for store resume, excluding running totals."""
-    if not fp:
-        return {}
-    return {k: v for k, v in fp.items() if k not in FINGERPRINT_PROGRESS_KEYS}
 
 
 def fingerprint_progress(fp: Optional[Dict[str, Any]]) -> Dict[str, int]:
@@ -118,21 +125,27 @@ class ChunkRecord:
     batch_idx: int
     filename: str
     bytes: int
+    n_rows: Optional[int] = None
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ChunkRecord":
+        n_rows = d.get("n_rows")
         return cls(
             batch_idx=int(d["batch_idx"]),
             filename=str(d["filename"]),
             bytes=int(d["bytes"]),
+            n_rows=int(n_rows) if n_rows is not None else None,
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out = {
             "batch_idx": int(self.batch_idx),
             "filename": str(self.filename),
             "bytes": int(self.bytes),
         }
+        if self.n_rows is not None:
+            out["n_rows"] = int(self.n_rows)
+        return out
 
 
 def _chunks_from_legacy_segments(d: Dict[str, Any]) -> tuple[List[ChunkRecord], Optional[Dict[str, Any]]]:
