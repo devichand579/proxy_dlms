@@ -386,26 +386,59 @@ def _store_row_groups(
 
 
 def _cut_row_groups(
-    groups: List[List[Dict[str, Any]]], batch_size: int
+    groups: List[List[Dict[str, Any]]],
+    batch_size: Optional[int] = None,
+    *,
+    store_cfg: Any = None,
+    yaml_bs: int = 1,
+    tokenizer=None,
+    model_path: str = "",
+    default_gen: int = 0,
+    default_steps: int = 0,
+    repo_id: str = "",
+    name_token: str = "",
+    scope: str = "",
 ) -> List[List[Dict[str, Any]]]:
-    """Cut each length-bucket group into batches of at most ``batch_size``."""
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
+    """Cut each length-bucket group into batches. If batch_size is None, dynamically compute per bucket."""
     out: List[List[Dict[str, Any]]] = []
     for grp in groups:
-        for start in range(0, len(grp), batch_size):
-            out.append(grp[start : start + batch_size])
+        if not grp:
+            continue
+        b_cap = batch_size
+        if b_cap is None:
+            b_cap = _choose_store_batch_size(
+                store_cfg,
+                yaml_bs=yaml_bs,
+                rows=grp,
+                tokenizer=tokenizer,
+                model_path=model_path,
+                default_gen=default_gen,
+                default_steps=default_steps,
+                repo_id=repo_id,
+                name_token=name_token,
+                scope=scope,
+                silent=True,
+            )
+        if b_cap <= 0:
+            raise ValueError("batch_size must be positive")
+        for start in range(0, len(grp), b_cap):
+            out.append(grp[start : start + b_cap])
     return out
 
 
 def _bucket_row_batches(
     flat: List[Dict[str, Any]],
-    batch_size: int,
+    batch_size: Optional[int],
     default_gen: int,
     default_steps: int,
     *,
     tokenizer,
     model_path: str,
+    store_cfg: Any = None,
+    yaml_bs: int = 1,
+    repo_id: str = "",
+    name_token: str = "",
+    scope: str = "",
 ) -> List[List[Dict[str, Any]]]:
     """Batch by gen_length, then eval.py prompt-length buckets (sorted within bucket)."""
     return _cut_row_groups(
@@ -417,6 +450,15 @@ def _bucket_row_batches(
             model_path=model_path,
         ),
         batch_size,
+        store_cfg=store_cfg,
+        yaml_bs=yaml_bs,
+        tokenizer=tokenizer,
+        model_path=model_path,
+        default_gen=default_gen,
+        default_steps=default_steps,
+        repo_id=repo_id,
+        name_token=name_token,
+        scope=scope,
     )
 
 
@@ -539,6 +581,7 @@ def _choose_store_batch_size(
     repo_id: str,
     name_token: str,
     scope: str,
+    silent: bool = False,
 ) -> int:
     """YAML cap, or lower from free disk/RAM/VRAM for this row set."""
     requested = max(int(yaml_bs), 1)
@@ -581,15 +624,17 @@ def _choose_store_batch_size(
         max_chunk_gb=max_chunk_gb,
         model_bytes=model_weight_bytes(model_path),
         device=str(store_cfg.get("device", "cuda")),
+        silent=silent,
     )
     if chosen != requested:
-        logger.info(
-            "store auto-batch: lowered inference_batch_size %d -> %d "
-            "(this run records B=%d; resume keeps uploaded files and re-batches the rest)",
-            requested,
-            chosen,
-            chosen,
-        )
+        if not silent:
+            logger.info(
+                "store auto-batch: lowered inference_batch_size %d -> %d "
+                "(this run records B=%d; resume keeps uploaded files and re-batches the rest)",
+                requested,
+                chosen,
+                chosen,
+            )
     return chosen
 
 
@@ -817,32 +862,25 @@ def _store_hiddens(
                     n_done,
                 )
             else:
-                inference_bs = _choose_store_batch_size(
-                    store_cfg,
-                    yaml_bs=yaml_bs,
-                    rows=remaining_rows,
-                    tokenizer=tokenizer,
-                    model_path=model_path,
-                    default_gen=default_gen,
-                    default_steps=default_steps,
-                    repo_id=repo_id,
-                    name_token=name_token,
-                    scope=scope,
-                )
                 row_batches = _bucket_row_batches(
                     remaining_rows,
-                    inference_bs,
+                    None,
                     default_gen,
                     default_steps,
                     tokenizer=tokenizer,
                     model_path=model_path,
+                    store_cfg=store_cfg,
+                    yaml_bs=yaml_bs,
+                    repo_id=repo_id,
+                    name_token=name_token,
+                    scope=scope,
                 )
+                inference_bs = max(int(yaml_bs), 1)
                 logger.info(
                     "store resume: keeping %d Hub file(s) (%d rows); "
-                    "auto-batch B=%d for %d remaining rows (%d new files, Hub index %d+)",
+                    "dynamic auto-batch for %d remaining rows (%d new files, Hub index %d+)",
                     k,
                     n_done,
-                    inference_bs,
                     len(remaining_rows),
                     len(row_batches),
                     start_idx,
@@ -857,19 +895,20 @@ def _store_hiddens(
         sampling_state["cst_train_tokens"] = int(total_cst_train_tokens)
         sampling_state["cst_train_samples"] = int(total_samples)
     elif stored_idx and not resume:
-        inference_bs = _choose_store_batch_size(
-            store_cfg,
-            yaml_bs=yaml_bs,
-            rows=rows,
+        row_batches = _bucket_row_batches(
+            rows,
+            None,
+            default_gen,
+            default_steps,
             tokenizer=tokenizer,
             model_path=model_path,
-            default_gen=default_gen,
-            default_steps=default_steps,
+            store_cfg=store_cfg,
+            yaml_bs=yaml_bs,
             repo_id=repo_id,
             name_token=name_token,
             scope=scope,
         )
-        row_batches = _cut_row_groups(groups, inference_bs)
+        inference_bs = max(int(yaml_bs), 1)
         sampling_state[bs_key] = int(inference_bs)
         logger.warning(
             "store.resume=false: Hub already has %d chunks for %s; re-collecting all %d batches",
@@ -878,19 +917,20 @@ def _store_hiddens(
             len(row_batches),
         )
     else:
-        inference_bs = _choose_store_batch_size(
-            store_cfg,
-            yaml_bs=yaml_bs,
-            rows=rows,
+        row_batches = _bucket_row_batches(
+            rows,
+            None,
+            default_gen,
+            default_steps,
             tokenizer=tokenizer,
             model_path=model_path,
-            default_gen=default_gen,
-            default_steps=default_steps,
+            store_cfg=store_cfg,
+            yaml_bs=yaml_bs,
             repo_id=repo_id,
             name_token=name_token,
             scope=scope,
         )
-        row_batches = _cut_row_groups(groups, inference_bs)
+        inference_bs = max(int(yaml_bs), 1)
         sampling_state[bs_key] = int(inference_bs)
 
     _log_store_batching(row_batches, inference_bs)
@@ -1243,11 +1283,11 @@ def store_train_hiddens(cfg: DictConfig) -> int:
     store_cfg = cfg.get("store") or OmegaConf.create({})
 
     sp_cfg = store_cfg.get("samples")
-    if _is_blank(sp_cfg):
-        raise ValueError("store.samples must be set")
-    n_sp = int(sp_cfg)
-    if n_sp < 1:
-        raise ValueError("store.samples must be >= 1")
+    n_sp: Optional[int] = None
+    if not _is_blank(sp_cfg):
+        n_sp = int(sp_cfg)
+        if n_sp < 1:
+            raise ValueError("store.samples must be >= 1 when set")
 
     inference_bs = int(store_cfg.inference_batch_size)
     seed = int(store_cfg.get("seed", 0))
@@ -1263,7 +1303,10 @@ def store_train_hiddens(cfg: DictConfig) -> int:
     flat = sample_uniform(n_sp, seed=seed)
     tokenizer = load_tokenizer(model_path)
     sampling_state = _sampling_state_from_store(
-        store_cfg, n_samples=n_sp, inference_bs=inference_bs, sched_m=sched_m
+        store_cfg,
+        n_samples=n_sp if n_sp is not None else len(flat),
+        inference_bs=inference_bs,
+        sched_m=sched_m,
     )
     return _store_hiddens(
         cfg,

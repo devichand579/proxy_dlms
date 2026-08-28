@@ -57,7 +57,7 @@ store:
   max_chunk_gb: null        # optional cap on one .pt; null = only free disk/RAM/VRAM
   cpu_headroom_gb: 16
   vram_headroom_gb: 8
-  samples: null
+  samples: null         # null = all rows (train: whole mixed pool; eval: no limit)
   seed: 0
   # Re-run the same store job after a crash: skip Hub chunks already in the
   # manifest *or* already uploaded as .pt (even if the manifest write failed)

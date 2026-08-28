@@ -160,6 +160,9 @@ conda activate strace
 export PATH="$CONDA_PREFIX/bin:$PATH"
 
 export TOKENIZERS_PARALLELISM=false
+export HF_XET_HIGH_PERFORMANCE=1
+export HF_TRUST_CODE=1
+export HF_ALLOW_CODE_EVAL=1
 export HF_HUB_DISABLE_PROGRESS_BARS="${HF_HUB_DISABLE_PROGRESS_BARS:-1}"
 # Streaming the bank between host and device allocates and frees large blocks
 # every chunk; expandable segments keep the caching allocator from fragmenting.
