@@ -6,7 +6,7 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
@@ -26,6 +26,39 @@ logger = logging.getLogger("cst.train")
 CKPT_LATEST = "cst_latest"
 CKPT_BEST = "cst_best"
 TRAIN_STATE_JSON = "cst_train_state.json"
+
+# Extra VRAM headroom (GB) added on top of train.vram_headroom_gb for the
+# lazy-bank per-file dynamic sizing path. See train_on_chunk_files.
+#
+# Empirically measured live (2026-08-28): activation_bytes()'s "need" estimate
+# undershoots the real peak (torch.cuda.max_memory_allocated() for the whole
+# file) by a consistent ~78GB gap, fairly stable across different sequence
+# lengths (need=121.6GB vs peak=199.6GB at L=560; need=130.9GB vs a crash at
+# ~200GB+ at L=606) — i.e. roughly a fixed omission (plausibly activation-
+# checkpoint recomputation overhead in decoder_sparsity_penalty, which the
+# formula's fudge factor doesn't model), not something that scales with G or
+# L the way the rest of the formula assumes. 16GB wasn't enough margin and
+# led to a real OOM on the 4th file of a real run. Sized to absorb that gap
+# with room to spare; choose_chunk_compute's own search then naturally picks
+# a smaller G for large-B/L files (and a bigger one for small-B/L files)
+# against the corrected budget — this is what actually makes the per-file
+# sizing self-adjusting, not a hardcoded G.
+_LAZY_EXTRA_HEADROOM_GB = 90.0
+
+# Free cached-but-unused CUDA/HIP allocator blocks every N lazy-bank blocks.
+# expandable_segments is unsupported on this ROCm build (confirmed via the
+# startup warning), so the allocator can only satisfy a differently-shaped
+# window tensor by finding an exactly-sized free block; after enough
+# alloc/free churn from varied per-block tensor shapes, free space fragments
+# and the allocator can stall for many minutes searching for one (observed
+# live: a plain non_blocking .to(device) call hung with zero page faults,
+# zero disk I/O, and zero GPU utilization for 10+ minutes at ~50% VRAM used).
+_LAZY_EMPTY_CACHE_EVERY = 4
+
+# How often (in blocks) to log lazy-bank progress. Sizing is now computed
+# once per file (see the per-file preamble above), so there's no other
+# recurring log line during a file's block loop otherwise.
+_LAZY_PROGRESS_LOG_EVERY = 5
 
 # Keys in training checkpoint ``meta`` (full-run resume at batch boundaries + W&B)
 META_DATA_NEXT_EPOCH = "data_next_epoch"
@@ -238,7 +271,16 @@ def save_train_checkpoints(
     if not math.isfinite(best_prev):
         best_prev = float("inf")
 
-    updated_best = bool(math.isfinite(loss_mean) and (loss_mean < best_prev - 1e-12))
+    # A lazy bank only ever holds currently-live (not-yet-evicted) steps in
+    # memory; already-flushed steps only exist in `latest_n` (written
+    # incrementally by flush_and_evict_step). A `best_n` snapshot taken here
+    # would silently miss every already-evicted step, so skip "best" tracking
+    # entirely for lazy runs — `latest_n` is the only checkpoint that's ever
+    # complete-by-run-end, and it's what resume already uses.
+    is_lazy = bool(getattr(cst_bank, "lazy", False))
+    updated_best = bool(
+        not is_lazy and math.isfinite(loss_mean) and (loss_mean < best_prev - 1e-12)
+    )
     if updated_best:
         best_meta = dict(meta)
         best_meta["is_best"] = True
@@ -322,9 +364,18 @@ class _DeviceRows:
         hi = min(int(hi), self._H.shape[0] - 1)
         self._lo = lo
         b1_i = int(self._H.shape[1]) if b1 is None else int(b1)
-        self._buf = self._H[lo : hi + 1, int(b0) : b1_i].to(
-            self._device, non_blocking=True
-        )
+        cpu_slice = self._H[lo : hi + 1, int(b0) : b1_i]
+        if self._device.type == "cuda":
+            # `cpu_slice` is a view into a memory-mapped (pageable) host
+            # tensor. Transferring straight from pageable memory routed
+            # through this ROCm build's SVM/HMM unified-memory path, which
+            # was observed live to stall the whole process indefinitely
+            # (amdgpu's svm_range_restore_work kernel workqueue hogging CPU,
+            # confirmed via dmesg, with zero GPU/page-fault/IO activity from
+            # the process itself). Staging through pinned memory first uses
+            # the ordinary DMA path instead.
+            cpu_slice = cpu_slice.pin_memory()
+        self._buf = cpu_slice.to(self._device, non_blocking=True)
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         if self._buf is None:
@@ -358,6 +409,9 @@ def train_on_chunk_files(
     residency: Optional[CSTResidency] = None,
     memory_plan: Optional[TrainMemoryPlan] = None,
     prefetch_block: bool = True,
+    lazy_bank: bool = False,
+    on_step_closed: Optional[Callable[[List[int]], None]] = None,
+    on_step_created: Optional[Callable[[int, Any], None]] = None,
 ) -> Dict[str, Any]:
     """Train on each hidden file in blocks of consecutive anchors.
 
@@ -368,6 +422,17 @@ def train_on_chunk_files(
 
     When ``memory_plan`` is set, G and microbatch are chosen from free VRAM for
     each file's ``[T,B,L,D]``. YAML caps on the plan still apply.
+
+    ``lazy_bank=True`` (requires ``cst_bank.lazy`` and ``residency=None``) uses
+    a different, dynamic per-block sizing path: instead of a single G chosen
+    once per file, ``choose_chunk_compute`` is re-run before *every* block from
+    live free VRAM (steps evicted by earlier blocks free real memory, so later
+    blocks can grow). Each step is created on first touch and, when
+    ``on_step_closed`` is given, handed to it (as the list of just-closed step
+    indices) instead of being released back to host — the callback is expected
+    to flush the step's final weights and delete it forever (see
+    :func:`flush_and_evict_step`). This branch leaves the existing
+    (``lazy_bank=False``) fixed-block/residency path completely unchanged.
 
     Returns loss stats and ``per_chunk``.
     """
@@ -405,6 +470,14 @@ def train_on_chunk_files(
         L = int(H.shape[2])
         g_use = max(int(anchor_block), 1)
         mb_use = min(B, max(int(microbatch_rows), 1)) if microbatch_rows else B
+        if lazy_bank and torch.cuda.is_available() and str(device).startswith("cuda"):
+            # torch.cuda.mem_get_info() reports driver-level free memory,
+            # which doesn't reflect PyTorch's own cached-but-unused blocks
+            # from the steps evicted at the end of the *previous* file until
+            # they're explicitly released — observed live: a file right
+            # after a big eviction saw "free VRAM" read as ~46GB while actual
+            # usage was ~5GB, tripping the G=1 fallback for no real reason.
+            torch.cuda.empty_cache()
         if memory_plan is not None:
             g_use, mb_use = choose_chunk_compute(
                 batch=B,
@@ -416,9 +489,17 @@ def train_on_chunk_files(
                 device=device,
                 cap_anchor_block=memory_plan.cap_anchor_block,
                 cap_microbatch=memory_plan.cap_microbatch,
-                prefetch_block=bool(prefetch_block and residency is not None),
-                vram_headroom_gb=float(memory_plan.vram_headroom_gb),
+                prefetch_block=bool(prefetch_block and residency is not None and not lazy_bank),
+                vram_headroom_gb=(
+                    float(memory_plan.vram_headroom_gb) + _LAZY_EXTRA_HEADROOM_GB
+                    if lazy_bank
+                    else float(memory_plan.vram_headroom_gb)
+                ),
             )
+            if lazy_bank:
+                # One anchor below the estimate as a further safety margin
+                # against the fudge-factor formula's edge cases.
+                g_use = max(int(g_use) - 1, 1)
         mb_use = max(min(int(mb_use), B), 1)
         g_use = max(int(g_use), 1)
 
@@ -428,96 +509,200 @@ def train_on_chunk_files(
         optimizer.zero_grad(set_to_none=True)
 
         anchors_all = iter_anchors(n_frames, w)
-        blocks: List[List[int]] = [
-            anchors_all[i : i + g_use] for i in range(0, len(anchors_all), g_use)
-        ]
         chunk_loss_val = 0.0
         n_anchors_in_file = 0
         n_blocks = 0
         n_micro = 0
         stepped: set[int] = set()
+        # Anchor-weighted nmse (normalized reconstruction error) across the
+        # whole file — a comparable convergence signal across files of
+        # different B/L, unlike the raw loss sum.
+        nmse_weighted_sum = 0.0
+        n_nmse_terms = 0
 
-        for bi, block in enumerate(blocks):
-            nxt = blocks[bi + 1] if bi + 1 < len(blocks) else None
-            need = steps_for_anchors(block, w)
-            need_next = steps_for_anchors(nxt, w) if nxt else []
-            n_blocks += 1
-            if residency is not None:
-                residency.ensure(need)
-                if prefetch_block and need_next:
-                    if copy_stream is not None:
-                        with torch.cuda.stream(copy_stream):
-                            residency.ensure(need_next)
-                    else:
-                        residency.ensure(need_next)
+        if lazy_bank:
+            # Fixed block size for the whole file (computed once above, from
+            # live free VRAM at file start — still fully dynamic, just not
+            # re-picked every block). Keeping window-tensor shapes constant
+            # across blocks avoids the alloc/free churn that was driving the
+            # HIP allocator into pathological fragmentation/stalls when G was
+            # re-maximized every single block (observed live: multi-minute
+            # hangs with zero GPU/IO activity, consistent with the allocator
+            # or HIP runtime spinning on a fragmented free list). Evictions
+            # still free real memory — the benefit shows up as bigger G on
+            # the *next* file's fresh sizing, not intra-file churn.
+            idx = 0
+            while idx < len(anchors_all):
+                block = anchors_all[idx : idx + g_use]
+                idx += len(block)
+                need = steps_for_anchors(block, w)
+                n_blocks += 1
+                for t in need:
+                    if not cst_bank.has(t):
+                        mod = cst_bank.get_or_create(t, device)
+                        if on_step_created is not None:
+                            on_step_created(t, mod)
+                        optimizer.param_groups[0]["params"].extend(mod.parameters())
 
-            lo = block[0] - w + 1
-            hi = block[-1]
-            for b0 in range(0, B, mb_use):
-                b1 = min(B, b0 + mb_use)
-                h_wins = [
-                    stack_h_window(H, a, w, b0=b0, b1=b1, device=device) for a in block
+                lo = block[0] - w + 1
+                hi = block[-1]
+                for b0 in range(0, B, mb_use):
+                    b1 = min(B, b0 + mb_use)
+                    h_wins = [
+                        stack_h_window(H, a, w, b0=b0, b1=b1, device=device) for a in block
+                    ]
+                    rows.prepare(lo, hi, b0=b0, b1=b1)
+                    loss, m = windowed_cst_loss_block(
+                        cst_bank,
+                        block,
+                        h_wins,
+                        rows,
+                        lambda_sparsity=lambda_sparsity,
+                        c_tanh=c_tanh,
+                        lambda_ramp=lam,
+                        lambda_pre_dead=lambda_pre_dead,
+                    )
+                    if loss.requires_grad and loss.numel() > 0:
+                        loss.backward()
+                    total_loss += float(m.get("loss", 0.0))
+                    chunk_loss_val += float(m.get("loss", 0.0))
+                    nmse_weighted_sum += float(m.get("nmse", 0.0)) * len(block)
+                    n_nmse_terms += len(block)
+                    n_micro += 1
+                    del loss, h_wins
+
+                n_items += len(block)
+                n_anchors_in_file += len(block)
+
+                last_anchor = block[-1]
+                closed = [
+                    s
+                    for s in need
+                    if s <= last_anchor - w + 1 and s not in stepped
                 ]
-                rows.prepare(lo, hi, b0=b0, b1=b1)
-                loss, m = windowed_cst_loss_block(
-                    cst_bank,
-                    block,
-                    h_wins,
-                    rows,
-                    lambda_sparsity=lambda_sparsity,
-                    c_tanh=c_tanh,
-                    lambda_ramp=lam,
-                    lambda_pre_dead=lambda_pre_dead,
-                )
-                if loss.requires_grad and loss.numel() > 0:
-                    loss.backward()
-                total_loss += float(m.get("loss", 0.0))
-                chunk_loss_val += float(m.get("loss", 0.0))
-                n_micro += 1
-                del loss, h_wins
+                if closed:
+                    _step_subset(optimizer, cst_bank, closed)
+                    stepped.update(closed)
+                    if on_step_closed is not None:
+                        on_step_closed(closed)
 
-            n_items += len(block)
-            n_anchors_in_file += len(block)
+                if n_blocks % _LAZY_PROGRESS_LOG_EVERY == 0:
+                    logger.info(
+                        "lazy_bank progress: block=%d anchors=%d/%d steps_closed=%d G=%d "
+                        "block_loss=%.4f nmse=%.4f",
+                        n_blocks,
+                        idx,
+                        len(anchors_all),
+                        len(stepped),
+                        g_use,
+                        float(m.get("loss", 0.0)),
+                        float(m.get("nmse", 0.0)),
+                    )
 
-            last_anchor = block[-1]
-            keep_next = set(need_next)
-            closed = [
-                s
-                for s in need
-                if s <= last_anchor - w + 1 and s not in stepped
+                if (
+                    n_blocks % _LAZY_EMPTY_CACHE_EVERY == 0
+                    and torch.cuda.is_available()
+                    and str(device).startswith("cuda")
+                ):
+                    torch.cuda.empty_cache()
+
+            trailing = [s for s in steps_for_anchors(anchors_all, w) if s not in stepped]
+            if trailing:
+                _step_subset(optimizer, cst_bank, trailing)
+                stepped.update(trailing)
+                if on_step_closed is not None:
+                    on_step_closed(trailing)
+        else:
+            blocks: List[List[int]] = [
+                anchors_all[i : i + g_use] for i in range(0, len(anchors_all), g_use)
             ]
-            if closed:
-                _step_subset(optimizer, cst_bank, closed)
-                stepped.update(closed)
-                if residency is not None:
-                    for s in closed:
-                        if s not in keep_next:
-                            residency.release(s)
-            if copy_stream is not None and need_next:
-                copy_stream.synchronize()
 
-        trailing = [s for s in steps_for_anchors(anchors_all, w) if s not in stepped]
-        if trailing:
-            _step_subset(optimizer, cst_bank, trailing)
-            if residency is not None:
-                for s in trailing:
-                    residency.release(s)
+            for bi, block in enumerate(blocks):
+                nxt = blocks[bi + 1] if bi + 1 < len(blocks) else None
+                need = steps_for_anchors(block, w)
+                need_next = steps_for_anchors(nxt, w) if nxt else []
+                n_blocks += 1
+                if residency is not None:
+                    residency.ensure(need)
+                    if prefetch_block and need_next:
+                        if copy_stream is not None:
+                            with torch.cuda.stream(copy_stream):
+                                residency.ensure(need_next)
+                        else:
+                            residency.ensure(need_next)
+
+                lo = block[0] - w + 1
+                hi = block[-1]
+                for b0 in range(0, B, mb_use):
+                    b1 = min(B, b0 + mb_use)
+                    h_wins = [
+                        stack_h_window(H, a, w, b0=b0, b1=b1, device=device) for a in block
+                    ]
+                    rows.prepare(lo, hi, b0=b0, b1=b1)
+                    loss, m = windowed_cst_loss_block(
+                        cst_bank,
+                        block,
+                        h_wins,
+                        rows,
+                        lambda_sparsity=lambda_sparsity,
+                        c_tanh=c_tanh,
+                        lambda_ramp=lam,
+                        lambda_pre_dead=lambda_pre_dead,
+                    )
+                    if loss.requires_grad and loss.numel() > 0:
+                        loss.backward()
+                    total_loss += float(m.get("loss", 0.0))
+                    chunk_loss_val += float(m.get("loss", 0.0))
+                    nmse_weighted_sum += float(m.get("nmse", 0.0)) * len(block)
+                    n_nmse_terms += len(block)
+                    n_micro += 1
+                    del loss, h_wins
+
+                n_items += len(block)
+                n_anchors_in_file += len(block)
+
+                last_anchor = block[-1]
+                keep_next = set(need_next)
+                closed = [
+                    s
+                    for s in need
+                    if s <= last_anchor - w + 1 and s not in stepped
+                ]
+                if closed:
+                    _step_subset(optimizer, cst_bank, closed)
+                    stepped.update(closed)
+                    if residency is not None:
+                        for s in closed:
+                            if s not in keep_next:
+                                residency.release(s)
+                if copy_stream is not None and need_next:
+                    copy_stream.synchronize()
+
+            trailing = [s for s in steps_for_anchors(anchors_all, w) if s not in stepped]
+            if trailing:
+                _step_subset(optimizer, cst_bank, trailing)
+                if residency is not None:
+                    for s in trailing:
+                        residency.release(s)
 
         optimizer.zero_grad(set_to_none=True)
         if n_anchors_in_file:
             p_str = str(p)
+            chunk_nmse = nmse_weighted_sum / n_nmse_terms if n_nmse_terms else 0.0
             per_chunk.append(
                 {
                     "path": p_str,
                     "loss": chunk_loss_val,
                     "n_anchors": n_anchors_in_file,
+                    "nmse": chunk_nmse,
                 }
             )
             logger.info(
-                "train chunk %s loss=%.6f n_anchors=%d blocks=%d microbatches=%d "
+                "train chunk %s loss=%.6f nmse=%.6f n_anchors=%d blocks=%d microbatches=%d "
                 "G=%d mb=%d B=%d L=%d (per-step optimizer updates)",
                 Path(p).name,
                 chunk_loss_val,
+                chunk_nmse,
                 n_anchors_in_file,
                 n_blocks,
                 n_micro,
@@ -592,6 +777,89 @@ def _load_cst_opt_state(
                 st[key] = buf.to(prm.device)
 
 
+def load_shard_if_exists(
+    ckpt_dir: str | Path,
+    t: int,
+    mod: torch.nn.Module,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+) -> bool:
+    """Lazy-bank only: if step ``t`` was already trained (and flushed) by an
+    earlier file in this run, load its weights (and optimizer moments, if
+    present) into the freshly-created ``mod`` instead of leaving it at random
+    init.
+
+    Without this, ``get_or_create`` has no way to know a step was already
+    trained — each file would silently discard every prior file's learning
+    for that step and start over from scratch, defeating the entire point of
+    training across multiple chunk files. Returns whether a shard was found.
+    """
+    shard_path = Path(ckpt_dir) / CKPT_SHARD_FMT.format(t)
+    if not shard_path.is_file():
+        return False
+    shard = torch.load(shard_path, map_location="cpu", weights_only=False)
+    mod.load_state_dict(map_float_tensors(shard["cst"], to_storage=False))
+    if optimizer is not None and "optimizer" in shard:
+        _load_cst_opt_state(optimizer, mod, shard["optimizer"])
+    return True
+
+
+def _save_one_shard(
+    path: Path,
+    t: int,
+    mod: torch.nn.Module,
+    optimizer: Optional[torch.optim.Optimizer],
+    save_optimizer_state: bool,
+) -> None:
+    """Write one step's shard file. Shared by the full-bank dump and the
+    lazy-bank incremental flush-on-evict path."""
+    shard: Dict[str, Any] = {
+        "cst": map_float_tensors(
+            {k: v.detach().to("cpu", copy=True) for k, v in mod.state_dict().items()},
+            to_storage=True,
+        )
+    }
+    if save_optimizer_state and optimizer is not None:
+        shard["optimizer"] = _cst_opt_state(optimizer, mod)
+    torch.save(shard, path / CKPT_SHARD_FMT.format(t))
+
+
+def flush_and_evict_step(
+    ckpt_dir: str | Path,
+    t: int,
+    cst_bank: CSTBank,
+    optimizer: torch.optim.Optimizer,
+    *,
+    save_optimizer_state: bool = False,
+) -> None:
+    """Lazy-bank only: write step ``t``'s final shard, then delete it for good.
+
+    Called the moment ``t``'s sliding window has closed (no future anchor this
+    epoch will touch it again). Writes into the same directory
+    :func:`save_train_checkpoints` writes into, so periodic ``meta.json``
+    refreshes remain the completion marker; shards are addressed by step
+    index, not enumerated from ``meta.json``, so staleness between refreshes
+    is harmless.
+    """
+    ckpt_dir = Path(ckpt_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    mod = cst_bank.get(t)
+    _save_one_shard(ckpt_dir, t, mod, optimizer, save_optimizer_state)
+    params = list(mod.parameters())
+    cst_bank.evict(t)
+    drop_state = getattr(optimizer, "drop_state", None)
+    if drop_state is not None:
+        drop_state(params)
+    else:
+        for p in params:
+            optimizer.state.pop(p, None)
+    # Also drop the params from param_groups itself — otherwise the optimizer
+    # keeps them referenced forever and the tensors (and their storage) are
+    # never actually freed, defeating the point of eviction.
+    wanted = {id(p) for p in params}
+    for g in optimizer.param_groups:
+        g["params"] = [p for p in g["params"] if id(p) not in wanted]
+
+
 def save_cst_checkpoint(
     path: str | Path,
     *,
@@ -613,6 +881,11 @@ def save_cst_checkpoint(
 
     ``save_optimizer_state`` defaults off: resuming then restores weights but
     restarts the Adam moments.
+
+    For a lazy bank (``cst_bank.lazy``), steps already flushed-and-evicted by
+    :func:`flush_and_evict_step` are skipped here — their shard on disk is
+    already final and must not be touched; only currently-live steps are
+    (re)written.
     """
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
@@ -621,16 +894,10 @@ def save_cst_checkpoint(
         stale.unlink()
 
     for t in range(1, cst_bank.max_steps + 1):
+        if not cst_bank.has(t):
+            continue
         mod = cst_bank.get(t)
-        shard: Dict[str, Any] = {
-            "cst": map_float_tensors(
-                {k: v.detach().to("cpu", copy=True) for k, v in mod.state_dict().items()},
-                to_storage=True,
-            )
-        }
-        if save_optimizer_state:
-            shard["optimizer"] = _cst_opt_state(optimizer, mod)
-        torch.save(shard, path / CKPT_SHARD_FMT.format(t))
+        _save_one_shard(path, t, mod, optimizer, save_optimizer_state)
 
     doc = {
         "format_version": CKPT_FORMAT_VERSION,
@@ -651,26 +918,29 @@ def _load_sharded(
     cst_bank: CSTBank,
     optimizer: Optional[torch.optim.Optimizer],
     ramp: Optional[LambdaRamp],
+    *,
+    meta_only: bool = False,
 ) -> Dict[str, Any]:
     doc = json.loads((path / CKPT_META_JSON).read_text())
-    saved_steps = int(doc.get("max_steps", cst_bank.max_steps))
-    if saved_steps != cst_bank.max_steps:
-        logger.warning(
-            "checkpoint has %d steps, bank has %d; loading the overlap only",
-            saved_steps,
-            cst_bank.max_steps,
-        )
-    want_opt = optimizer is not None and bool(doc.get("has_optimizer_state"))
-    for t in range(1, min(saved_steps, cst_bank.max_steps) + 1):
-        shard_path = path / CKPT_SHARD_FMT.format(t)
-        if not shard_path.is_file():
-            logger.warning("missing checkpoint shard %s; leaving step %d at init", shard_path, t)
-            continue
-        shard = torch.load(shard_path, map_location="cpu", weights_only=False)
-        mod = cst_bank.get(t)
-        mod.load_state_dict(map_float_tensors(shard["cst"], to_storage=False))
-        if want_opt and "optimizer" in shard:
-            _load_cst_opt_state(optimizer, mod, shard["optimizer"])
+    if not meta_only:
+        saved_steps = int(doc.get("max_steps", cst_bank.max_steps))
+        if saved_steps != cst_bank.max_steps:
+            logger.warning(
+                "checkpoint has %d steps, bank has %d; loading the overlap only",
+                saved_steps,
+                cst_bank.max_steps,
+            )
+        want_opt = optimizer is not None and bool(doc.get("has_optimizer_state"))
+        for t in range(1, min(saved_steps, cst_bank.max_steps) + 1):
+            shard_path = path / CKPT_SHARD_FMT.format(t)
+            if not shard_path.is_file():
+                logger.warning("missing checkpoint shard %s; leaving step %d at init", shard_path, t)
+                continue
+            shard = torch.load(shard_path, map_location="cpu", weights_only=False)
+            mod = cst_bank.get(t)
+            mod.load_state_dict(map_float_tensors(shard["cst"], to_storage=False))
+            if want_opt and "optimizer" in shard:
+                _load_cst_opt_state(optimizer, mod, shard["optimizer"])
     if ramp is not None and doc.get("ramp"):
         ramp.load_state_dict(doc["ramp"])
     return doc.get("meta") or {}
@@ -681,14 +951,17 @@ def _load_legacy_pt(
     cst_bank: CSTBank,
     optimizer: Optional[torch.optim.Optimizer],
     ramp: Optional[LambdaRamp],
+    *,
+    meta_only: bool = False,
 ) -> Dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    cst_bank.load_state_dict_from_save(map_float_tensors(payload["cst"], to_storage=False))
-    if optimizer is not None and "optimizer" in payload:
-        try:
-            optimizer.load_state_dict(map_float_tensors(payload["optimizer"], to_storage=False))
-        except (ValueError, KeyError) as e:
-            logger.warning("legacy optimizer state not loadable (%s); starting moments fresh", e)
+    if not meta_only:
+        cst_bank.load_state_dict_from_save(map_float_tensors(payload["cst"], to_storage=False))
+        if optimizer is not None and "optimizer" in payload:
+            try:
+                optimizer.load_state_dict(map_float_tensors(payload["optimizer"], to_storage=False))
+            except (ValueError, KeyError) as e:
+                logger.warning("legacy optimizer state not loadable (%s); starting moments fresh", e)
     if ramp is not None and "ramp" in payload:
         ramp.load_state_dict(map_float_tensors(payload["ramp"], to_storage=False))
     return payload.get("meta") or {}
@@ -699,12 +972,23 @@ def load_cst_checkpoint(
     cst_bank: CSTBank,
     optimizer: torch.optim.Optimizer,
     ramp: LambdaRamp,
+    *,
+    meta_only: bool = False,
 ) -> Dict[str, Any]:
-    """Load from ``path`` (sharded directory or legacy single ``.pt``); return ``meta``."""
+    """Load from ``path`` (sharded directory or legacy single ``.pt``); return ``meta``.
+
+    ``meta_only=True`` (lazy-bank resume) skips restoring CST/optimizer
+    weights entirely — only the resume cursor (in ``meta``) and ``ramp`` state
+    are read, so relaunching after a crash doesn't reintroduce the eager
+    full-bank reconstruction cost. Steps flushed during a prior, successfully
+    completed chunk file are already correct on disk and never revisited; a
+    step that was live at crash time is simply recreated fresh when its file
+    is reprocessed (existing file-granularity resume).
+    """
     path = Path(path)
     if _is_sharded_ckpt(path):
-        return _load_sharded(path, cst_bank, optimizer, ramp)
-    return _load_legacy_pt(path, cst_bank, optimizer, ramp)
+        return _load_sharded(path, cst_bank, optimizer, ramp, meta_only=meta_only)
+    return _load_legacy_pt(path, cst_bank, optimizer, ramp, meta_only=meta_only)
 
 
 def load_cst_bank_weights(path: str | Path, cst_bank: CSTBank) -> Dict[str, Any]:

@@ -69,6 +69,17 @@ class AdamBF16(Optimizer):
             if isinstance(buf, Tensor) and buf.device != device:
                 st[key] = buf.to(device, non_blocking=True)
 
+    def drop_state(self, params: Iterable[Tensor]) -> None:
+        """Discard moment buffers for ``params`` outright — no target device.
+
+        For the lazy-bank training path: called when a step's window has
+        closed for good and its parameters are about to be deleted, so its
+        Adam moments don't linger in ``self.state`` after the ``Parameter``
+        objects themselves are gone.
+        """
+        for p in params:
+            self.state.pop(p, None)
+
     def state_bytes(self, param: Tensor) -> int:
         st = self.state.get(param)
         if not st:

@@ -118,6 +118,11 @@ train:
   microbatch_rows: null     # cap on rows per backward (fits B=128 files); null = auto
   checkpoint_every: null    # full shard dump every N files; null ≈ 8 dumps/epoch
   prefetch_chunks: true     # download next Hub .pt while training the current one
+  # Lazy bank: create each CST on first use, flush+delete it the moment its window
+  # closes (num_epochs=1 only). Frees the GPU (minus headroom) for anchor_block/
+  # microbatch instead of a static bank pin; anchor_block grows dynamically from
+  # live free VRAM. Opt-in — default (residency streaming) path is unaffected.
+  lazy_bank: false
   # Checkpoints shard per CST. true also writes Adam moments (3x size).
   save_optimizer_state: false
   wandb: true

@@ -32,23 +32,33 @@ class CSTBank(nn.Module):
         prefetch: int = 8,
         initial_threshold: float = 0.03,
         bandwidth: float = 1.0,
+        lazy: bool = False,
     ) -> None:
         """``max_on_gpu`` and ``prefetch`` are accepted for call-site compatibility and ignored.
 
         They configured a former LRU cache that never evicted (every consumer
         called :meth:`to_device_all` first, and ``max_on_gpu == max_steps`` in
         ``config/cst.yaml``). Residency is now explicit; see the module docstring.
+
+        ``lazy=True`` skips eagerly constructing all ``max_steps`` CSTs (each is
+        ~pure-random-init, no I/O, so this is cheap to defer) — see
+        :meth:`get_or_create` / :meth:`evict`, used by the lazy-bank training path
+        that materializes/frees a step exactly when its sliding window opens/closes.
         """
         super().__init__()
         self.max_steps = max_steps
         self.d = d
         self.k = k
         self.w = w
+        self.lazy = bool(lazy)
+        self._initial_threshold = initial_threshold
+        self._bandwidth = bandwidth
 
         self.csts = nn.ModuleDict()
-        for t in range(1, max_steps + 1):
-            w_t = effective_window_size(t, w, max_steps)
-            self.csts[str(t)] = CST(d, k, w_t, initial_threshold, bandwidth)
+        if not self.lazy:
+            for t in range(1, max_steps + 1):
+                w_t = effective_window_size(t, w, max_steps)
+                self.csts[str(t)] = CST(d, k, w_t, initial_threshold, bandwidth)
 
         self._device = torch.device("cpu")
 
@@ -63,6 +73,38 @@ class CSTBank(nn.Module):
     def get(self, step: int) -> CST:
         """The CST for ``step``. Caller is responsible for residency."""
         return self.csts[str(step)]
+
+    def has(self, step: int) -> bool:
+        """Whether ``step`` currently exists in the bank.
+
+        Always ``True`` for an eager (``lazy=False``) bank. For a lazy bank,
+        ``False`` before first touch or after :meth:`evict`.
+        """
+        return str(step) in self.csts
+
+    def get_or_create(self, step: int, device: torch.device | None = None) -> CST:
+        """Lazy-bank only: return ``step``'s CST, constructing it on first touch.
+
+        Construction is pure random init (no I/O), so this is cheap to call
+        synchronously right before a step's window is needed.
+        """
+        key = str(step)
+        if key in self.csts:
+            return self.csts[key]
+        w_t = effective_window_size(step, self.w, self.max_steps)
+        mod = CST(self.d, self.k, w_t, self._initial_threshold, self._bandwidth)
+        if device is not None:
+            mod.to(device)
+        self.csts[key] = mod
+        return mod
+
+    def evict(self, step: int) -> CST:
+        """Lazy-bank only: remove and return ``step``'s CST (its window has closed for good).
+
+        Raises ``KeyError`` if ``step`` was never created — evicting an absent
+        step is a bug at the call site, not a silent no-op.
+        """
+        return self.csts.pop(str(step))
 
     def step_device(self, step: int) -> torch.device:
         """Device the parameters of ``step`` currently live on."""

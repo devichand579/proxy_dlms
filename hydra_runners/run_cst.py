@@ -12,6 +12,7 @@ Or: ./scripts/cst.sh --mode store|train|eval
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import sys
@@ -55,13 +56,14 @@ from cst.store_budget import (
 from cst.model.cst_bank import CSTBank
 from cst.model.residency import CSTResidency
 from cst.train.adam_bf16 import AdamBF16
-from cst.train.memory_budget import plan_from_train_cfg
+from cst.train.memory_budget import cst_numel, plan_from_train_cfg
 from cst.naming import (
     cst_ckpt_name_token,
     cst_hidden_name_token,
     model_label_from_path,
     resolve_train_best_in_dir,
     resolve_train_resume_latest,
+    train_checkpoint_names,
 )
 from cst.train.collect_batch import (
     collect_hidden_row_batch,
@@ -73,7 +75,9 @@ from cst.train.trainer import (
     META_WANDB_GLOBAL_STEP,
     META_WANDB_RUN_ID,
     delete_files,
+    flush_and_evict_step,
     load_cst_checkpoint,
+    load_shard_if_exists,
     merge_resume_fields_into_meta,
     merge_sampling_state_into_meta,
     parse_data_resume_from_meta,
@@ -292,6 +296,24 @@ class _HubChunkPrefetch:
         return self._download(filename, expected_bytes)
 
     def close(self) -> None:
+        # A prefetch that already finished downloading but was never take()n
+        # (e.g. training crashed on the current chunk) would otherwise strand
+        # its multi-GB file on scratch disk. Only reclaim if it's done —
+        # never block shutdown waiting on an in-flight download.
+        if self._fut is not None and self._fut.done():
+            want, fut = self._want, self._fut
+            self._fut = None
+            self._want = None
+            try:
+                fut.result()
+            except Exception:
+                pass
+            else:
+                if want:
+                    try:
+                        (self.dl_dir / Path(want).name).unlink(missing_ok=True)
+                    except OSError:
+                        pass
         if self._ex is not None:
             self._ex.shutdown(wait=False)
             self._ex = None
@@ -1091,146 +1113,158 @@ def _train_cst_on_chunks_and_checkpoint(
     residency: Any = None,
     memory_plan: Any = None,
     write_checkpoint: bool = True,
+    lazy_bank: bool = False,
+    on_step_closed: Any = None,
+    on_step_created: Any = None,
 ) -> int:
     logger.info("=== train on %d hidden files ===", len(batch_paths))
-    if residency is None:
-        cst_bank.to_device_all(device)
-    g_cap = 24
-    if memory_plan is not None and memory_plan.cap_anchor_block is not None:
-        g_cap = int(memory_plan.cap_anchor_block)
-    elif not _is_blank(tr.get("anchor_block")):
-        g_cap = int(tr.get("anchor_block"))
-    stats = train_on_chunk_files(
-        batch_paths,
-        cst_bank,
-        optimizer,
-        ramp,
-        w=int(cst_cfg.w),
-        lambda_sparsity=float(tr.get("lambda_sparsity", 1e-3)),
-        c_tanh=float(tr.get("c_tanh", 1.0)),
-        lambda_pre_dead=float(tr.get("lambda_pre_dead", 0.0)),
-        device=device,
-        anchor_block=g_cap,
-        microbatch_rows=(
-            int(memory_plan.cap_microbatch)
-            if memory_plan is not None and memory_plan.cap_microbatch is not None
-            else None
-        ),
-        residency=residency,
-        memory_plan=memory_plan,
-        prefetch_block=bool(memory_plan.prefetch_block) if memory_plan is not None else True,
-    )
-    if torch.cuda.is_available() and str(device).startswith("cuda"):
-        logger.info(
-            "peak GPU memory this phase: %.1f GB (auto-memory sizes G/microbatch from remaining VRAM)",
-            torch.cuda.max_memory_allocated(device) / 1e9,
+    try:
+        if residency is None and not lazy_bank:
+            cst_bank.to_device_all(device)
+        g_cap = 24
+        if memory_plan is not None and memory_plan.cap_anchor_block is not None:
+            g_cap = int(memory_plan.cap_anchor_block)
+        elif not _is_blank(tr.get("anchor_block")):
+            g_cap = int(tr.get("anchor_block"))
+        stats = train_on_chunk_files(
+            batch_paths,
+            cst_bank,
+            optimizer,
+            ramp,
+            w=int(cst_cfg.w),
+            lambda_sparsity=float(tr.get("lambda_sparsity", 1e-3)),
+            c_tanh=float(tr.get("c_tanh", 1.0)),
+            lambda_pre_dead=float(tr.get("lambda_pre_dead", 0.0)),
+            device=device,
+            anchor_block=g_cap,
+            microbatch_rows=(
+                int(memory_plan.cap_microbatch)
+                if memory_plan is not None and memory_plan.cap_microbatch is not None
+                else None
+            ),
+            residency=residency,
+            memory_plan=memory_plan,
+            prefetch_block=bool(memory_plan.prefetch_block) if memory_plan is not None else True,
+            lazy_bank=lazy_bank,
+            on_step_closed=on_step_closed,
+            on_step_created=on_step_created,
         )
-        torch.cuda.reset_peak_memory_stats(device)
-    if log_wandb and wb is not None:
-        chunks = stats.get("per_chunk", [])
-        n_ch = len(chunks)
-        for i, ch in enumerate(chunks):
-            global_step += 1
-            row: Dict[str, Any] = {
-                "train/chunk_loss": ch["loss"],
-                "train/chunk_anchors": ch["n_anchors"],
-                "train/chunk_index": float(i + 1),
-                "train/chunks_in_phase": float(n_ch),
-                "phase": ckpt_phase,
-            }
-            if epoch is not None:
-                row["train/epoch"] = int(epoch)
-            if batch_idx is not None:
-                row["train/batch_idx"] = int(batch_idx)
-            wb.log(row, step=global_step)
-        if not chunks:
-            global_step += 1
-            row2: Dict[str, Any] = {
-                "train/chunk_loss": 0.0,
-                "train/chunks_in_phase": 0.0,
-                "train/no_files_trained": 1.0,
-                "phase": ckpt_phase,
-            }
-            if epoch is not None:
-                row2["train/epoch"] = int(epoch)
-            if batch_idx is not None:
-                row2["train/batch_idx"] = int(batch_idx)
-            wb.log(row2, step=global_step)
-        wb.log(
-            {
-                "train/loss_sum_phase": float(stats.get("train_loss", 0.0)),
-                "train/anchor_count_phase": float(stats.get("train_batches", 0.0)),
-                "phase": ckpt_phase,
-            },
-            step=global_step,
-        )
-
-    extra_meta: Dict[str, Any] = {}
-    run_id: Optional[str] = None
-    if wb is not None and getattr(wb, "id", None):
-        run_id = str(wb.id)
-    elif wandb_run_id_for_meta:
-        run_id = str(wandb_run_id_for_meta)
-    merge_resume_fields_into_meta(
-        extra_meta,
-        data_next_epoch=int(data_next_epoch),
-        data_next_batch_idx=int(data_next_batch_idx),
-        data_next_segment=0,
-        wandb_global_step=int(global_step),
-        wandb_run_id=run_id,
-        num_epochs=int(num_epochs),
-    )
-    if sampling_state is not None and all(
-        k in sampling_state
-        for k in (
-            "train_seed",
-            "train_samples_per_epoch",
-            "train_inference_batch_size",
-            "train_resample_each_epoch",
-            "train_gsm8k_num_fewshot",
-            "train_arc_csqa_num_fewshot",
-        )
-    ):
-        merge_sampling_state_into_meta(
-            extra_meta,
-            train_seed=int(sampling_state["train_seed"]),
-            train_samples_per_epoch=int(sampling_state["train_samples_per_epoch"]),
-            train_inference_batch_size=int(sampling_state["train_inference_batch_size"]),
-            train_resample_each_epoch=bool(sampling_state["train_resample_each_epoch"]),
-            train_gsm8k_num_fewshot=int(sampling_state["train_gsm8k_num_fewshot"]),
-            train_arc_csqa_num_fewshot=int(sampling_state["train_arc_csqa_num_fewshot"]),
-        )
-    if write_checkpoint:
-        ck_info = save_train_checkpoints(
-            ckpt_dir,
-            cst_bank=cst_bank,
-            optimizer=optimizer,
-            ramp=ramp,
-            phase=ckpt_phase,
-            train_loss=float(stats.get("train_loss", 0.0)),
-            train_batches=float(stats.get("train_batches", 0.0)),
-            name_token=name_token,
-            extra_meta=extra_meta,
-            save_optimizer_state=bool(tr.get("save_optimizer_state", False)),
-        )
+        if torch.cuda.is_available() and str(device).startswith("cuda"):
+            logger.info(
+                "peak GPU memory this phase: %.1f GB (auto-memory sizes G/microbatch from remaining VRAM)",
+                torch.cuda.max_memory_allocated(device) / 1e9,
+            )
+            torch.cuda.reset_peak_memory_stats(device)
         if log_wandb and wb is not None:
-            wbd: dict[str, Any] = {
-                "train/ckpt_new_best": 1.0 if ck_info.get("updated_best") else 0.0,
-                "train/legacy_phases_removed": float(ck_info.get("legacy_phase_removed", 0)),
-            }
-            lm = ck_info.get("loss_mean", float("inf"))
-            if isinstance(lm, (int, float)) and math.isfinite(float(lm)):
-                wbd["train/ckpt_loss_mean"] = float(lm)
-            wb.log(wbd, step=global_step)
-    else:
-        logger.info(
-            "skipping full checkpoint this chunk (cursor %s / batch %s); next dump on schedule",
-            data_next_epoch,
-            data_next_batch_idx,
+            chunks = stats.get("per_chunk", [])
+            n_ch = len(chunks)
+            for i, ch in enumerate(chunks):
+                global_step += 1
+                row: Dict[str, Any] = {
+                    "train/chunk_loss": ch["loss"],
+                    "train/chunk_nmse": ch.get("nmse", 0.0),
+                    "train/chunk_anchors": ch["n_anchors"],
+                    "train/chunk_index": float(i + 1),
+                    "train/chunks_in_phase": float(n_ch),
+                    "phase": ckpt_phase,
+                }
+                if epoch is not None:
+                    row["train/epoch"] = int(epoch)
+                if batch_idx is not None:
+                    row["train/batch_idx"] = int(batch_idx)
+                wb.log(row, step=global_step)
+            if not chunks:
+                global_step += 1
+                row2: Dict[str, Any] = {
+                    "train/chunk_loss": 0.0,
+                    "train/chunks_in_phase": 0.0,
+                    "train/no_files_trained": 1.0,
+                    "phase": ckpt_phase,
+                }
+                if epoch is not None:
+                    row2["train/epoch"] = int(epoch)
+                if batch_idx is not None:
+                    row2["train/batch_idx"] = int(batch_idx)
+                wb.log(row2, step=global_step)
+            wb.log(
+                {
+                    "train/loss_sum_phase": float(stats.get("train_loss", 0.0)),
+                    "train/anchor_count_phase": float(stats.get("train_batches", 0.0)),
+                    "phase": ckpt_phase,
+                },
+                step=global_step,
+            )
+
+        extra_meta: Dict[str, Any] = {}
+        run_id: Optional[str] = None
+        if wb is not None and getattr(wb, "id", None):
+            run_id = str(wb.id)
+        elif wandb_run_id_for_meta:
+            run_id = str(wandb_run_id_for_meta)
+        merge_resume_fields_into_meta(
+            extra_meta,
+            data_next_epoch=int(data_next_epoch),
+            data_next_batch_idx=int(data_next_batch_idx),
+            data_next_segment=0,
+            wandb_global_step=int(global_step),
+            wandb_run_id=run_id,
+            num_epochs=int(num_epochs),
         )
-    if bool(tr.get("delete_local_chunks_after_train", True)):
-        delete_files(batch_paths)
-    return global_step
+        if sampling_state is not None and all(
+            k in sampling_state
+            for k in (
+                "train_seed",
+                "train_samples_per_epoch",
+                "train_inference_batch_size",
+                "train_resample_each_epoch",
+                "train_gsm8k_num_fewshot",
+                "train_arc_csqa_num_fewshot",
+            )
+        ):
+            merge_sampling_state_into_meta(
+                extra_meta,
+                train_seed=int(sampling_state["train_seed"]),
+                train_samples_per_epoch=int(sampling_state["train_samples_per_epoch"]),
+                train_inference_batch_size=int(sampling_state["train_inference_batch_size"]),
+                train_resample_each_epoch=bool(sampling_state["train_resample_each_epoch"]),
+                train_gsm8k_num_fewshot=int(sampling_state["train_gsm8k_num_fewshot"]),
+                train_arc_csqa_num_fewshot=int(sampling_state["train_arc_csqa_num_fewshot"]),
+            )
+        if write_checkpoint:
+            ck_info = save_train_checkpoints(
+                ckpt_dir,
+                cst_bank=cst_bank,
+                optimizer=optimizer,
+                ramp=ramp,
+                phase=ckpt_phase,
+                train_loss=float(stats.get("train_loss", 0.0)),
+                train_batches=float(stats.get("train_batches", 0.0)),
+                name_token=name_token,
+                extra_meta=extra_meta,
+                save_optimizer_state=bool(tr.get("save_optimizer_state", False)),
+            )
+            if log_wandb and wb is not None:
+                wbd: dict[str, Any] = {
+                    "train/ckpt_new_best": 1.0 if ck_info.get("updated_best") else 0.0,
+                    "train/legacy_phases_removed": float(ck_info.get("legacy_phase_removed", 0)),
+                }
+                lm = ck_info.get("loss_mean", float("inf"))
+                if isinstance(lm, (int, float)) and math.isfinite(float(lm)):
+                    wbd["train/ckpt_loss_mean"] = float(lm)
+                wb.log(wbd, step=global_step)
+        else:
+            logger.info(
+                "skipping full checkpoint this chunk (cursor %s / batch %s); next dump on schedule",
+                data_next_epoch,
+                data_next_batch_idx,
+            )
+        return global_step
+    finally:
+        # Delete the downloaded chunk(s) even if training/checkpointing raised
+        # (e.g. an OOM mid-backward) — Hub is the source of truth, so a crash
+        # must not strand multi-GB local chunk files on scratch disk.
+        if bool(tr.get("delete_local_chunks_after_train", True)):
+            delete_files(batch_paths)
 
 
 # ---------------------------------------------------------------------------
@@ -1467,6 +1501,7 @@ def run_train(cfg: DictConfig) -> int:
     hf_train_repo = resolve_train_repo_id(tr)
     cache_dir = Path(str(tr.get("hf_local_cache_dir", "outputs/cst_hf_cache")))
 
+    lazy_bank = bool(tr.get("lazy_bank", False))
     cst_bank = CSTBank(
         max_steps=int(cst_cfg.max_steps),
         d=int(cst_cfg.d_model),
@@ -1475,7 +1510,21 @@ def run_train(cfg: DictConfig) -> int:
         max_on_gpu=int(cst_cfg.get("max_on_gpu", cst_cfg.max_steps)),
         initial_threshold=float(cst_cfg.get("jumprelu_initial_threshold", 0.03)),
         bandwidth=float(cst_cfg.get("jumprelu_bandwidth", 1.0)),
+        lazy=lazy_bank,
     )
+    lazy_latest_dir = None
+    if lazy_bank:
+        latest_n, _best_n, _state_n = train_checkpoint_names(ckpt_token)
+        lazy_latest_dir = ckpt_dir / latest_n
+        # torch.optim.Optimizer rejects an empty param list at construction;
+        # step 1 is needed almost immediately once training starts anyway.
+        # If step 1 was already trained by an earlier file in this run (i.e.
+        # this is a resumed run), reload it instead of leaving it at random
+        # init — get_or_create only knows a step is "new" via has(), and a
+        # step this bank has never touched before always looks new even if
+        # its shard already exists on disk from a prior file.
+        mod1 = cst_bank.get_or_create(1, device)
+        load_shard_if_exists(lazy_latest_dir, 1, mod1)
     # bf16 moments halve optimizer state (172 GB -> 86 GB for a 512-step k=4096
     # bank), which is what makes the full bank fit across GPU + host RAM.
     optimizer = AdamBF16(cst_bank.parameters(), lr=float(tr.get("learning_rate", 3e-4)))
@@ -1486,15 +1535,21 @@ def run_train(cfg: DictConfig) -> int:
     rp_str = str(tr.get("resume_checkpoint") or "").strip()
     rp = Path(rp_str) if rp_str and rp_str.lower() not in ("null", "none", "") else None
     if rp is not None and (rp.is_file() or rp.is_dir()):
-        ckpt_meta = load_cst_checkpoint(str(rp), cst_bank, optimizer, ramp)
+        ckpt_meta = load_cst_checkpoint(str(rp), cst_bank, optimizer, ramp, meta_only=lazy_bank)
         loaded_ckpt_path = str(rp)
-        logger.info("resumed CST from %s", rp)
+        logger.info("resumed CST from %s%s", rp, " (meta only, lazy_bank)" if lazy_bank else "")
     elif bool(tr.get("resume_from_latest", False)):
         resume_p = resolve_train_resume_latest(ckpt_dir, ckpt_token)
         if resume_p is not None and (resume_p.is_file() or resume_p.is_dir()):
-            ckpt_meta = load_cst_checkpoint(str(resume_p), cst_bank, optimizer, ramp)
+            ckpt_meta = load_cst_checkpoint(
+                str(resume_p), cst_bank, optimizer, ramp, meta_only=lazy_bank
+            )
             loaded_ckpt_path = str(resume_p)
-            logger.info("resumed CST from %s (train.resume_from_latest)", resume_p)
+            logger.info(
+                "resumed CST from %s (train.resume_from_latest)%s",
+                resume_p,
+                " (meta only, lazy_bank)" if lazy_bank else "",
+            )
 
     resume_data_from_checkpoint = bool(tr.get("resume_data_from_checkpoint", True))
     resume_trip: Optional[tuple[int, int, int]] = None
@@ -1550,7 +1605,17 @@ def run_train(cfg: DictConfig) -> int:
             )
 
     n_cst_params = sum(p.numel() for p in cst_bank.parameters())
-    logger.info("CST parameters: total=%s", f"{n_cst_params:,}")
+    if lazy_bank:
+        full_bank_params = cst_numel(int(cst_cfg.d_model), int(cst_cfg.k), int(cst_cfg.w)) * int(
+            cst_cfg.max_steps
+        )
+        logger.info(
+            "CST parameters: currently-resident=%s (lazy_bank; full-bank total=%s)",
+            f"{n_cst_params:,}",
+            f"{full_bank_params:,}",
+        )
+    else:
+        logger.info("CST parameters: total=%s", f"{n_cst_params:,}")
     logger.info("train from Hub: %s (%s)", hf_train_repo, hidden_token)
 
     all_chunks = manifest.all_chunks_sorted()
@@ -1576,6 +1641,12 @@ def run_train(cfg: DictConfig) -> int:
         ),
         scratch=scratch,
     )
+    if lazy_bank:
+        # Lazy bank manages its own GPU placement (create-on-touch,
+        # evict-on-close) — no static pin, no CSTResidency. Cap-parsing
+        # (anchor_block/microbatch/headroom) from plan_from_train_cfg above is
+        # still reused unchanged.
+        mem = dataclasses.replace(mem, use_residency=False, pinned_bytes=0, gpu_pinned_gb=0.0)
     residency: Optional[CSTResidency] = None
     if mem.use_residency:
         residency = CSTResidency(
@@ -1628,6 +1699,32 @@ def run_train(cfg: DictConfig) -> int:
                 if sampling_state.get("cst_train_samples") is not None:
                     wbd["data/cst_train_samples"] = float(sampling_state["cst_train_samples"])
                 wb.log(wbd, step=global_step)
+
+    on_step_closed = None
+    on_step_created = None
+    if lazy_bank:
+        lazy_save_optimizer_state = bool(tr.get("save_optimizer_state", False))
+
+        def on_step_closed(steps: List[int]) -> None:
+            for t in steps:
+                flush_and_evict_step(
+                    lazy_latest_dir,
+                    t,
+                    cst_bank,
+                    optimizer,
+                    save_optimizer_state=lazy_save_optimizer_state,
+                )
+
+        def on_step_created(t: int, mod: Any) -> None:
+            # A step re-touched by a later file already has a shard from an
+            # earlier file's training — load it instead of leaving the
+            # freshly-created module at random init (see load_shard_if_exists).
+            load_shard_if_exists(
+                lazy_latest_dir,
+                t,
+                mod,
+                optimizer=optimizer if lazy_save_optimizer_state else None,
+            )
 
     for cst_pass in range(num_epochs):
         logger.info("=== CST pass %d / %d (%d batches) ===", cst_pass + 1, num_epochs, nbat)
@@ -1709,6 +1806,9 @@ def run_train(cfg: DictConfig) -> int:
                     write_checkpoint=_should_write_train_ckpt(
                         i_ch, len(pending), mem.checkpoint_every
                     ),
+                    lazy_bank=lazy_bank,
+                    on_step_closed=on_step_closed,
+                    on_step_created=on_step_created,
                 )
         finally:
             prefetcher.close()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
@@ -100,20 +101,33 @@ def download_hub_file(
     revision: str = "main",
     token: bool | str | None = True,
 ) -> Path:
+    """Download straight to ``local_path`` — no duplicate copy in the default
+    HF cache.
+
+    Plain ``hf_hub_download()`` (no ``local_dir``) always keeps its own copy
+    under ``~/.cache/huggingface/hub`` forever (nothing here ever prunes it),
+    which used to double disk usage on every chunk fetch: this dataset's
+    chunks run 70-220GB each. Passing ``local_dir`` downloads directly into
+    that directory with no separate cache blob left behind (confirmed empty
+    cache dir after download, on huggingface_hub>=0.23).
+    """
     from huggingface_hub import hf_hub_download
 
     local_path = Path(local_path)
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    cached = hf_hub_download(
-        repo_id=repo_id,
-        filename=path_in_repo,
-        repo_type="dataset",
-        revision=revision,
-        token=token,
-    )
-    src = Path(cached)
-    if src.resolve() != local_path.resolve():
-        shutil.copyfile(src, local_path)
+    with tempfile.TemporaryDirectory(dir=local_path.parent) as tmp_dir:
+        downloaded = hf_hub_download(
+            repo_id=repo_id,
+            filename=path_in_repo,
+            repo_type="dataset",
+            revision=revision,
+            token=token,
+            local_dir=tmp_dir,
+        )
+        src = Path(downloaded)
+        if local_path.exists():
+            local_path.unlink()
+        shutil.move(str(src), str(local_path))
     return local_path
 
 

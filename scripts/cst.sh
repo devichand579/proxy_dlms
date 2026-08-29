@@ -67,6 +67,10 @@ Options:
   --gpu_pinned_gb N     train: cap on bank GB pinned on GPU (default: auto from RAM+VRAM)
   --save_optimizer_state
                         train: also shard Adam moments into checkpoints (3x size)
+  --lazy_bank           train: create/flush/evict each CST on demand instead of
+                        pre-allocating the whole bank (opt-in, num_epochs=1 only).
+                        anchor_block sizing is then fully dynamic per block, so
+                        --anchor_block/--gpu_pinned_gb are largely no-ops with this on.
   --device DEV          local only: 0|1|cuda|cuda:0|cpu
   --slurm               optional: one srun wrap (omit with sbatch unless your site requires it)
   -h, --help            show this message
@@ -77,6 +81,7 @@ Examples:
   ./scripts/cst.sh --mode store --scope eval --task_name all
   ./scripts/cst.sh --mode train train.num_epochs=1
   ./scripts/cst.sh --mode train train.auto_memory=false train.anchor_block=16 train.gpu_pinned_gb=110
+  ./scripts/cst.sh --mode train --lazy_bank
   ./scripts/cst.sh --mode eval --checkpoint outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best \
       --hidden_dir outputs/eval_hidden
 
@@ -125,6 +130,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --save_optimizer_state)
       EXTRA+=(train.save_optimizer_state=true)
+      shift
+      ;;
+    --lazy_bank)
+      EXTRA+=(train.lazy_bank=true)
       shift
       ;;
     --device)
