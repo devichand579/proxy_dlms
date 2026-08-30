@@ -60,7 +60,11 @@ Options:
                         train  — download each Hub batch -> train CST -> delete local
                         eval   — score CST checkpoint on saved hiddens
   --scope train|eval    store only: sets store.scope=train|eval
-  --hidden_dir DIR      mode=eval only: local folder of .pt to score (not used for store)
+  --hidden_dir DIR      mode=eval, hidden_source=local: folder of .pt to score
+  --hidden_source local|hf_hub
+                        mode=eval: local dir (default) or stream+delete Hub
+                        chunks one at a time (needs --task_name; scores every
+                        expanded task, e.g. --task_name all, one at a time)
   --checkpoint PATH     eval: CST checkpoint (sharded dir, or legacy .pt)
   --task_name NAME      store/eval: lm-eval task (gsm8k, all, or gsm8k,humaneval)
   --anchor_block N      train: cap on anchors per backward (default: auto from VRAM)
@@ -84,6 +88,9 @@ Examples:
   ./scripts/cst.sh --mode train --lazy_bank
   ./scripts/cst.sh --mode eval --checkpoint outputs/cst_ckpt/cst_llada_pd_512_256_k4096_w4_ls0.001_best \
       --hidden_dir outputs/eval_hidden
+  ./scripts/cst.sh --mode eval --checkpoint outputs/cst_ckpt/cst_..._latest \
+      --hidden_source hf_hub --task_name all
+      # scheduler_mode for the eval manifest lookup defaults from store.scheduler_mode
 
 Slurm:
   sbatch scripts/cst.sh --mode store store.scope=train store.samples=2048
@@ -110,6 +117,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --hidden_dir)
       EXTRA+=(eval.hidden_dir="$2")
+      shift 2
+      ;;
+    --hidden_source)
+      EXTRA+=(eval.hidden_source="$2")
       shift 2
       ;;
     --checkpoint)

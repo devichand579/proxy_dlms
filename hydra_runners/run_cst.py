@@ -20,7 +20,7 @@ from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -40,7 +40,6 @@ from cst.hf_hiddens.manifest import (
 )
 from cst.hf_hiddens.store import (
     HubStorageFullError,
-    download_all_chunks,
     download_hidden_chunk,
     fetch_manifest,
     list_hub_chunks,
@@ -117,7 +116,14 @@ def _merge_eval_cfg(cfg: DictConfig) -> DictConfig:
     base = OmegaConf.create(_EVAL_DEFAULTS)
     o = cfg.get("eval")
     if o is not None:
-        return OmegaConf.merge(base, o)
+        # Resolve against the full cfg first: OmegaConf.merge would otherwise
+        # detach ``o`` from ``cfg`` (its interpolation parent), so an
+        # unresolved ``eval.model_path: ${model_path}`` would then try to
+        # resolve against the merged copy's own root and hit itself
+        # (InterpolationResolutionError: Recursive interpolation detected)
+        # the moment anything reads ``ev.model_path``.
+        resolved = OmegaConf.to_container(o, resolve=True)
+        return OmegaConf.merge(base, OmegaConf.create(resolved))
     return base
 
 
@@ -1823,49 +1829,92 @@ def run_train(cfg: DictConfig) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _iter_eval_chunks(
+    *,
+    repo_id: str,
+    name_token: str,
+    all_chunks: List[Any],
+    dl_dir: Path,
+    revision: str,
+    token: Any,
+    delete_after: bool,
+) -> Iterator[Path]:
+    """Download Hub eval chunks one at a time (prefetching the next while the
+    caller scores the current one), yielding each local path and deleting it
+    right after the caller is done with it. Mirrors the training-side
+    ``_HubChunkPrefetch`` usage (see ``run_train``) so eval never needs the
+    whole task's chunks on disk at once.
+    """
+    prefetcher = _HubChunkPrefetch(
+        repo_id=repo_id,
+        hidden_token=name_token,
+        dl_dir=dl_dir,
+        revision=revision,
+        token=token,
+        enabled=True,
+    )
+    try:
+        for j, ch in enumerate(all_chunks):
+            logger.info(
+                "=== eval download chunk %d / %d (%s) ===",
+                j + 1,
+                len(all_chunks),
+                ch.filename,
+            )
+            dest = prefetcher.take(ch.filename, ch.bytes)
+            if j + 1 < len(all_chunks):
+                nxt = all_chunks[j + 1]
+                prefetcher.prime(nxt.filename, nxt.bytes)
+            try:
+                yield dest
+            finally:
+                if delete_after:
+                    delete_files([dest])
+    finally:
+        prefetcher.close()
+
+
+def _log_eval_result(
+    cfg: DictConfig,
+    ev: Any,
+    wandb_mod: Any,
+    out: Dict[str, Any],
+    *,
+    task_name: Optional[str],
+) -> None:
+    yaml_out = OmegaConf.to_yaml(out)
+    print(yaml_out)
+    tag = f" [{task_name}]" if task_name else ""
+    logger.info("eval results%s:\n%s", tag, yaml_out.rstrip())
+
+    use_wb = ev.get("wandb")
+    if use_wb is None:
+        use_wb = cfg.get("wandb", True)
+    if bool(use_wb) and wandb_mod is not None:
+        wb_name = str(ev.get("wandb_name", "cst-eval"))
+        if task_name:
+            wb_name = f"{wb_name}-{task_name}"
+        wb = wandb_mod.init(
+            project=str(cfg.get("wandb_project", "strace-cst")),
+            name=wb_name,
+            reinit=True,
+        )
+        if "summary" in out:
+            wb.log({f"eval/{k}": v for k, v in out["summary"].items()})
+        wb.finish()
+
+
 def run_eval(cfg: DictConfig) -> int:
-    """Score a CST checkpoint on saved eval hiddens."""
+    """Score a CST checkpoint on saved eval hiddens, one task and one Hub chunk at a time."""
     try:
         import wandb
     except ImportError:
         wandb = None
 
-    from cst.eval.run_eval_cst import run_eval_on_dir
+    from cst.eval.run_eval_cst import load_eval_cst_bank, run_eval_on_dir
 
     ev = _merge_eval_cfg(cfg)
-    hidden_dir = str(ev.get("hidden_dir", _EVAL_DEFAULTS["hidden_dir"]))
     hidden_source = str(ev.get("hidden_source", "local")).strip().lower()
-
-    if hidden_source in ("hf", "hf_hub", "hub"):
-        store = cfg.get("store") or OmegaConf.create({})
-        task = ev.get("task_name") or store.get("task_name")
-        if _is_blank(task):
-            raise ValueError("eval.hidden_source=hf_hub requires eval.task_name (or store.task_name)")
-        model_path = _section_model_path(cfg, ev)
-        yaml_g, yaml_s = _store_yaml_gen_length_steps(ev)
-        if store is not None and not _is_blank(store.get("gen_length")):
-            yaml_g, yaml_s = _store_yaml_gen_length_steps(store)
-        gen_length, steps = effective_gen_length_steps(str(task), yaml_g, yaml_s)
-        name_token = _hidden_name_token(
-            ev,
-            model_path,
-            task_name=str(task),
-            gen_length=gen_length,
-            steps=steps,
-        )
-        repo_id = resolve_eval_repo_id(ev, store=store, eval_cfg=ev)
-        cache_dir = str(ev.get("hf_local_cache_dir", "outputs/cst_hf_cache"))
-        cache = Path(cache_dir) / "eval_dl" / name_token
-        hidden_dir = str(
-            download_all_chunks(
-                repo_id,
-                str(name_token),
-                local_dir=cache,
-                cache_dir=cache_dir,
-                revision=str(ev.get("hf_hiddens_revision", "main")),
-                token=hf_token(ev),
-            )
-        )
 
     ck = str(ev.get("checkpoint", _EVAL_DEFAULTS["checkpoint"]))
     ckp = Path(ck)
@@ -1880,35 +1929,129 @@ def run_eval(cfg: DictConfig) -> int:
         if isinstance(ntf_1st, str)
         else bool(ntf_1st)
     )
-
-    out = run_eval_on_dir(
-        hidden_dir=hidden_dir,
-        ckpt_path=ck,
-        cfg_bank=OmegaConf.to_container(cfg.cst, resolve=True),
-        device=str(ev.get("device", "cuda")),
-        w=int(ev.get("w")) if ev.get("w") is not None else None,
-        model_path=str(ev.get("model_path")) if ev.get("model_path") not in (None, "", "null") else None,
-        ntf_conf_low=float(ev.get("ntf_conf_low", 0.2)),
-        ntf_conf_high=float(ev.get("ntf_conf_high", 0.8)),
-        ntf_first_non_eos=ntf_1st_b,
-        gpu_pinned_gb=float(ev.get("gpu_pinned_gb", 0.0) or 0.0),
+    model_path_for_ntf = (
+        str(ev.get("model_path")) if ev.get("model_path") not in (None, "", "null") else None
     )
-    yaml_out = OmegaConf.to_yaml(out)
-    print(yaml_out)
-    logger.info("eval results:\n%s", yaml_out.rstrip())
+    device = str(ev.get("device", "cuda"))
+    w_override = int(ev.get("w")) if ev.get("w") is not None else None
 
-    use_wb = ev.get("wandb")
-    if use_wb is None:
-        use_wb = cfg.get("wandb", True)
-    if bool(use_wb) and wandb is not None:
-        wb = wandb.init(
-            project=str(cfg.get("wandb_project", "strace-cst")),
-            name=str(ev.get("wandb_name", "cst-eval")),
-            reinit=True,
+    if hidden_source == "local":
+        hidden_dir = str(ev.get("hidden_dir", _EVAL_DEFAULTS["hidden_dir"]))
+        out = run_eval_on_dir(
+            hidden_dir=hidden_dir,
+            ckpt_path=ck,
+            cfg_bank=OmegaConf.to_container(cfg.cst, resolve=True),
+            device=device,
+            w=w_override,
+            model_path=model_path_for_ntf,
+            ntf_conf_low=float(ev.get("ntf_conf_low", 0.2)),
+            ntf_conf_high=float(ev.get("ntf_conf_high", 0.8)),
+            ntf_first_non_eos=ntf_1st_b,
+            gpu_pinned_gb=float(ev.get("gpu_pinned_gb", 0.0) or 0.0),
         )
+        _log_eval_result(cfg, ev, wandb, out, task_name=None)
+        return 0
+
+    if hidden_source not in ("hf", "hf_hub", "hub"):
+        raise ValueError(f"unknown eval.hidden_source={hidden_source!r} (use local or hf_hub)")
+
+    store = cfg.get("store") or OmegaConf.create({})
+    task_raw = ev.get("task_name") or store.get("task_name")
+    if _is_blank(task_raw):
+        raise ValueError("eval.hidden_source=hf_hub requires eval.task_name (or store.task_name)")
+    tasks = expand_eval_task_names(str(task_raw))
+    multi = len(tasks) > 1
+
+    # Eval hiddens are named after the scheduler that generated them, same as
+    # store/train — fall back to store.scheduler_mode (same precedent as the
+    # gen_length/steps fallback below) so eval finds the manifest that actually
+    # matches how the training data (and this checkpoint) was generated, rather
+    # than eval's own unrelated "pd" default.
+    if store is not None and not _is_blank(store.get("scheduler_mode")):
+        ev["scheduler_mode"] = str(store.get("scheduler_mode"))
+
+    # Build the CST bank once and reuse it across every task — reloading it
+    # per task when there can be several is wasteful. load_eval_cst_bank only
+    # materializes the steps actually trained (see its docstring: CST modules
+    # are fp32 once loaded, so the full max_steps=512 bank would be ~172GB,
+    # leaving no headroom for the base model / NTF logits).
+    cst_cfg = OmegaConf.to_container(cfg.cst, resolve=True)
+    cst_bank, max_trained_step, _residency = load_eval_cst_bank(
+        ck, cst_cfg, torch.device(device), w=w_override
+    )
+    if max_trained_step is not None and max_trained_step < cst_bank.max_steps:
+        logger.info(
+            "eval: checkpoint has trained shards for steps 1..%d only (bank max_steps=%d) — "
+            "capping every file's evaluated anchors to that range so untrained modules "
+            "never contribute to a reconstruction",
+            max_trained_step,
+            cst_bank.max_steps,
+        )
+
+    model_path_g = _section_model_path(cfg, ev)
+    cache_dir = str(ev.get("hf_local_cache_dir", "outputs/cst_hf_cache"))
+    delete_after = bool(ev.get("delete_local_chunks_after_eval", True))
+    repo_id = resolve_eval_repo_id(ev, store=store, eval_cfg=ev)
+
+    all_summaries: Dict[str, Dict[str, float]] = {}
+    for i, task in enumerate(tasks, start=1):
+        if multi:
+            logger.info("=== eval task %d / %d: %s ===", i, len(tasks), task)
+        yaml_g, yaml_s = _store_yaml_gen_length_steps(ev)
+        if store is not None and not _is_blank(store.get("gen_length")):
+            yaml_g, yaml_s = _store_yaml_gen_length_steps(store)
+        gen_length, steps = effective_gen_length_steps(str(task), yaml_g, yaml_s)
+        name_token = _hidden_name_token(
+            ev,
+            model_path_g,
+            task_name=str(task),
+            ignore_name_token_override=multi,
+            gen_length=gen_length,
+            steps=steps,
+        )
+        manifest = fetch_manifest(
+            repo_id,
+            name_token,
+            cache_dir=Path(cache_dir),
+            revision=str(ev.get("hf_hiddens_revision", "main")),
+            token=hf_token(ev),
+            create_if_missing=False,
+        )
+        all_chunks = manifest.all_chunks_sorted()
+        if not all_chunks:
+            logger.warning("manifest for %s @ %s has no chunks; skipping", name_token, repo_id)
+            continue
+
+        chunks_iter = _iter_eval_chunks(
+            repo_id=str(repo_id),
+            name_token=name_token,
+            all_chunks=all_chunks,
+            dl_dir=Path(cache_dir) / "eval_dl" / name_token,
+            revision=str(ev.get("hf_hiddens_revision", "main")),
+            token=hf_token(ev),
+            delete_after=delete_after,
+        )
+        out = run_eval_on_dir(
+            hidden_dir=chunks_iter,
+            ckpt_path=ck,
+            cfg_bank=cst_cfg,
+            device=device,
+            cst_bank=cst_bank,
+            max_anchor=max_trained_step,
+            model_path=model_path_for_ntf,
+            ntf_conf_low=float(ev.get("ntf_conf_low", 0.2)),
+            ntf_conf_high=float(ev.get("ntf_conf_high", 0.8)),
+            ntf_first_non_eos=ntf_1st_b,
+        )
+        _log_eval_result(cfg, ev, wandb, out, task_name=str(task) if multi else None)
         if "summary" in out:
-            wb.log({f"eval/{k}": v for k, v in out["summary"].items()})
-        wb.finish()
+            all_summaries[str(task)] = out["summary"]
+
+    if multi and all_summaries:
+        combined = OmegaConf.to_yaml({"per_task": all_summaries})
+        print(combined)
+        logger.info("eval results (all tasks):\n%s", combined.rstrip())
+
     return 0
 
 

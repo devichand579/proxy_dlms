@@ -151,6 +151,9 @@ eval:
   # >0 streams the bank from host RAM instead of placing all of it at once.
   gpu_pinned_gb: 0.0
   wandb_name: cst-eval
+  # hidden_source=hf_hub: delete each Hub chunk right after it's scored (one file
+  # on disk at a time) instead of leaving the whole task's chunks downloaded.
+  delete_local_chunks_after_eval: true
 
 hydra:
   run:

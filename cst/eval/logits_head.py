@@ -26,9 +26,17 @@ def logits_from_prelogit_hidden(model: nn.Module, h: torch.Tensor) -> torch.Tens
     if hasattr(m, "lm_head") and isinstance(getattr(m, "lm_head"), nn.Module):
         return m.lm_head(h)
 
-    # LLaDA-style: F.linear(h, wte) or ff_out
-    if hasattr(m, "transformer") and hasattr(m, "config"):
+    # LLaDA-style: F.linear(h, wte) or ff_out. The HF wrapper (LLaDAModelLM,
+    # base_model_prefix="model") nests the actual LLaDAModel at ``m.model``,
+    # so ``transformer`` lives at ``m.model.transformer``; an already-unwrapped
+    # LLaDAModel has it directly at ``m.transformer`` (same convention as
+    # ``cst/pre_logits.py:find_final_norm``).
+    tr = None
+    if hasattr(m, "model") and hasattr(m.model, "transformer"):
+        tr = m.model.transformer
+    elif hasattr(m, "transformer"):
         tr = m.transformer
+    if tr is not None and hasattr(m, "config"):
         cfg = m.config
         if getattr(cfg, "weight_tying", True):
             logits = F.linear(h, tr.wte.weight, None)
@@ -49,8 +57,12 @@ def unembedding_weight_matrix(model: nn.Module) -> torch.Tensor:
     m = unwrap_inner(model)
     if hasattr(m, "lm_head") and isinstance(getattr(m, "lm_head"), nn.Linear):
         return m.lm_head.weight.detach()
-    if hasattr(m, "transformer") and hasattr(m, "config"):
+    tr = None
+    if hasattr(m, "model") and hasattr(m.model, "transformer"):
+        tr = m.model.transformer
+    elif hasattr(m, "transformer"):
         tr = m.transformer
+    if tr is not None and hasattr(m, "config"):
         cfg = m.config
         if getattr(cfg, "weight_tying", True):
             return tr.wte.weight.detach()
