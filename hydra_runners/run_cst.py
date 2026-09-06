@@ -38,7 +38,7 @@ from cst.hf_hiddens.manifest import (
     store_fingerprint_required_keys,
 )
 from cst.hf_hiddens.store import (
-    HubStorageFullError,
+    HubStorageFullError as HfHubStorageFullError,
     download_all_chunks,
     download_hidden_chunk,
     fetch_manifest,
@@ -46,6 +46,7 @@ from cst.hf_hiddens.store import (
     push_manifest,
     upload_hidden_chunk,
 )
+from cst.azure_hiddens.store import HubStorageFullError as AzureHubStorageFullError
 from cst.pre_logits import DiskFullError
 from cst.store_budget import (
     max_inference_batch_size,
@@ -163,6 +164,7 @@ def _setup_cst_file_logging(cfg: DictConfig) -> Path:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.addHandler(fh)
+    logging.getLogger("azure").setLevel(logging.WARNING)
     has_console = any(
         isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
         for h in root.handlers
@@ -716,8 +718,25 @@ def _store_hiddens(
         raise RuntimeError(f"store.scope={scope}: no rows to collect")
 
     hub_revision = str(store_cfg.get("hf_hiddens_revision", "main"))
-    hub_tok = hf_token(store_cfg)
-    manifest = fetch_manifest(
+    
+    storage_backend = str(store_cfg.get("storage_backend", "hf")).strip().lower()
+    if storage_backend == "azure":
+        from cst.azure_hiddens.config import azure_connection_string as resolve_token
+        from cst.azure_hiddens.store import fetch_manifest as backend_fetch_manifest
+        from cst.azure_hiddens.store import list_hub_chunks as backend_list_hub_chunks
+        from cst.azure_hiddens.store import push_manifest as backend_push_manifest
+        from cst.azure_hiddens.store import upload_hidden_chunk as backend_upload_hidden_chunk
+        from cst.azure_hiddens.store import HubStorageFullError as backend_HubStorageFullError
+    else:
+        from cst.hf_hiddens.config import hf_token as resolve_token
+        from cst.hf_hiddens.store import fetch_manifest as backend_fetch_manifest
+        from cst.hf_hiddens.store import list_hub_chunks as backend_list_hub_chunks
+        from cst.hf_hiddens.store import push_manifest as backend_push_manifest
+        from cst.hf_hiddens.store import upload_hidden_chunk as backend_upload_hidden_chunk
+        from cst.hf_hiddens.store import HubStorageFullError as backend_HubStorageFullError
+
+    hub_tok = resolve_token(store_cfg)
+    manifest = backend_fetch_manifest(
         repo_id,
         name_token,
         cache_dir=cache_dir,
@@ -727,7 +746,7 @@ def _store_hiddens(
     )
     stored_idx = {int(c.batch_idx) for c in manifest.all_chunks_sorted()}
     hub_chunks = (
-        list_hub_chunks(repo_id, name_token, revision=hub_revision, token=hub_tok)
+        backend_list_hub_chunks(repo_id, name_token, revision=hub_revision, token=hub_tok)
         if resume
         else []
     )
@@ -787,7 +806,7 @@ def _store_hiddens(
             if manifest.sampling_fingerprint is None:
                 manifest.sampling_fingerprint = dict(sampling_state)
             try:
-                push_manifest(
+                backend_push_manifest(
                     manifest,
                     repo_id,
                     revision=hub_revision,
@@ -1029,7 +1048,7 @@ def _store_hiddens(
             b_n = int(meta.get("batch_size", len(batch_rows)))
             nbytes = Path(out_path).stat().st_size
             try:
-                rec = upload_hidden_chunk(
+                rec = backend_upload_hidden_chunk(
                     repo_id,
                     name_token,
                     out_path,
@@ -1043,23 +1062,23 @@ def _store_hiddens(
                     ),
                     cache_dir=cache_dir,
                     revision=str(store_cfg.get("hf_hiddens_revision", "main")),
-                    token=hf_token(store_cfg),
+                    token=hub_tok,
                     private_repo=bool(store_cfg.get("hf_hiddens_private", False)),
                     delete_local_after=delete_local,
                     scope=scope,
                     skip_if_exists=resume,
                     n_rows=int(b_n),
                 )
-            except (HubStorageFullError, DiskFullError) as e:
+            except (HfHubStorageFullError, AzureHubStorageFullError, DiskFullError) as e:
                 try:
                     Path(out_path).unlink(missing_ok=True)
                 except OSError:
                     pass
                 n_on_hub = len(manifest.all_chunks_sorted())
-                kind = "Hub storage" if isinstance(e, HubStorageFullError) else "local disk"
+                kind = "Hub/Azure storage" if isinstance(e, (HfHubStorageFullError, AzureHubStorageFullError)) else "local disk"
                 logger.warning(
                     "%s full while uploading batch %d / %d for %s; "
-                    "finishing store early. %d batch(es) already on Hub. "
+                    "finishing store early. %d batch(es) already on Hub/Azure. "
                     "Free space and re-run the same command to resume. (%s)",
                     kind,
                     bi + 1,
@@ -1298,7 +1317,12 @@ def store_train_hiddens(cfg: DictConfig) -> int:
     name_token = _hidden_name_token(
         store_cfg, model_path, gen_length=yaml_g, steps=yaml_s
     )
-    hf_train_repo = resolve_train_repo_id(store_cfg)
+    storage_backend = str(store_cfg.get("storage_backend", "hf")).strip().lower()
+    if storage_backend == "azure":
+        from cst.azure_hiddens.config import resolve_train_repo_id as backend_resolve_train_repo_id
+    else:
+        from cst.hf_hiddens.config import resolve_train_repo_id as backend_resolve_train_repo_id
+    hf_train_repo = backend_resolve_train_repo_id(store_cfg)
 
     flat = sample_uniform(n_sp, seed=seed)
     tokenizer = load_tokenizer(model_path)
@@ -1382,7 +1406,12 @@ def _store_eval_one_task(
         steps=steps,
     )
 
-    repo_id = resolve_eval_repo_id(store, store=store)
+    storage_backend = str(store.get("storage_backend", "hf")).strip().lower()
+    if storage_backend == "azure":
+        from cst.azure_hiddens.config import resolve_eval_repo_id as backend_resolve_eval_repo_id
+    else:
+        from cst.hf_hiddens.config import resolve_eval_repo_id as backend_resolve_eval_repo_id
+    repo_id = backend_resolve_eval_repo_id(store, store=store)
     inference_bs = int(store.inference_batch_size)
     seed = int(store.get("seed", 0))
 
@@ -1453,7 +1482,7 @@ def run_store(cfg: DictConfig) -> int:
             return store_train_hiddens(cfg)
         if scope == "eval":
             return store_eval_hiddens(cfg)
-    except HubStorageFullError as e:
+    except (HfHubStorageFullError, AzureHubStorageFullError) as e:
         logger.warning(
             "store finished early (Hub storage full). Batches already on Hub are kept; "
             "re-run the same command after freeing space to resume. (%s)",

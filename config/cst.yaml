@@ -44,6 +44,8 @@ cst:
 # ---------------------------------------------------------------------------
 store:
   scope: train          # train | eval
+  storage_backend: azure   # hf | azure
+  azure_conn_str: DefaultEndpointsProtocol=https;AccountName=strace;AccountKey=o/hmwyKYgLAePShr4mvKgL/USycLa4WJcKOMuJAkxOu/7XjfakOQihod+1hp9CDEVOU40TRYQlUk+AStlV79KA==;EndpointSuffix=core.windows.net  # null = read from AZURE_STORAGE_CONNECTION_STRING
   model_path: ${model_path}
   device: cuda
   scratch_dir: outputs/cst_staging
