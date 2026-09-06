@@ -20,8 +20,8 @@ class HubStorageFullError(RuntimeError):
     """Parallel to HF HubStorageFullError. Azure equivalent might be OutOfRange or quota errors."""
 
 
-def _get_client(token: str) -> BlobServiceClient:
-    return BlobServiceClient.from_connection_string(token)
+def _get_client(token: str, max_block_size: int = 100 * 1024 * 1024) -> BlobServiceClient:
+    return BlobServiceClient.from_connection_string(token, max_block_size=max_block_size)
 
 
 def ensure_container(repo_id: str, token: str) -> None:
@@ -41,7 +41,7 @@ def download_blob_file(repo_id: str, blob_path: str, local_path: str | Path, tok
     client = _get_client(token)
     blob_client = client.get_blob_client(container=repo_id, blob=blob_path)
     with open(local_path, "wb") as f:
-        f.write(blob_client.download_blob().readall())
+        blob_client.download_blob(max_concurrency=24).readinto(f)
     return local_path
 
 
@@ -52,8 +52,16 @@ def upload_file(repo_id: str, local_path: str | Path, blob_path: str, token: str
     try:
         client = _get_client(token)
         blob_client = client.get_blob_client(container=repo_id, blob=blob_path)
+        try:
+            blob_client.delete_blob()
+        except Exception:
+            pass
         with open(local_path, "rb") as data:
-            blob_client.upload_blob(data, overwrite=True)
+            blob_client.upload_blob(
+                data,
+                overwrite=True,
+                max_concurrency=24,
+            )
     except HttpResponseError as e:
         if "QuotaExceeded" in str(e):
             raise HubStorageFullError(str(e)) from e
