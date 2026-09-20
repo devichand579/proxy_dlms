@@ -47,7 +47,7 @@ from cst.hf_hiddens.store import (
     upload_hidden_chunk,
 )
 from cst.azure_hiddens.store import HubStorageFullError as AzureHubStorageFullError
-from cst.pre_logits import DiskFullError
+from cst.pre_logits import DiskFullError, read_cst_hidden_meta
 from cst.store_budget import (
     max_inference_batch_size,
     model_weight_bytes,
@@ -59,6 +59,7 @@ from cst.train.adam_bf16 import AdamBF16
 from cst.train.memory_budget import plan_from_train_cfg
 from cst.naming import (
     cst_ckpt_name_token,
+    cst_hidden_chunk_basename,
     cst_hidden_name_token,
     model_label_from_path,
     resolve_train_best_in_dir,
@@ -155,9 +156,12 @@ def _cst_log_stem(cfg: DictConfig) -> str:
 
 def _setup_cst_file_logging(cfg: DictConfig) -> Path:
     """Write store/train/eval logger output to ``logs/cst_{mode}_*.log`` (same dir as eval.py)."""
+    import os
+    rank = os.environ.get("RANK", os.environ.get("SLURM_PROCID"))
+    rank_str = f"_rank{rank}" if rank is not None else ""
     log_dir = _REPO_ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"{_cst_log_stem(cfg)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_file = log_dir / f"{_cst_log_stem(cfg)}{rank_str}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
@@ -997,55 +1001,80 @@ def _store_hiddens(
     disk_headroom = 40.0 if _is_blank(dh) else float(dh)
 
     ueh = _coerce_use_eos_harness(store_cfg.get("use_eos_harness", True))
+
+    import os
+    world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", "1")))
+    rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
+
+    if world_size > 1:
+        logger.warning(
+            "multi-GPU store detected (WORLD_SIZE=%d, RANK=%d). "
+            "Auto-batching MUST be false to ensure consistent row alignment across workers. "
+            "Manifest pushes will be disabled. Run a single-GPU worker afterwards to seal the manifest.",
+            world_size, rank
+        )
+
     try:
         for offset, batch_rows in enumerate(row_batches):
             bi = start_idx + offset
+            if bi % world_size != rank:
+                continue
             if bi in skip:
                 continue
             logger.info("=== collect batch %d / %d ===", bi + 1, nbat)
-            b_gen, b_steps = _batch_gen_length_steps(
-                batch_rows,
-                int(store_cfg.get("gen_length", 512)),
-                int(store_cfg.get("steps", 512)),
-            )
-            if (b_gen, b_steps) != (
-                int(store_cfg.get("gen_length", 512)),
-                int(store_cfg.get("steps", 512)),
-            ):
+            candidate_path = scratch / cst_hidden_chunk_basename(name_token, bi)
+            cached_meta = read_cst_hidden_meta(candidate_path)
+            if cached_meta is not None:
                 logger.info(
-                    "batch %d: gen_length=%d steps=%d (ARC/CSQA override)",
-                    bi + 1,
-                    b_gen,
-                    b_steps,
+                    "reusing existing local chunk %s (skipping collection)",
+                    candidate_path.name,
                 )
-            try:
-                out_path, meta = collect_hidden_row_batch(
-                    model,
-                    tokenizer,
-                    model_path,
-                    scratch,
-                    rows=batch_rows,
-                    batch_idx=bi,
-                    name_token=name_token,
-                    device=str(device),
-                    mode_key=sched_m,
-                    gen_length=int(b_gen),
-                    steps=int(b_steps),
-                    block_length=store_cfg.get("block_length"),
-                    top_k=int(store_cfg.get("top_k", 1)),
-                    capture_context=capture_context,
-                    use_eos_harness=ueh,
-                    stream_to_disk=stream_to_disk,
-                    disk_headroom_gb=disk_headroom,
-                    scratch_dir=scratch,
-                    disk_label=f"batch {bi + 1}/{nbat}",
+                out_path = candidate_path
+                meta = cached_meta
+            else:
+                b_gen, b_steps = _batch_gen_length_steps(
+                    batch_rows,
+                    int(store_cfg.get("gen_length", 512)),
+                    int(store_cfg.get("steps", 512)),
                 )
-            except DiskFullError:
-                raise
+                if (b_gen, b_steps) != (
+                    int(store_cfg.get("gen_length", 512)),
+                    int(store_cfg.get("steps", 512)),
+                ):
+                    logger.info(
+                        "batch %d: gen_length=%d steps=%d (ARC/CSQA override)",
+                        bi + 1,
+                        b_gen,
+                        b_steps,
+                    )
+                try:
+                    out_path, meta = collect_hidden_row_batch(
+                        model,
+                        tokenizer,
+                        model_path,
+                        scratch,
+                        rows=batch_rows,
+                        batch_idx=bi,
+                        name_token=name_token,
+                        device=str(device),
+                        mode_key=sched_m,
+                        gen_length=int(b_gen),
+                        steps=int(b_steps),
+                        block_length=store_cfg.get("block_length"),
+                        top_k=int(store_cfg.get("top_k", 1)),
+                        capture_context=capture_context,
+                        use_eos_harness=ueh,
+                        stream_to_disk=stream_to_disk,
+                        disk_headroom_gb=disk_headroom,
+                        scratch_dir=scratch,
+                        disk_label=f"batch {bi + 1}/{nbat}",
+                    )
+                except DiskFullError:
+                    raise
             b_q = int(meta.get("n_question_tokens", 0))
             b_g = int(meta.get("n_gen_tokens", 0))
             b_t = int(meta.get("cst_train_tokens", b_q + b_g))
-            b_n = int(meta.get("batch_size", len(batch_rows)))
+            b_n = int(meta.get("batch_size", meta.get("n_samples", len(batch_rows))))
             nbytes = Path(out_path).stat().st_size
             try:
                 rec = backend_upload_hidden_chunk(
@@ -1068,6 +1097,7 @@ def _store_hiddens(
                     scope=scope,
                     skip_if_exists=resume,
                     n_rows=int(b_n),
+                    skip_manifest_push=(world_size > 1),
                 )
             except (HfHubStorageFullError, AzureHubStorageFullError, DiskFullError) as e:
                 try:

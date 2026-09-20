@@ -59,6 +59,30 @@ def is_cst_hidden_file(path: str | Path) -> bool:
         return False
 
 
+def read_cst_hidden_meta(path: str | Path) -> Optional[Dict[str, Any]]:
+    """Quickly read metadata from a CSTHID01 chunk header without loading tensors."""
+    path = Path(path)
+    if not path.is_file():
+        return None
+    try:
+        with path.open("rb") as f:
+            magic = f.read(8)
+            if magic != CST_HIDDEN_MAGIC:
+                return None
+            (hlen,) = struct.unpack("<Q", f.read(8))
+            header = json.loads(f.read(hlen))
+            shape = tuple(int(x) for x in header.get("shape", []))
+            if len(shape) == 4:
+                data_bytes = 2
+                for s in shape:
+                    data_bytes *= int(s)
+                if path.stat().st_size < CST_HIDDEN_HEADER_RESERVE + data_bytes:
+                    return None
+            return dict(header.get("meta") or {})
+    except Exception:
+        return None
+
+
 def load_cst_hidden_tensor(
     path: str | Path,
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:

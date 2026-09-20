@@ -7,7 +7,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from azure.storage.blob import BlobServiceClient
-from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
+from azure.core.exceptions import (
+    ResourceNotFoundError,
+    HttpResponseError,
+    ServiceRequestError,
+    ServiceResponseError,
+    AzureError,
+)
+import time
 
 from cst.hf_hiddens.manifest import MANIFEST_VERSION, ChunkRecord, HiddenManifest
 from cst.azure_hiddens.naming import chunk_blob_path, chunks_dir_blob, manifest_blob_path
@@ -21,7 +28,15 @@ class HubStorageFullError(RuntimeError):
 
 
 def _get_client(token: str, max_block_size: int = 100 * 1024 * 1024) -> BlobServiceClient:
-    return BlobServiceClient.from_connection_string(token, max_block_size=max_block_size)
+    return BlobServiceClient.from_connection_string(
+        token,
+        max_block_size=max_block_size,
+        retry_total=10,
+        retry_connect=10,
+        retry_read=10,
+        retry_status=10,
+        retry_backoff_factor=2,
+    )
 
 
 def ensure_container(repo_id: str, token: str) -> None:
@@ -35,37 +50,85 @@ def ensure_container(repo_id: str, token: str) -> None:
         logger.warning("ensure_container(%s) note: %s", repo_id, e)
 
 
-def download_blob_file(repo_id: str, blob_path: str, local_path: str | Path, token: str) -> Path:
+def download_blob_file(
+    repo_id: str,
+    blob_path: str,
+    local_path: str | Path,
+    token: str,
+    *,
+    max_concurrency: int = 4,
+    max_retries: int = 5,
+) -> Path:
     local_path = Path(local_path)
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    client = _get_client(token)
-    blob_client = client.get_blob_client(container=repo_id, blob=blob_path)
-    with open(local_path, "wb") as f:
-        blob_client.download_blob(max_concurrency=24).readinto(f)
+    for attempt in range(1, max_retries + 1):
+        try:
+            client = _get_client(token)
+            blob_client = client.get_blob_client(container=repo_id, blob=blob_path)
+            with open(local_path, "wb") as f:
+                blob_client.download_blob(max_concurrency=max_concurrency).readinto(f)
+            return local_path
+        except (ServiceRequestError, ServiceResponseError, AzureError, ConnectionError, OSError) as e:
+            if attempt == max_retries:
+                logger.error("Azure download_blob_file failed after %d attempts: %s", max_retries, e)
+                raise
+            backoff = min(60, 5 * (2 ** (attempt - 1)))
+            logger.warning(
+                "Azure download_blob_file network error (attempt %d/%d): %s; retrying in %ds...",
+                attempt, max_retries, e, backoff,
+            )
+            time.sleep(backoff)
     return local_path
 
 
-def upload_file(repo_id: str, local_path: str | Path, blob_path: str, token: str) -> str:
+def upload_file(
+    repo_id: str,
+    local_path: str | Path,
+    blob_path: str,
+    token: str,
+    *,
+    max_concurrency: int = 4,
+    max_retries: int = 5,
+) -> str:
     local_path = Path(local_path)
     if not local_path.is_file():
         raise FileNotFoundError(local_path)
-    try:
-        client = _get_client(token)
-        blob_client = client.get_blob_client(container=repo_id, blob=blob_path)
+    for attempt in range(1, max_retries + 1):
         try:
-            blob_client.delete_blob()
-        except Exception:
-            pass
-        with open(local_path, "rb") as data:
-            blob_client.upload_blob(
-                data,
-                overwrite=True,
-                max_concurrency=24,
+            client = _get_client(token)
+            blob_client = client.get_blob_client(container=repo_id, blob=blob_path)
+            try:
+                blob_client.delete_blob()
+            except Exception:
+                pass
+            with open(local_path, "rb") as data:
+                blob_client.upload_blob(
+                    data,
+                    overwrite=True,
+                    max_concurrency=max_concurrency,
+                )
+            return blob_path
+        except HttpResponseError as e:
+            if "QuotaExceeded" in str(e):
+                raise HubStorageFullError(str(e)) from e
+            if attempt == max_retries:
+                raise
+            backoff = min(60, 5 * (2 ** (attempt - 1)))
+            logger.warning(
+                "Azure upload_file failed (attempt %d/%d) with HttpResponseError: %s; retrying in %ds...",
+                attempt, max_retries, e, backoff,
             )
-    except HttpResponseError as e:
-        if "QuotaExceeded" in str(e):
-            raise HubStorageFullError(str(e)) from e
-        raise
+            time.sleep(backoff)
+        except (ServiceRequestError, ServiceResponseError, AzureError, ConnectionError, OSError) as e:
+            if attempt == max_retries:
+                logger.error("Azure upload_file failed after %d attempts: %s", max_retries, e)
+                raise
+            backoff = min(60, 5 * (2 ** (attempt - 1)))
+            logger.warning(
+                "Azure upload_file network error (attempt %d/%d): %s; retrying in %ds...",
+                attempt, max_retries, e, backoff,
+            )
+            time.sleep(backoff)
     return blob_path
 
 
@@ -180,6 +243,7 @@ def upload_hidden_chunk(
     scope: str = "train",
     skip_if_exists: bool = False,
     n_rows: Optional[int] = None,
+    skip_manifest_push: bool = False,
 ) -> ChunkRecord:
     """Upload one hidden .pt to Azure and update the manifest."""
     if not isinstance(token, str):
@@ -214,7 +278,8 @@ def upload_hidden_chunk(
     prev_chunks = list(manifest.chunks)
     manifest.upsert_chunk(rec)
     try:
-        push_manifest(manifest, repo_id, token=token, cache_dir=cache_dir)
+        if not skip_manifest_push:
+            push_manifest(manifest, repo_id, token=token, cache_dir=cache_dir)
     except Exception:
         manifest.chunks = prev_chunks
         raise
