@@ -391,13 +391,11 @@ _KNOWN_MODES = (
     "pure_diffusion",
     "block_diffusion",
     "eb_sampler",
-    "proxy_router",
     "top_k_c",
     "top_k_m",
     "fdm",
     "fhs",
     "dus",
-    "pr",
 )
 
 _MODE_TO_SCHEDULER = {
@@ -412,8 +410,6 @@ _MODE_TO_SCHEDULER = {
     "top_k_top_margin": "top_k_m",
     "top_k_margin": "top_k_m",
     "dus": "dus",
-    "proxy_router": "pr",
-    "pr": "pr",
 }
 
 # PCFG stems: {hf_model_short}-pcfg_{scheduler}_s{steps}
