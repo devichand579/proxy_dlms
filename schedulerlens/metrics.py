@@ -28,9 +28,10 @@ class ProxyReport:
 
 @dataclass
 class TaskMetrics:
-    """Task-level caps and per-step trends for M̂/Ĵ and sub-proxies."""
+    """Task-level caps and per-step trends for hard-gated M̂ / star Ĵ."""
     M_hat: float
-    J_hat: float
+    J_hat: float  # full-traj star sum
+    J_hat_early: float
     M_hat_uniform: float
     J_hat_uniform: float
     proxies: Dict[str, ProxyReport]
@@ -70,18 +71,16 @@ class TaskMetrics:
             f"Samples : {self.n_samples}",
             f"Steps   : {self.n_steps}",
             "",
-            "M-side (lower is better for M̂_t and regret):",
+            "Hard-gated M̂ / star Ĵ (sample means of sum caps):",
+            f"  M_hat        {self.M_hat:.6f}",
+            f"  J_hat        {self.J_hat:.6f}",
+            f"  J_hat_early  {self.J_hat_early:.6f}",
+            f"  G_hat        {self.M_hat + self.J_hat:.6f}",
         ]
-        for name in ("M_hat_t", "mean_regret", "cascade_gain"):
+        for name in PROXY_ATTRS:
             rep = self.proxies[name]
             lines.append(
-                f"  {name:14s}  entropy={rep.entropy:.6f}  uniform={rep.uniform:.6f}"
-            )
-        lines.extend(["", "J-side (lower is better for Ĵ_t, instability, rank_volatility):"])
-        for name in ("J_hat_t", "instability", "rank_volatility"):
-            rep = self.proxies[name]
-            lines.append(
-                f"  {name:14s}  entropy={rep.entropy:.6f}  uniform={rep.uniform:.6f}"
+                f"  {name:14s}  cap={rep.entropy:.6f}"
             )
         if self.bucket_size is not None and self.n_buckets > 0:
             lines.extend(self._bucket_summary_lines())
@@ -98,9 +97,8 @@ class TaskMetrics:
             "",
             f"Bucket trends (size={bs}, {self.n_buckets} buckets):",
             (
-                f"  {'b':>3s}  {'steps':>7s}  {'M_hat_t':>8s}  {'regret':>8s}  "
-                f"{'cascade':>8s}  {'J_hat_t':>8s}  {'instab':>8s}  "
-                f"{'rank_vol':>8s}  {'unmask':>6s}"
+                f"  {'b':>3s}  {'steps':>7s}  {'M_hat_t':>8s}  "
+                f"{'J_hat_t':>8s}  {'unmask':>6s}"
             ),
         ]
         for b in range(self.n_buckets):
@@ -112,8 +110,7 @@ class TaskMetrics:
             unmask = f"{u:.2f}" if np.isfinite(u) else "nan"
             lines.append(
                 f"  {b:3d}  {self._bucket_step_range(b):>7s}  "
-                f"{vals[0]:>8s}  {vals[1]:>8s}  {vals[2]:>8s}  {vals[3]:>8s}  "
-                f"{vals[4]:>8s}  {vals[5]:>8s}  {unmask:>6s}"
+                f"{vals[0]:>8s}  {vals[1]:>8s}  {unmask:>6s}"
             )
         return lines
 
@@ -122,6 +119,7 @@ class TaskMetrics:
         out = {
             "M_hat": self.M_hat,
             "J_hat": self.J_hat,
+            "J_hat_early": self.J_hat_early,
             "M_hat_uniform": self.M_hat_uniform,
             "J_hat_uniform": self.J_hat_uniform,
             "n_samples": self.n_samples,
@@ -258,6 +256,7 @@ def compute_task_metrics(
     # Online path (no buckets): O(1) sample retention.
     sample_entropy = {name: [] for name in PROXY_ATTRS}
     sample_uniform = {name: [] for name in PROXY_ATTRS}
+    sample_j_early: List[float] = []
     trend_sum = {name: [] for name in PROXY_ATTRS}
     trend_count = {name: [] for name in PROXY_ATTRS}
     n_unmasked_sum: List[float] = []
@@ -282,6 +281,7 @@ def compute_task_metrics(
         if need_buckets:
             all_sample_proxies.append(sp)
         else:
+            sample_j_early.append(float(sp.J_hat_early))
             for name in PROXY_ATTRS:
                 sample_entropy[name].append(float(sp.caps[name].entropy))
                 sample_uniform[name].append(float(sp.caps[name].uniform))
@@ -306,6 +306,7 @@ def compute_task_metrics(
         return TaskMetrics(
             M_hat=0.0,
             J_hat=0.0,
+            J_hat_early=0.0,
             M_hat_uniform=0.0,
             J_hat_uniform=0.0,
             proxies=empty,
@@ -320,6 +321,7 @@ def compute_task_metrics(
     proxies = _empty_proxy_reports()
     n_buckets = 0
     n_unmasked_bucket_trend = np.array([])
+    j_early_mean = 0.0
 
     if need_buckets:
         t_max = max(len(sp.step_proxies) for sp in all_sample_proxies)
@@ -330,6 +332,7 @@ def compute_task_metrics(
             rep.entropy = float(np.mean(rep.sample_entropy))
             rep.uniform = float(np.mean(rep.sample_uniform))
             rep.trend = _step_trends(all_sample_proxies, name, t_max)
+        j_early_mean = float(np.mean([sp.J_hat_early for sp in all_sample_proxies]))
         n_unmasked_trend = _step_trends(all_sample_proxies, "n_selected", t_max)
         n_buckets, n_unmasked_bucket_trend = _apply_bucket_trends(
             all_sample_proxies, proxies, t_max, int(bucket_size)
@@ -350,6 +353,7 @@ def compute_task_metrics(
                 ],
                 dtype=np.float64,
             )
+        j_early_mean = float(np.mean(sample_j_early)) if sample_j_early else 0.0
         n_unmasked_trend = np.array(
             [
                 (n_unmasked_sum[t] / n_unmasked_count[t])
@@ -360,11 +364,13 @@ def compute_task_metrics(
             dtype=np.float64,
         )
 
+    j_full = proxies["J_hat_t"].entropy
     return TaskMetrics(
         M_hat=proxies["M_hat_t"].entropy,
-        J_hat=proxies["J_hat_t"].entropy,
+        J_hat=j_full,
+        J_hat_early=j_early_mean,
         M_hat_uniform=proxies["M_hat_t"].uniform,
-        J_hat_uniform=proxies["J_hat_t"].uniform,
+        J_hat_uniform=j_full,
         proxies=proxies,
         n_unmasked_trend=n_unmasked_trend,
         n_unmasked_bucket_trend=n_unmasked_bucket_trend,
@@ -377,16 +383,21 @@ def compute_task_metrics(
 # --- from run_meta.py ---
 _KNOWN_MODELS = ("llada", "llada1_5", "llada-300m-pcfg","llada-300m-pcfg-1B", "llada-200m-pcfg", "llada-100m-pcfg", "dream")
 
-# Longer mode names first.
+# Longer mode names first (Hub files use top_k_confidence / top_k_top_margin).
 _KNOWN_MODES = (
+    "top_k_confidence",
+    "top_k_top_margin",
+    "top_k_margin",
     "pure_diffusion",
     "block_diffusion",
     "eb_sampler",
+    "proxy_router",
     "top_k_c",
     "top_k_m",
     "fdm",
     "fhs",
     "dus",
+    "pr",
 )
 
 _MODE_TO_SCHEDULER = {
@@ -397,7 +408,12 @@ _MODE_TO_SCHEDULER = {
     "fhs": "fhs",
     "top_k_c": "top_k_c",
     "top_k_m": "top_k_m",
+    "top_k_confidence": "top_k_c",
+    "top_k_top_margin": "top_k_m",
+    "top_k_margin": "top_k_m",
     "dus": "dus",
+    "proxy_router": "pr",
+    "pr": "pr",
 }
 
 # PCFG stems: {hf_model_short}-pcfg_{scheduler}_s{steps}
@@ -542,18 +558,30 @@ CSV_COLUMNS: List[str] = [
     "is_pcfg",
     "n_samples",
     "n_steps",
+    # Hard-gated M̂ / star Ĵ (sums over steps; early = first third)
     "M_hat",
     "J_hat",
-    "M_hat_uniform",
-    "J_hat_uniform",
-    "mean_regret_entropy",
-    "mean_regret_uniform",
-    "cascade_gain_entropy",
-    "cascade_gain_uniform",
-    "instability_entropy",
-    "instability_uniform",
-    "rank_volatility_entropy",
-    "rank_volatility_uniform",
+    "J_hat_early",
+    "G_hat",
+    # Completion diagnostics
+    "mean_commits_per_step",
+    "max_commits_per_step",
+    "total_commits",
+    "n_parallel_steps",
+    "n_steps_mean",
+    "final_masks_mean",
+    "final_masks_frac",
+    "early_stop_rate",
+    "eos_in_output_rate",
+    "output_len_mean",
+    "gen_length",
+    "conf_mean",
+    "ent_mean",
+    # Eval scores joined from strace_metrics.csv
+    "accuracy",
+    "avg_nfe_per_sample",
+    "strace_name",
+    "strace_metric_key",
     "model_commit_ppl",
     "oracle_ppl",
     "Mt_total",
@@ -588,16 +616,23 @@ def empty_metrics_row(**overrides: Any) -> Dict[str, Any]:
     for key in (
         "M_hat",
         "J_hat",
-        "M_hat_uniform",
-        "J_hat_uniform",
-        "mean_regret_entropy",
-        "mean_regret_uniform",
-        "cascade_gain_entropy",
-        "cascade_gain_uniform",
-        "instability_entropy",
-        "instability_uniform",
-        "rank_volatility_entropy",
-        "rank_volatility_uniform",
+        "J_hat_early",
+        "G_hat",
+        "mean_commits_per_step",
+        "max_commits_per_step",
+        "total_commits",
+        "n_parallel_steps",
+        "n_steps_mean",
+        "final_masks_mean",
+        "final_masks_frac",
+        "early_stop_rate",
+        "eos_in_output_rate",
+        "output_len_mean",
+        "gen_length",
+        "conf_mean",
+        "ent_mean",
+        "accuracy",
+        "avg_nfe_per_sample",
         "model_commit_ppl",
         "oracle_ppl",
         "Mt_total",
@@ -790,6 +825,8 @@ def build_metrics_row(
     repo: str = "",
     max_samples: Optional[int] = None,
     verbose: bool = False,
+    completion: Optional[Mapping[str, Any]] = None,
+    surface_means: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assemble one CSV-ready row for a trace NPZ."""
     trace_path = Path(trace_path)
@@ -811,13 +848,34 @@ def build_metrics_row(
         n_steps=metrics.n_steps,
         M_hat=metrics.M_hat,
         J_hat=metrics.J_hat,
-        M_hat_uniform=metrics.M_hat_uniform,
-        J_hat_uniform=metrics.J_hat_uniform,
+        J_hat_early=metrics.J_hat_early,
+        G_hat=float(metrics.M_hat) + float(metrics.J_hat),
     )
-    for name in ("mean_regret", "cascade_gain", "instability", "rank_volatility"):
-        rep = metrics.proxies[name]
-        row[f"{name}_entropy"] = rep.entropy
-        row[f"{name}_uniform"] = rep.uniform
+
+    if completion:
+        for key in (
+            "mean_commits_per_step",
+            "max_commits_per_step",
+            "total_commits",
+            "n_parallel_steps",
+            "n_steps_mean",
+            "final_masks_mean",
+            "final_masks_frac",
+            "early_stop_rate",
+            "eos_in_output_rate",
+            "output_len_mean",
+            "gen_length",
+            "conf_mean",
+            "ent_mean",
+        ):
+            if key in completion:
+                row[key] = completion[key]
+
+    if surface_means:
+        if "conf_mean" in surface_means:
+            row["conf_mean"] = surface_means["conf_mean"]
+        if "ent_mean" in surface_means:
+            row["ent_mean"] = surface_means["ent_mean"]
 
     if perplexity is not None:
         row["model_commit_ppl"] = perplexity.model_commit_ppl

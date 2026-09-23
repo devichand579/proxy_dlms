@@ -1,4 +1,13 @@
-"""Per-step M̂_t and Ĵ_t proxies from a generation trace."""
+"""Per-step M̂_t and Ĵ_t proxies from a generation trace.
+
+Definitions (hard-gated / star):
+  M̂_t = Σ_{i∈S_t} (−log c_i) · 1[H_i ≤ τ]     (τ = 1.25)
+  Ĵ_t = (Σ H − max H) on S_t if |S_t|≥2 else 0   (star MI)
+  Sample M̂         = Σ_t M̂_t
+  Sample Ĵ         = Σ_t Ĵ_t              (full trajectory)
+  Sample Ĵ_early   = Σ_t Ĵ_t over the early third of steps
+  Sample Ĝ         = M̂ + Ĵ
+"""
 
 from __future__ import annotations
 
@@ -8,18 +17,15 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
+# Hard-gate threshold on predictive entropy (nats).
+GATED_TAU = 1.25
+
 # Step-level series aggregated to sample/task caps and trends.
-PROXY_ATTRS = (
-    "M_hat_t",
-    "mean_regret",
-    "cascade_gain",
-    "J_hat_t",
-    "instability",
-    "rank_volatility",
-)
-M_PROXY_ATTRS = ("M_hat_t", "mean_regret", "cascade_gain")
-J_PROXY_ATTRS = ("J_hat_t", "instability", "rank_volatility")
-SUB_PROXY_ATTRS = ("mean_regret", "cascade_gain", "instability", "rank_volatility")
+PROXY_ATTRS = ("M_hat_t", "J_hat_t")
+M_PROXY_ATTRS = ("M_hat_t",)
+J_PROXY_ATTRS = ("J_hat_t",)
+# Kept for import compatibility; empty — old sub-proxies removed.
+SUB_PROXY_ATTRS: Tuple[str, ...] = ()
 
 
 class TraceProxyError(ValueError):
@@ -28,6 +34,8 @@ class TraceProxyError(ValueError):
 
 @dataclass
 class CapsPair:
+    """Sample/task cap. ``entropy`` and ``uniform`` are identical (sum caps)."""
+
     entropy: float = 0.0
     uniform: float = 0.0
 
@@ -35,14 +43,9 @@ class CapsPair:
 @dataclass
 class StepProxies:
     step: int
-    M_hat_t: float          # ordering quality proxy
-    J_hat_t: float          # parallelism error proxy
-    weight: float           # entropy-drop weight w_t
-    # sub-components (for diagnostics)
-    mean_regret: float = 0.0
-    cascade_gain: float = 0.0
-    instability: float = 0.0
-    rank_volatility: float = 0.0
+    M_hat_t: float  # hard-gated commit NLL on S_t
+    J_hat_t: float  # star MI on S_t (|S|≥2)
+    weight: float  # unused for sum caps; kept for API stability
     n_committed: int = 0
     n_selected: int = 0
     n_remaining: int = 0
@@ -50,9 +53,11 @@ class StepProxies:
 
 @dataclass
 class SampleProxies:
-    """Per-sample caps (entropy + uniform) for M̂/Ĵ and sub-proxies."""
+    """Per-sample caps for M̂ and star Ĵ (full + early)."""
+
     M_hat: float
-    J_hat: float
+    J_hat: float  # full-traj star sum
+    J_hat_early: float
     M_hat_uniform: float
     J_hat_uniform: float
     caps: Dict[str, CapsPair] = field(default_factory=dict)
@@ -63,57 +68,39 @@ def _empty_caps() -> Dict[str, CapsPair]:
     return {name: CapsPair() for name in PROXY_ATTRS}
 
 
-def _caps_pair(step_proxies: List[StepProxies], attr: str) -> CapsPair:
-    # Empty-unmask steps are defined as 0 but must not dilute sample caps.
-    active = [sp for sp in step_proxies if sp.n_selected > 0]
-    if not active:
-        return CapsPair()
-    values = [float(getattr(sp, attr)) for sp in active]
-    uniform = float(np.mean(values))
-    total_weight = sum(sp.weight for sp in active)
-    if total_weight <= 0:
-        return CapsPair(entropy=uniform, uniform=uniform)
-    entropy = float(
-        sum(sp.weight * v for sp, v in zip(active, values)) / total_weight
-    )
-    return CapsPair(entropy=entropy, uniform=uniform)
+def _trajectory_early_end(n_steps: int) -> int:
+    """Match ``metrics.trajectory_blocks`` early third end (exclusive)."""
+    if n_steps <= 0:
+        return 0
+    if n_steps < 3:
+        return n_steps
+    return n_steps // 3
 
 
-def _aggregate_sample_caps(step_proxies: List[StepProxies]) -> Dict[str, CapsPair]:
-    return {name: _caps_pair(step_proxies, name) for name in PROXY_ATTRS}
+def _aggregate_sample_caps(
+    step_proxies: List[StepProxies],
+) -> tuple[Dict[str, CapsPair], float, float]:
+    """Return (caps, J_hat, J_hat_early).
 
+    ``caps['J_hat_t']`` stores the **full** star sum (for task averaging / trends).
+    """
+    early_end = _trajectory_early_end(len(step_proxies))
+    m_sum = 0.0
+    j_full = 0.0
+    j_early = 0.0
+    for sp in step_proxies:
+        if sp.n_selected <= 0:
+            continue
+        m_sum += float(sp.M_hat_t)
+        j_full += float(sp.J_hat_t)
+        if sp.step < early_end:
+            j_early += float(sp.J_hat_t)
+    caps = {
+        "M_hat_t": CapsPair(entropy=m_sum, uniform=m_sum),
+        "J_hat_t": CapsPair(entropy=j_full, uniform=j_full),
+    }
+    return caps, j_full, j_early
 
-def _kendall_tau(a: np.ndarray, b: np.ndarray) -> float:
-    """Kendall tau between two rank vectors."""
-    n = len(a)
-    if n < 2:
-        return 0.0
-    concordant = discordant = 0
-    for i in range(n - 1):
-        for j in range(i + 1, n):
-            sign_a = np.sign(a[i] - a[j])
-            sign_b = np.sign(b[i] - b[j])
-            prod = sign_a * sign_b
-            if prod > 0:
-                concordant += 1
-            elif prod < 0:
-                discordant += 1
-    denom = n * (n - 1) / 2
-    if denom == 0:
-        return 0.0
-    return (concordant - discordant) / denom
-
-
-def _fast_kendall_tau(a: np.ndarray, b: np.ndarray) -> float:
-    """Kendall tau via scipy, with a numpy fallback."""
-    if len(a) < 2:
-        return 0.0
-    try:
-        from scipy.stats import kendalltau
-        tau, _ = kendalltau(a, b)
-        return float(tau) if np.isfinite(tau) else 0.0
-    except Exception:
-        return _kendall_tau(a, b)
 
 
 def _to_np(data, dtype=np.float32) -> Optional[np.ndarray]:
@@ -148,14 +135,24 @@ def _zero_step(step: int, n_committed: int, n_remaining: int) -> StepProxies:
         M_hat_t=0.0,
         J_hat_t=0.0,
         weight=0.0,
-        mean_regret=0.0,
-        cascade_gain=0.0,
-        instability=0.0,
-        rank_volatility=0.0,
         n_committed=n_committed,
         n_selected=0,
         n_remaining=n_remaining,
     )
+
+
+def _star_mi(entropies: np.ndarray) -> float:
+    """Σ H − max H; 0 if fewer than 2 positions."""
+    if entropies.size < 2:
+        return 0.0
+    return float(max(np.sum(entropies) - np.max(entropies), 0.0))
+
+
+def _gated_nll(conf: np.ndarray, ent: np.ndarray, tau: float) -> float:
+    c = np.clip(conf.astype(np.float64), 1e-8, 1.0)
+    h = ent.astype(np.float64)
+    return float(np.sum((-np.log(c)) * (h <= tau)))
+
 
 
 def _mask_diff_selection(
@@ -381,6 +378,7 @@ def compute_sample_proxies(
         return SampleProxies(
             M_hat=0.0,
             J_hat=0.0,
+            J_hat_early=0.0,
             M_hat_uniform=0.0,
             J_hat_uniform=0.0,
             caps=empty,
@@ -408,31 +406,8 @@ def compute_sample_proxies(
     for t in range(T):
         resolved.append(_resolve_selection(steps, t, gen_length))
 
-    committed_token = np.full(gen_length, -1, dtype=np.int64)
-    commit_conf = np.zeros(gen_length, dtype=np.float32)
-
-    for t, (sel, sel_tok) in enumerate(resolved):
-        conf = _require_array(
-            steps[t]["confidences"], name="confidences", step=t, gen_length=gen_length
-        )
-        pred = _require_array(
-            steps[t]["predictions"], name="predictions", step=t, gen_length=gen_length
-        )
-        for pos in np.where(sel)[0]:
-            if committed_token[pos] != -1:
-                continue
-            # Trust selected_tokens only on selected positions (no pad/0 heuristic).
-            tok = int(sel_tok[pos])
-            if tok < 0:
-                tok = int(pred[pos])
-            if tok < 0:
-                raise TraceProxyError(
-                    f"step {t}: selected position {pos} has no usable token id"
-                )
-            committed_token[pos] = tok
-            commit_conf[pos] = float(conf[pos])
-
     step_proxy_list: List[StepProxies] = []
+    tau = GATED_TAU
 
     for t in range(T):
         mask_t = _require_array(
@@ -441,106 +416,46 @@ def compute_sample_proxies(
         conf_t = _require_array(
             steps[t]["confidences"], name="confidences", step=t, gen_length=gen_length
         )
-        pred_t = _require_array(
-            steps[t]["predictions"], name="predictions", step=t, gen_length=gen_length
-        )
         ent_t = _require_array(
             steps[t]["entropies"], name="entropies", step=t, gen_length=gen_length
         )
         sel_t, _sel_tok = resolved[t]
 
         S_t = np.where(sel_t)[0]
-        C_t = np.where(~mask_t)[0]
-        S_bar_t = np.where(mask_t & ~sel_t)[0]
-
-        n_selected = len(S_t)
-        n_committed = len(C_t)
-        n_remaining = len(S_bar_t)
+        n_selected = int(S_t.size)
+        n_committed = int(np.sum(~mask_t))
+        n_remaining = int(np.sum(mask_t & ~sel_t))
 
         if n_selected == 0:
             step_proxy_list.append(_zero_step(t, n_committed, n_remaining))
             continue
 
-        weight = float(np.sum(ent_t[S_t]))
+        c_sel = conf_t[S_t]
+        h_sel = ent_t[S_t]
+        m_hat_t = _gated_nll(c_sel, h_sel, tau)
+        j_hat_t = _star_mi(h_sel.astype(np.float64))
+        weight = float(np.sum(h_sel))
 
-        cascade_gain_val = 0.0
-        if t > 0 and n_remaining > 0:
-            conf_prev = _require_array(
-                steps[t - 1]["confidences"],
-                name="confidences",
-                step=t - 1,
-                gen_length=gen_length,
+        step_proxy_list.append(
+            StepProxies(
+                step=t,
+                M_hat_t=m_hat_t,
+                J_hat_t=j_hat_t,
+                weight=weight,
+                n_committed=n_committed,
+                n_selected=n_selected,
+                n_remaining=n_remaining,
             )
-            delta = conf_t[S_bar_t] - conf_prev[S_bar_t]
-            cascade_gain_val = float(np.mean(delta))
+        )
 
-        mean_regret_val = 0.0
-        if n_committed > 0:
-            regrets = []
-            for pos in C_t:
-                tok = int(committed_token[pos])
-                if tok < 0:
-                    raise TraceProxyError(
-                        f"step {t}: committed position {pos} has no recorded token"
-                    )
-                if pred_t[pos] == tok:
-                    prob_committed = float(conf_t[pos])
-                else:
-                    prob_committed = 0.0
-                r = float(commit_conf[pos]) - prob_committed
-                regrets.append(max(0.0, r))
-            mean_regret_val = float(np.mean(regrets)) if regrets else 0.0
-
-        M_hat_t = mean_regret_val / (1.0 + max(0.0, cascade_gain_val))
-
-        instability_val = 0.0
-        if t > 0:
-            pred_prev = _require_array(
-                steps[t - 1]["predictions"],
-                name="predictions",
-                step=t - 1,
-                gen_length=gen_length,
-            )
-            same = np.sum(pred_t[S_t] == pred_prev[S_t])
-            instability_val = 1.0 - float(same) / n_selected
-
-        rank_vol_val = 0.0
-        if t > 0 and gen_length >= 2:
-            conf_prev = _require_array(
-                steps[t - 1]["confidences"],
-                name="confidences",
-                step=t - 1,
-                gen_length=gen_length,
-            )
-            c_cur = conf_t.astype(np.float64)
-            c_prv = conf_prev.astype(np.float64)
-            r_cur = np.argsort(np.argsort(c_cur)).astype(np.float64)
-            r_prv = np.argsort(np.argsort(c_prv)).astype(np.float64)
-            tau = _fast_kendall_tau(r_cur, r_prv)
-            rank_vol_val = 1.0 - (tau + 1.0) / 2.0
-
-        J_hat_t = instability_val * rank_vol_val
-
-        step_proxy_list.append(StepProxies(
-            step=t,
-            M_hat_t=M_hat_t,
-            J_hat_t=J_hat_t,
-            weight=weight,
-            mean_regret=mean_regret_val,
-            cascade_gain=cascade_gain_val,
-            instability=instability_val,
-            rank_volatility=rank_vol_val,
-            n_committed=n_committed,
-            n_selected=n_selected,
-            n_remaining=n_remaining,
-        ))
-
-    caps = _aggregate_sample_caps(step_proxy_list)
+    caps, j_full, j_early = _aggregate_sample_caps(step_proxy_list)
+    m_cap = caps["M_hat_t"].entropy
     return SampleProxies(
-        M_hat=caps["M_hat_t"].entropy,
-        J_hat=caps["J_hat_t"].entropy,
-        M_hat_uniform=caps["M_hat_t"].uniform,
-        J_hat_uniform=caps["J_hat_t"].uniform,
+        M_hat=m_cap,
+        J_hat=j_full,
+        J_hat_early=j_early,
+        M_hat_uniform=m_cap,
+        J_hat_uniform=j_full,
         caps=caps,
         step_proxies=step_proxy_list,
     )

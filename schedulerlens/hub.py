@@ -12,6 +12,10 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from schedulerlens.completion import (
+    compute_completion_metrics,
+    join_rows_with_strace,
+)
 from schedulerlens.metrics import (
     build_metrics_row,
     compute_task_metrics,
@@ -195,6 +199,7 @@ def analyze_one_npz(
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
     skip_jt: bool = False,
+    strace_metrics_path: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Analyze one local NPZ (samples streamed via ``iter_npz_traces``)."""
     meta = parse_run_stem(trace_path)
@@ -207,6 +212,14 @@ def analyze_one_npz(
         max_samples=max_samples,
         bucket_size=bucket_size,
         verbose=verbose,
+    )
+
+    steps_budget = int(meta.steps) if meta.steps is not None else int(metrics.n_steps)
+    completion = compute_completion_metrics(
+        trace_path,
+        model=meta.model,
+        steps_budget=steps_budget,
+        max_samples=max_samples,
     )
 
     ppl = compute_task_perplexity(
@@ -248,7 +261,9 @@ def analyze_one_npz(
         correlations=correlations,
         meta=meta,
         repo=repo,
+        completion=completion,
     )
+    row = join_rows_with_strace([row], strace_path=strace_metrics_path)[0]
 
     return {
         "row": row,
@@ -256,6 +271,7 @@ def analyze_one_npz(
         "perplexity": ppl,
         "correlations": correlations,
         "meta": meta,
+        "completion": completion,
     }
 
 
@@ -544,6 +560,7 @@ def run_compare(
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
     skip_jt: bool = False,
+    strace_metrics_path: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Discover NPZs (Hub or local), analyze each, write ``schedulerlens_metrics.csv``.
 
@@ -712,6 +729,7 @@ def run_compare(
                     jt_markov_order=jt_markov_order,
                     jt_large_set=jt_large_set,
                     skip_jt=skip_jt,
+                    strace_metrics_path=strace_metrics_path,
                 )
                 rows.append(result["row"])
                 perplexity = result.get("perplexity")
