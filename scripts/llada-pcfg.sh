@@ -41,6 +41,8 @@
 #   sbatch scripts/llada-pcfg.sh --mode eval --slurm ...  # one srun (GPU step); omit --slurm inside sbatch unless your site requires it
 #
 # Hydra multirun (login node, one job per combo):
+#   ./scripts/llada-pcfg.sh --mode train --multirun --launcher slurm_h100 \
+#       train.variant=100m,200m train.peak_lr=4e-4,1e-4
 #   python hydra_runners/run_llada-pcfg.py mode=train train.variant=100m,200m --multirun launcher=slurm_h100
 ########################################################################################
 
@@ -64,10 +66,12 @@ LLaDA-PCFG launcher — config defaults in config/llada-pcfg.yaml; flags overrid
 
 Run:
   --mode train|eval       (default: train)
+  --multirun / -m         Hydra multirun: one job per comma-swept override combo
   --slurm                 wrap launch in a single srun (optional with sbatch; avoid double-srun)
   --device DEV            0|1|cuda|cuda:0|cpu
   --offline               cached HF + local W&B
   --launcher NAME         Hydra launcher group (local|slurm_h100|slurm_l40|...)
+                          For --multirun from a login node, use launcher=slurm_* (not sbatch of this script)
 
 Train (maps to train.* in config):
   --variant 100m|200m|300m
@@ -120,6 +124,12 @@ Examples:
   ./scripts/llada-pcfg.sh --mode eval --model_path checkpoints/llada-100m-pcfg/checkpoint-best_val --schedulers all
   sbatch scripts/llada-pcfg.sh --mode train --hf_dataset pcfg-code --nproc 4 --slurm
 
+  # Sweeps (login node → one SLURM job per combo). Multirun ≠ DDP: use --nproc inside each train job.
+  ./scripts/llada-pcfg.sh --mode train --multirun --launcher slurm_h100 \
+    train.variant=100m,200m train.peak_lr=4e-4,1e-4
+  ./scripts/llada-pcfg.sh --mode eval --multirun --launcher slurm_h100 \
+    eval.hf_model=user/llada-100m-pcfg,user/llada-200m-pcfg eval.schedulers=pd,bd
+
 Extra overrides (advanced): append hydra key=value after flags, e.g. train.mid_lr=2e-4
 EOF
 }
@@ -127,6 +137,7 @@ EOF
 # --- run ---
 MODE="train"
 SLURM_MODE=false
+MULTIRUN=false
 DEVICE=""
 OFFLINE=false
 LAUNCHER=""
@@ -202,6 +213,10 @@ while [[ $# -gt 0 ]]; do
     --mode)
       MODE="$2"
       shift 2
+      ;;
+    --multirun|-m)
+      MULTIRUN=true
+      shift
       ;;
     --slurm)
       SLURM_MODE=true
@@ -561,6 +576,7 @@ fi
 echo "Configuration (unset flags use config/llada-pcfg.yaml):"
 echo "  mode=${MODE}"
 echo "  config=config/llada-pcfg.yaml"
+echo "  multirun=${MULTIRUN}"
 if [[ ${#OVERRIDES[@]} -gt 1 || ${#EXTRA[@]} -gt 0 ]]; then
   echo "  overrides: ${OVERRIDES[*]} ${EXTRA[*]}"
 else
@@ -569,4 +585,9 @@ fi
 echo "  slurm=${SLURM_MODE} offline=${OFFLINE} device=${DEVICE:-config default}"
 echo ""
 
-"${RUN[@]}" python hydra_runners/run_llada-pcfg.py "${OVERRIDES[@]}" "${EXTRA[@]}"
+HYDRA_FLAGS=()
+if [[ "$MULTIRUN" == "true" ]]; then
+  HYDRA_FLAGS+=(--multirun)
+fi
+
+"${RUN[@]}" python hydra_runners/run_llada-pcfg.py "${HYDRA_FLAGS[@]}" "${OVERRIDES[@]}" "${EXTRA[@]}"

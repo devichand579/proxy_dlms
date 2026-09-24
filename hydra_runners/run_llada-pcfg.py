@@ -7,6 +7,7 @@ Shell: ./scripts/llada-pcfg.sh --mode train|eval [hydra overrides...]
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,84 @@ def _to_bool(val: Any) -> bool:
         return False
     return str(val).strip().lower() in ("true", "1", "yes", "on")
 
+
+def _is_unset(val: Any) -> bool:
+    return val is None or str(val).strip() in ("", "null", "None")
+
+
+def _hydra_multirun_active() -> bool:
+    return "--multirun" in sys.argv or "-m" in sys.argv
+
+
+def _hydra_job_num() -> int:
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        return int(HydraConfig.get().job.num)
+    except Exception:
+        return 0
+
+
+def _safe_token(val: Any) -> str:
+    text = str(val).strip().replace("/", "-").replace(" ", "")
+    text = re.sub(r"[^A-Za-z0-9._+-]+", "", text)
+    return text[:40] if text else ""
+
+
+def _format_lr_token(val: Any) -> str:
+    try:
+        text = f"{float(val):.0e}".replace("e-0", "e-").replace("e+0", "e+")
+        return _safe_token(text)
+    except (TypeError, ValueError):
+        return _safe_token(val)
+
+
+def _default_train_checkpoint_root(train: dict[str, Any]) -> Path:
+    """Mirror ``llada-pcfg.utils.default_checkpoint_dir`` without importing train path."""
+    hf_model = train.get("hf_model")
+    if not _is_unset(hf_model):
+        name = str(hf_model).strip().rsplit("/", 1)[-1]
+        if name:
+            return _REPO_ROOT / "checkpoints" / name
+    variant = train.get("variant") or "100m"
+    key = str(variant).lower().replace("llada-", "")
+    return _REPO_ROOT / "checkpoints" / f"llada-{key}-pcfg"
+
+
+def _multirun_train_suffix(train: dict[str, Any]) -> str:
+    """Short ``mr{job}_{digest}`` so swept train jobs do not share checkpoints / W&B names."""
+    parts: list[str] = []
+    for key, short, fmt in (
+        ("variant", "v", _safe_token),
+        ("peak_lr", "lr", _format_lr_token),
+        ("batch_size", "bs", _safe_token),
+        ("steps", "s", _safe_token),
+        ("epochs", "ep", _safe_token),
+        ("seed", "seed", _safe_token),
+        ("hf_dataset", "ds", _safe_token),
+    ):
+        val = train.get(key)
+        if _is_unset(val):
+            continue
+        tok = fmt(val)
+        if tok:
+            parts.append(f"{short}{tok}")
+    digest = "_".join(parts)[:96] if parts else "job"
+    return f"mr{_hydra_job_num()}_{digest}"
+
+
+def _disambiguate_train_for_multirun(train: dict[str, Any]) -> dict[str, Any]:
+    """Fill unset ``out_dir`` / ``wandb_run_name`` under Hydra ``--multirun``."""
+    if not _hydra_multirun_active():
+        return train
+    out = dict(train)
+    suffix = _multirun_train_suffix(out)
+    if _is_unset(out.get("out_dir")):
+        out["out_dir"] = str(_default_train_checkpoint_root(out) / suffix)
+    if _is_unset(out.get("wandb_run_name")):
+        variant = _safe_token(out.get("variant") or "run") or "run"
+        out["wandb_run_name"] = f"pcfg-{variant}-{suffix}"
+    return out
 
 def _resolve_path(val: str | Path | None, *, base: Path) -> str | None:
     if val is None or str(val).strip() in ("", "null", "None"):
@@ -268,7 +347,7 @@ def _pythonpath_env(env: dict[str, str]) -> dict[str, str]:
 
 
 def run_train(cfg: DictConfig, *, use_slurm: bool = False) -> int:
-    train = _section_dict(cfg, "train")
+    train = _disambiguate_train_for_multirun(_section_dict(cfg, "train"))
     nproc = int(train.get("nproc_per_node") or 1)
     if nproc < 1:
         raise ValueError("train.nproc_per_node must be >= 1")

@@ -3,9 +3,15 @@
 #   python hydra_runners/run_llada-pcfg.py mode=train train.hf_dataset=pcfg-code train.batch_size=128
 #   python hydra_runners/run_llada-pcfg.py mode=eval eval.hf_model=username/llada-100m-pcfg
 #
-# Multirun ablations (one SLURM job per combo):
+# Multirun ablations (one job per comma combo). From a login node use launcher=slurm_*:
 #   python hydra_runners/run_llada-pcfg.py mode=train train.variant=100m,200m train.peak_lr=4e-4,1e-4 \
 #       --multirun launcher=slurm_h100
+#   ./scripts/llada-pcfg.sh --mode train --multirun --launcher slurm_h100 \
+#       train.variant=100m,200m train.peak_lr=4e-4,1e-4
+#   # Eval sweep:
+#   ./scripts/llada-pcfg.sh --mode eval --multirun --launcher slurm_h100 \
+#       eval.hf_model=user/a,user/b eval.schedulers=pd,bd
+#
 #
 # Shell (interactive or sbatch): ./scripts/llada-pcfg.sh --mode train [hydra overrides...]
 #

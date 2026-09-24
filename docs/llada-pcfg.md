@@ -291,6 +291,8 @@ python llada-pcfg/scripts/train_pcfg_llada.py --variant 100m --train-tokens 5000
 
 ### Multi-GPU (DDP)
 
+DDP is **inside one train job** (`train.nproc_per_node` / `--nproc`). It is separate from Hydra **`--multirun`** sweeps (many independent jobs). Match `gres: gpu:N` / `#SBATCH --gres=gpu:N` to `nproc`.
+
 ```bash
 torchrun --nproc_per_node=2 llada-pcfg/scripts/train_pcfg_llada.py \
   --variant 100m --corpus data/pcfg --steps 5000 --batch-size 16
@@ -319,7 +321,15 @@ Config defaults live in **`config/llada-pcfg.yaml`**. The shell script exposes f
 # Slurm
 sbatch scripts/llada-pcfg.sh --mode train --hf_dataset pcfg-code --nproc 4 --slurm
 
-# Hydra multirun ablations (login node → one SLURM job per combo)
+# Hydra multirun sweeps (login node → one SLURM job per combo)
+# Multirun = many independent jobs. --nproc / train.nproc_per_node = DDP GPUs inside one train
+# (match launcher gres). Unset train.out_dir / train.wandb_run_name get an automatic
+# mr{job}_{digest} suffix under --multirun so checkpoints and W&B runs do not collide.
+./scripts/llada-pcfg.sh --mode train --multirun --launcher slurm_h100 \
+  train.variant=100m,200m train.peak_lr=4e-4,1e-4
+./scripts/llada-pcfg.sh --mode eval --multirun --launcher slurm_h100 \
+  eval.hf_model=user/llada-100m-pcfg,user/llada-200m-pcfg eval.schedulers=pd,bd
+# Equivalent Python entry:
 python hydra_runners/run_llada-pcfg.py mode=train train.variant=100m,200m train.peak_lr=4e-4,1e-4 \
   --multirun launcher=slurm_h100
 ```
