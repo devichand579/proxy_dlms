@@ -44,16 +44,81 @@ def _ensure_nltk() -> None:
     _NLTK_READY = True
 
 
+def _decode_token(tokenizer, token_id: int) -> str:
+    return tokenizer.decode([int(token_id)], skip_special_tokens=False).strip()
+
+
 def pos_tag_token(tokenizer, token_id: int) -> Tuple[str, str]:
     """Decode one token id and return (surface, Penn-Treebank POS tag)."""
     _ensure_nltk()
     from nltk import pos_tag
 
-    text = tokenizer.decode([int(token_id)], skip_special_tokens=False).strip()
+    text = _decode_token(tokenizer, token_id)
     if not text:
         return "", "EMPTY"
     tag = pos_tag([text])[0][1]
     return text, tag
+
+
+def retag_events_word_level(
+    events: List[Tuple[int, int, int, str, str]],
+    tokenizer,
+) -> List[Tuple[int, int, int, str, str]]:
+    """Replace per-BPE tags with word-level Penn tags from the reconstructed string.
+
+    Tokens are aligned to ``TreebankWordTokenizer`` spans via incremental decode.
+    Falls back to the original tags if decode or NLTK fails.
+    """
+    if not events:
+        return events
+    _ensure_nltk()
+    from nltk import pos_tag
+    from nltk.tokenize import TreebankWordTokenizer
+
+    first: Dict[int, Tuple[int, int, int, str, str]] = {}
+    for ev in events:
+        if ev[1] not in first:
+            first[ev[1]] = ev
+    ordered = [first[p] for p in sorted(first)]
+    ids = [int(ev[2]) for ev in ordered]
+    try:
+        full = tokenizer.decode(ids, skip_special_tokens=False)
+        tw = TreebankWordTokenizer()
+        spans = list(tw.span_tokenize(full))
+        words = [full[s:e] for s, e in spans]
+        tagged = pos_tag(words) if words else []
+    except Exception as exc:
+        logger.debug("word-level POS retag skipped: %s", exc)
+        return events
+    if not spans or not tagged:
+        return events
+
+    token_spans: List[Tuple[int, int]] = []
+    prev = ""
+    for i in range(len(ids)):
+        try:
+            cur = tokenizer.decode(ids[: i + 1], skip_special_tokens=False)
+        except Exception:
+            return events
+        if cur.startswith(prev):
+            start = len(prev)
+        else:
+            start = max(0, len(cur) - max(len(ordered[i][3]), 1))
+        token_spans.append((start, len(cur)))
+        prev = cur
+
+    pos_to_tag: Dict[int, str] = {}
+    for ev, (ts, te) in zip(ordered, token_spans):
+        best_tag = ev[4]
+        best_ov = 0
+        for (ws, we), (_w, tag) in zip(spans, tagged):
+            ov = min(te, we) - max(ts, ws)
+            if ov > best_ov:
+                best_ov = ov
+                best_tag = tag
+        pos_to_tag[ev[1]] = best_tag
+
+    return [(s, p, tid, text, pos_to_tag.get(p, tag)) for s, p, tid, text, tag in events]
 
 
 def _squeeze_batch(arr) -> Optional[np.ndarray]:
@@ -92,10 +157,20 @@ def reconstruct_unmasking_order(trace_dict: dict) -> Dict[int, int]:
     return order
 
 
+def _token_text_tag(tokenizer, token_id: int, tag_tokens: bool) -> Tuple[str, str]:
+    if tag_tokens:
+        return pos_tag_token(tokenizer, token_id)
+    text = _decode_token(tokenizer, token_id)
+    if not text:
+        return "", "EMPTY"
+    return text, "UNK"
+
+
 def _unmask_events_from_selected(
     trace_dict: dict,
     tokenizer,
     skip_ids: set,
+    tag_tokens: bool = True,
 ) -> List[Tuple[int, int, int, str, str]]:
     """Prefer explicit selected_positions when present."""
     events: List[Tuple[int, int, int, str, str]] = []
@@ -109,7 +184,7 @@ def _unmask_events_from_selected(
             tid = int(tok[int(pos)])
             if tid in skip_ids:
                 continue
-            text, tag = pos_tag_token(tokenizer, tid)
+            text, tag = _token_text_tag(tokenizer, tid, tag_tokens)
             if not text:
                 continue
             events.append((step, int(pos), tid, text, tag))
@@ -120,6 +195,7 @@ def _unmask_events_from_masks(
     trace_dict: dict,
     tokenizer,
     skip_ids: set,
+    tag_tokens: bool = True,
 ) -> List[Tuple[int, int, int, str, str]]:
     """Infer unmask events from consecutive mask_index tensors."""
     step_traces = trace_dict.get("step_traces", [])
@@ -142,7 +218,7 @@ def _unmask_events_from_masks(
                 tid = int(preds[pos])
             if tid is None or tid in skip_ids:
                 continue
-            text, tag = pos_tag_token(tokenizer, tid)
+            text, tag = _token_text_tag(tokenizer, tid, tag_tokens)
             if not text:
                 continue
             events.append((step, int(pos), tid, text, tag))
@@ -153,12 +229,17 @@ def extract_unmask_events(
     trace_dict: dict,
     tokenizer,
     skip_ids: set,
+    tag_tokens: bool = True,
 ) -> List[Tuple[int, int, int, str, str]]:
     """Return list of (step, gen_pos, token_id, token_str, pos_tag)."""
-    selected = _unmask_events_from_selected(trace_dict, tokenizer, skip_ids)
+    selected = _unmask_events_from_selected(
+        trace_dict, tokenizer, skip_ids, tag_tokens=tag_tokens
+    )
     if selected:
         return selected
-    return _unmask_events_from_masks(trace_dict, tokenizer, skip_ids)
+    return _unmask_events_from_masks(
+        trace_dict, tokenizer, skip_ids, tag_tokens=tag_tokens
+    )
 
 
 def _bucket_indices(t_max: int, bucket_size: int) -> List[Tuple[int, int]]:
@@ -300,7 +381,10 @@ def compute_pos_metrics(
         if max_samples is not None and i >= max_samples:
             break
         try:
-            events = extract_unmask_events(trace_dict, tokenizer, skip_ids)
+            events = extract_unmask_events(
+                trace_dict, tokenizer, skip_ids, tag_tokens=False
+            )
+            events = retag_events_word_level(events, tokenizer)
             per_sample_events.append(events)
             n_steps = len(trace_dict.get("step_traces", []))
             if n_steps:

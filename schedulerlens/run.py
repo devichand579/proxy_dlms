@@ -23,6 +23,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from repo_env_defaults import apply_repo_env_defaults  # noqa: E402
+from schedulerlens.completion import (  # noqa: E402
+    compute_completion_metrics,
+    join_rows_with_strace,
+)
 from schedulerlens.metrics import (  # noqa: E402
     TaskMetrics,
     build_metrics_row,
@@ -60,6 +64,7 @@ def run_schedulerlens(
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
     skip_jt: bool = False,
+    strace_metrics_path: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Compute metrics and write metrics.json / metrics.csv to output_dir."""
     _ensure_pcfg_path()
@@ -75,6 +80,14 @@ def run_schedulerlens(
         verbose=verbose,
     )
 
+    steps_budget = int(meta.steps) if meta.steps is not None else int(metrics.n_steps)
+    completion = compute_completion_metrics(
+        trace_path,
+        model=meta.model,
+        steps_budget=steps_budget,
+        max_samples=max_samples,
+    )
+
     metrics_path = output_dir / "metrics.json"
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(
@@ -82,6 +95,7 @@ def run_schedulerlens(
                 "trace_path": str(trace_path.resolve()),
                 "meta": meta.to_dict(),
                 **metrics.to_dict(),
+                "completion": completion,
             },
             f,
             indent=2,
@@ -90,6 +104,8 @@ def run_schedulerlens(
     result: Dict[str, Any] = {
         "M_hat": metrics.M_hat,
         "J_hat": metrics.J_hat,
+        "J_hat_early": metrics.J_hat_early,
+        "G_hat": float(metrics.M_hat) + float(metrics.J_hat),
         "M_hat_uniform": metrics.M_hat_uniform,
         "J_hat_uniform": metrics.J_hat_uniform,
         "n_samples": metrics.n_samples,
@@ -97,6 +113,7 @@ def run_schedulerlens(
         "metrics_path": str(metrics_path.resolve()),
         "metrics": metrics,
         "meta": meta,
+        "completion": completion,
     }
 
     ppl = None
@@ -189,7 +206,9 @@ def run_schedulerlens(
         perplexity=ppl,
         correlations=correlations,
         meta=meta,
+        completion=completion,
     )
+    row = join_rows_with_strace([row], strace_path=strace_metrics_path)[0]
     csv_path = write_metrics_csv(output_dir / "metrics.csv", [row])
     result["csv_path"] = str(csv_path.resolve())
     return result
@@ -285,6 +304,13 @@ def _add_oracle_args(p: argparse.ArgumentParser) -> None:
         "--oracle-no-jt",
         action="store_true",
         help="Skip Jt entirely (Mt + commit NLL/PPL only). Much faster for EB/DUS.",
+    )
+    p.add_argument(
+        "--strace-metrics",
+        type=Path,
+        default=None,
+        help="Path to strace_metrics.csv for accuracy/NFE join "
+        "(default: fetch_evals/strace_metrics.csv)",
     )
 
 
@@ -386,6 +412,7 @@ def _cmd_file(args: argparse.Namespace) -> int:
             jt_markov_order=args.oracle_jt_markov_order,
             jt_large_set=args.oracle_jt_large_set,
             skip_jt=args.oracle_no_jt,
+            strace_metrics_path=args.strace_metrics,
         )
     except TraceProxyError as e:
         logger.error("Aborted (bad trace data): %s", e)
@@ -472,6 +499,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             jt_markov_order=args.oracle_jt_markov_order,
             jt_large_set=args.oracle_jt_large_set,
             skip_jt=args.oracle_no_jt,
+            strace_metrics_path=args.strace_metrics,
         )
         if args.local:
             result = analyze_local_file(
@@ -549,6 +577,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             jt_markov_order=args.oracle_jt_markov_order,
             jt_large_set=args.oracle_jt_large_set,
             skip_jt=args.oracle_no_jt,
+            strace_metrics_path=args.strace_metrics,
         )
     except TraceProxyError as e:
         logger.error("%s", e)

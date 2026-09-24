@@ -1,17 +1,14 @@
 # SchedulerLens
 
-SchedulerLens analyzes **masked diffusion schedulers** from generation traces. It reports M̂/Ĵ caps and sub-proxies, commit / oracle perplexity, and optional oracle–proxy correlations (PCFG).
+SchedulerLens analyzes **masked diffusion schedulers** from generation traces. It reports hard-gated M̂ / star Ĵ caps, completion diagnostics, optional strace accuracy/NFE join, commit / oracle perplexity, and PCFG oracle–proxy correlations.
 
-| Proxy | Role | Lower is better? |
-| ----- | ---- | ---------------- |
-| **M̂_t** (`M_hat_t`) | Ordering quality | Yes |
-| **mean_regret** | Post-commit regret over `C_t` | Yes |
-| **cascade_gain** | Confidence lift on still-masked positions | Context-dependent |
-| **Ĵ_t** (`J_hat_t`) | Parallelism error | Yes |
-| **instability** | Argmax flips on `S_t` | Yes |
-| **rank_volatility** | Confidence rank shuffling over gen region | Yes |
+| Proxy | Definition | Cap |
+| ----- | ---------- | --- |
+| **M̂_t** (`M_hat_t`) | \(\sum_{i\in S_t}(-\log c_i)\cdot\mathbf{1}[H_i\le\tau]\), \(\tau=1.25\) | **M̂** = \(\sum_t\) M̂_t |
+| **Ĵ_t** (`J_hat_t`) | star MI: \(\sum H-\max H\) on \(S_t\) if \(\|S_t\|\ge 2\), else 0 | **Ĵ** = \(\sum_t\) Ĵ_t (full); **Ĵ_early** = sum over the **early third** |
+| **Ĝ** (`G_hat`) | — | M̂ + Ĵ |
 
-Top-level `M_hat` / `J_hat` are entropy-weighted caps of `M_hat_t` / `J_hat_t`.
+Sub-proxies (mean_regret, …) are removed.
 
 ---
 
@@ -26,7 +23,8 @@ Top-level `M_hat` / `J_hat` are entropy-weighted caps of `M_hat_t` / `J_hat_t`.
 
 ## Fail-hard rules
 
-- Missing / inconsistent required fields → **`TraceProxyError`**; the run aborts (no silent zeros, no skipping samples).
+- Missing / inconsistent required fields → **`TraceProxyError`** (no silent zeros, no skipping samples *within* a file).
+- Single-file and batch commands abort on **`TraceProxyError`** (fail-hard).
 - Proxies and oracle call **`validate_trace_for_metrics`** first. They do **not** silently repair. Unrepaired issues raise hard errors, including:
   - missing `mask_index` / `predictions` / `confidences` / `entropies` (or wrong lengths)
   - `selected_positions` vs mask-diff set/count mismatch (DUS remask / incomplete hooks)
@@ -36,7 +34,7 @@ Top-level `M_hat` / `J_hat` are entropy-weighted caps of `M_hat_t` / `J_hat_t`.
 - On the **last kept step** after trim, `selected_*` is trusted (no next mask to compare).
 - Empty selection on non-last steps is valid only when that step’s mask-diff is also empty.
 - Repair traces first (`trace_audit.py convert` / `repair-npz`), then run SchedulerLens.
-- When **no tokens are unmasked** at a step (`n_selected == 0`), **all** step proxies are **0** (`M_hat_t`, `J_hat_t`, and every sub-quantity).
+- When **no tokens are unmasked** at a step (`n_selected == 0`), **M̂_t = Ĵ_t = 0**.
 
 ---
 
@@ -46,10 +44,10 @@ All commands go through `python -m schedulerlens.run` (or `python -m schedulerle
 
 | Subcommand | Role |
 | ---------- | ---- |
-| `file` | One local NPZ → metrics CSV/JSON |
+| `file` | One local NPZ → metrics + plots |
 | `inventory` | List Hub NPZs (no download) |
 | `analyze` | One Hub NPZ (download→analyze→delete) or `--local` |
-| `compare` | Batch Hub/local → CSV (`analyze-all` alias) |
+| `compare` | Batch Hub/local → CSV + plots (`analyze-all` alias) |
 | `pos` | POS-stratified unmask analysis |
 
 ```bash
@@ -91,7 +89,7 @@ Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp downlo
 | ---- | ----------- |
 | `-o` | Output directory |
 | `--max-samples N` | First N samples only |
-| `--bucket-size N` | Bucketed trend aggregation |
+| `--bucket-size N` | Bucketed trends + plots |
 | `--no-perplexity` | Skip PPL (`file` only) |
 | `--replay-oracle` | Exact Mt/Jt (PCFG; needs `--model-path`) |
 | `--pcfg` | Force PCFG oracle gating |
@@ -104,7 +102,8 @@ Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp downlo
 | `metrics.json` | Caps, trends, meta, optional perplexity / correlations |
 | `metrics.csv` | One unified row (same schema as compare) |
 | `perplexity.json` | Model commit / oracle PPL (and Mt/Jt when replayed) |
-| `oracle.npz` | Full oracle replay dump when `--replay-oracle` |
+| `{stem}_M_trends.png` / `_J_trends.png` | Per-step proxy panels |
+| `compare_surfaces.png` | Step × token heatmaps (confidence, entropy) |
 
 ---
 
@@ -132,7 +131,7 @@ Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp downlo
 | `--resume` | Skip stems already in output CSV |
 | `--no-purge-cache` | Skip Hub cache purge at batch start |
 
-**Oracle gating:** exact Mt/Jt and proxy correlations run only when the trace is PCFG (`-pcfg_` / `pcfg_` in the name, or `--pcfg`) **and** `--replay-oracle` is set. Non-PCFG runs still get M̂/Ĵ + model commit PPL.
+**Oracle gating:** exact Mt/Jt and proxy correlations run only when the trace is PCFG (`-pcfg_` / `pcfg_` in the name, or `--pcfg`) **and** `--replay-oracle` is set. Non-PCFG runs still get M̂/Ĵ + model commit PPL + overview/surface plots.
 
 NPZ samples are streamed via `traces.trace_npz.iter_npz_traces` (one sample in RAM at a time for proxies).
 
@@ -140,15 +139,26 @@ NPZ samples are streamed via `traces.trace_npz.iter_npz_traces` (one sample in R
 
 | File | Contents |
 | ---- | -------- |
-| `schedulerlens_metrics.csv` | All runs, unified columns (flushed after each NPZ) |
+| `schedulerlens_metrics.csv` | All runs: proxy caps, completion diagnostics, strace accuracy/NFE, optional oracle |
 
-Compare writes `schedulerlens_metrics.csv` only. `file` writes the per-run CSV/JSON files above.
+CSV columns include:
+
+- **Proxy caps:** `M_hat` (hard-gated NLL sum), `J_hat` (star sum full traj), `J_hat_early` (star sum early third), `G_hat` = M̂+Ĵ
+- **Completion diagnostics:** commit / final-mask / EOS rates, `conf_mean` / `ent_mean`
+- **Eval join** (from `fetch_evals/strace_metrics.csv` via `--strace-metrics`): `accuracy`, `avg_nfe_per_sample`, `strace_name`, `strace_metric_key`
+- **Oracle** (with `--replay-oracle`): `model_commit_ppl`, `oracle_ppl`, `Mt_total`, `Jt_total`, `corr_*`
+
+Compare writes `schedulerlens_metrics.csv` only. `file` / `analyze` also write per-run `metrics.csv` / `metrics.json` (and `oracle.npz` when replaying).
 
 ### CSV schema (unified)
 
 Identity: `repo`, `filename`, `model`, `scheduler`, `task`, `steps`, `is_pcfg`, `n_samples`, `n_steps`
 
-Caps: `M_hat`, `J_hat`, `M_hat_uniform`, `J_hat_uniform`, plus `*_entropy` / `*_uniform` for sub-proxies
+Caps: `M_hat` (hard-gated sum), `J_hat` (star sum full), `J_hat_early` (star sum early third), `G_hat` = M̂+Ĵ
+
+Completion diagnostics: commit / EOS / mask rates, `conf_mean` / `ent_mean`
+
+Eval join: `accuracy`, `avg_nfe_per_sample` from `strace_metrics.csv` (stem == `name`)
 
 PPL / oracle: `model_commit_ppl`, `oracle_ppl`, `Mt_total`, `Jt_total`
 
@@ -163,14 +173,13 @@ Trajectory blocks are equal thirds of `n_steps`.
 | Symbol | Trace field | Meaning |
 | ------ | ----------- | ------- |
 | `S_t` | selected (or inferred) | Unmasked at step `t` |
-| `C_t` | `~mask_index` | Committed before step `t` |
-| `S̄_t` | still masked after | Remaining masked |
-| `w_t` | `sum(entropies[S_t])` | Entropy weight |
+| `c_i`, `H_i` | `confidences` / `entropies` on `S_t` | Max-prob and Shannon entropy |
+| `τ` | constant | Hard gate on entropy (`1.25` nats) |
 
-**M-side:** `M̂_t = mean_regret / (1 + max(0, cascade_gain))`  
-**J-side:** `Ĵ_t = instability × rank_volatility`
+**M-side:** \(\hat{M}_t = \sum_{i\in S_t}(-\log c_i)\cdot\mathbf{1}[H_i\le\tau]\)  
+**J-side:** \(\hat{J}_t = (\sum H - \max H)\) on \(S_t\) if \(|S_t|\ge 2\), else \(0\)
 
-Sample caps: over steps with `n_selected > 0` — entropy-weighted `Σ w_t x_t / Σ w_t` and uniform `mean(x_t)`. Task caps: mean over samples.
+Sample caps: \(\hat{M}=\sum_t\hat{M}_t\); \(\hat{J}=\sum_t\hat{J}_t\); \(\hat{J}_{\mathrm{early}}=\sum_t\hat{J}_t\) over the **early third** of steps. Task caps: mean over samples. \(\hat{G}=\hat{M}+\hat{J}\).
 
 **PCFG oracle (with `--replay-oracle`):** left-padded eval layout; teacher-forced reference prefix (`n_visible`); gen index → content via `n_visible + gen_pos`; Mt = Σ KL(q‖p) and Jt = joint-entropy gap (multi-information) on the **pre-step** committed set. Steps are precomputed from the unmask schedule (independent teacher-forced states), then **batched model forwards** + **parallel PCFG** (engine pool), with optional **multi-sample** workers.
 
@@ -188,10 +197,13 @@ Raise `exact_max` only if you have the RAM. Concurrent exact CKY `Jt` calls are 
 | ------ | ---- |
 | `proxies.py` | Per-step M̂/Ĵ proxies |
 | `metrics.py` | Aggregation, stem meta, CSV, correlations, row builder |
+| `completion.py` | Commit / EOS / mask diagnostics, conf/ent means, strace accuracy/NFE join |
 | `oracle.py` | Commit NLL, PCFG Mt/Jt replay, task perplexity |
 | `hub.py` | Hub inventory / download→analyze→delete / batch compare |
 | `run.py` | **Single CLI** (`file` / `inventory` / `analyze` / `compare` / `pos`) |
 | `pos.py` | POS analysis library |
+
+`compare` / `file` / `analyze` join accuracy and NFE from `fetch_evals/strace_metrics.csv` onto each metrics row (stem == strace `name`; fallback model+task+steps+mode). Override with `--strace-metrics`.
 
 ---
 

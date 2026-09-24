@@ -121,6 +121,7 @@ impl EngineCore {
         out
     }
 
+    #[allow(dead_code)]
     fn recompute_inside_covering(&self, ins: &mut [f64], l: usize, clamp: &HashMap<usize, usize>, pos: usize) {
         let n = self.n;
         let idx = |i: usize, j: usize| (i * l + j) * n;
@@ -150,6 +151,7 @@ impl EngineCore {
         }
     }
 
+    #[allow(dead_code)]
     fn recompute_outside_covering(
         &self,
         out: &mut [f64],
@@ -243,41 +245,12 @@ impl EngineCore {
         pos: usize,
         token: usize,
     ) -> Charts {
+        // Incremental covering updates disagree with a full fill_inside /
+        // fill_outside (pairwise Jt collapsed to 0 while I(Xi;Xj) ~ 1 nat).
+        // Always rebuild charts for the child commitment.
         let mut child_committed = parent_committed.clone();
         child_committed.insert(pos, token);
-        let key = CommitKey::new(l, &child_committed);
-        if let Some(c) = cache.get(&key) {
-            return c.clone();
-        }
-
-        let parent_key = CommitKey::new(l, parent_committed);
-        let parent = match cache.get(&parent_key) {
-            Some(c) => c.clone(),
-            None => return self.charts_cached(cache, l, &child_committed),
-        };
-
-        let mut new_inside = parent.inside.clone();
-        self.recompute_inside_covering(&mut new_inside, l, &child_committed, pos);
-        let idx = |i: usize, j: usize| (i * l + j) * self.n;
-        let z = new_inside[idx(0, l - 1) + self.start];
-        let outside = if z <= 0.0 {
-            None
-        } else if let Some(parent_out) = parent.outside.as_ref() {
-            let mut new_outside = parent_out.clone();
-            self.recompute_outside_covering(&mut new_outside, &new_inside, l, pos);
-            Some(new_outside)
-        } else {
-            Some(self.fill_outside(l, &new_inside))
-        };
-        let pack = Charts {
-            inside: new_inside,
-            outside,
-            z,
-            l,
-            n: self.n,
-        };
-        cache.insert(key, pack.clone());
-        pack
+        self.charts_cached(cache, l, &child_committed)
     }
 
     fn all_marginals_map(&self, l: usize, committed: &HashMap<usize, usize>, cache: &mut FxHashMap<CommitKey, Charts>) -> HashMap<usize, Vec<f64>> {
@@ -373,16 +346,14 @@ impl PyPCFGState {
 
     fn commit(&mut self, pos: usize, token: usize) {
         self.committed.insert(pos, token);
-        self.core
-            .recompute_inside_covering(&mut self.inside, self.l, &self.committed, pos);
-        let n = self.core.n;
-        let root = (self.l - 1) * n + self.core.start;
-        self.z = self.inside[root];
-        if let Some(out) = self.outside.as_mut() {
-            let inside = self.inside.clone();
-            self.core
-                .recompute_outside_covering(out, &inside, self.l, pos);
-        }
+        let (inside, z) = self.core.fill_inside(self.l, &self.committed);
+        self.inside = inside;
+        self.z = z;
+        self.outside = if z > 0.0 {
+            Some(self.core.fill_outside(self.l, &self.inside))
+        } else {
+            None
+        };
     }
 
     fn all_marginals<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -589,31 +560,33 @@ impl PyPCFGEngine {
         Ok(tot)
     }
 
-    fn Jt_entropy(&mut self, l: usize, committed: HashMap<usize, usize>, s: Vec<usize>) -> f64 {
-        if s.len() < 2 {
-            return 0.0;
-        }
-        let mut s = s;
-        s.sort_unstable();
-        self.cache.clear();
-        let _ = self.core.charts_cached(&mut self.cache, l, &committed);
-        let h_marg: f64 = s
-            .iter()
-            .map(|&p| {
-                let charts = self.core.charts_cached(&mut self.cache, l, &committed);
-                if charts.z <= 0.0 {
-                    return 0.0;
-                }
-                let outside = charts.outside.as_ref().unwrap();
-                let m = self.core.marginal_at(&charts.inside, outside, l, charts.z, p);
-                EngineCore::entropy(&m)
-            })
-            .sum();
-        let mut ent_memo = FxHashMap::default();
-        let h_joint = self
-            .core
-            .joint_entropy_chain(l, &committed, &s, &mut self.cache, &mut ent_memo);
-        (h_marg - h_joint).max(0.0)
+    fn Jt_entropy(&mut self, py: Python<'_>, l: usize, committed: HashMap<usize, usize>, s: Vec<usize>) -> f64 {
+        py.allow_threads(|| {
+            if s.len() < 2 {
+                return 0.0;
+            }
+            let mut s = s;
+            s.sort_unstable();
+            self.cache.clear();
+            let _ = self.core.charts_cached(&mut self.cache, l, &committed);
+            let h_marg: f64 = s
+                .iter()
+                .map(|&p| {
+                    let charts = self.core.charts_cached(&mut self.cache, l, &committed);
+                    if charts.z <= 0.0 {
+                        return 0.0;
+                    }
+                    let outside = charts.outside.as_ref().unwrap();
+                    let m = self.core.marginal_at(&charts.inside, outside, l, charts.z, p);
+                    EngineCore::entropy(&m)
+                })
+                .sum();
+            let mut ent_memo = FxHashMap::default();
+            let h_joint = self
+                .core
+                .joint_entropy_chain(l, &committed, &s, &mut self.cache, &mut ent_memo);
+            (h_marg - h_joint).max(0.0)
+        })
     }
 
     fn make_state(&self, l: usize, committed: HashMap<usize, usize>) -> PyPCFGState {

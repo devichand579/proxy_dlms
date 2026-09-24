@@ -354,7 +354,7 @@ class _StepJob:
     committed: dict[int, int]
     tokens: list[str]
     tmap: dict
-    input_ids: Any  # CPU torch.LongTensor [1, L]
+    input_ids: Any  # CPU torch.LongTensor [1, L], or None for Jt-only jobs
     attention: Any
 
 
@@ -390,10 +390,9 @@ def _precompute_step_jobs(
     *,
     tmap: Optional[dict] = None,
     trace_name: Union[str, Path, None] = None,
+    include_model_inputs: bool = True,
 ) -> list[_StepJob]:
     """Build per-step jobs; each has independent pre-step committed + input_ids."""
-    import torch
-
     layout = _pcfg_layout(trace_dict, vocab)
     tokens = layout["token_strings"][: layout["n_content"]]
     n_content = layout["n_content"]
@@ -410,18 +409,23 @@ def _precompute_step_jobs(
             eng.clear_cache()
         del eng
 
-    content_ids = vocab.encode(tokens)
-    # Build on CPU; batching moves chunks to the model device.
-    cpu = torch.device("cpu")
-    input_ids, attention = _build_eval_style_input(
-        token_strings=tokens,
-        n_visible=n_visible,
-        n_content=n_content,
-        prompt_len=prompt_len,
-        gen_length=gen_length,
-        vocab=vocab,
-        device=cpu,
-    )
+    input_ids = None
+    attention = None
+    content_ids = None
+    if include_model_inputs:
+        import torch
+
+        content_ids = vocab.encode(tokens)
+        cpu = torch.device("cpu")
+        input_ids, attention = _build_eval_style_input(
+            token_strings=tokens,
+            n_visible=n_visible,
+            n_content=n_content,
+            prompt_len=prompt_len,
+            gen_length=gen_length,
+            vocab=vocab,
+            device=cpu,
+        )
 
     committed: dict[int, int] = {i: tmap[tokens[i]] for i in range(n_visible)}
     events_by_step: dict[int, list[tuple[int, int]]] = {}
@@ -453,15 +457,16 @@ def _precompute_step_jobs(
                 committed=dict(committed),
                 tokens=tokens,
                 tmap=tmap,
-                input_ids=input_ids.clone(),
-                attention=attention.clone(),
+                input_ids=None if input_ids is None else input_ids.clone(),
+                attention=None if attention is None else attention.clone(),
             )
         )
         # Advance teacher-forced state for the next step's snapshot.
         for gen_pos, cpos, _sel in content_events:
             ref_tid = tmap[tokens[cpos]]
             committed[int(cpos)] = ref_tid
-            input_ids[0, int(prompt_len + gen_pos)] = int(content_ids[cpos])
+            if input_ids is not None and content_ids is not None:
+                input_ids[0, int(prompt_len + gen_pos)] = int(content_ids[cpos])
 
     return jobs
 
@@ -618,6 +623,49 @@ def compute_jt(
         window = positions[lo : i + 1]
         total += _cached(window) - _cached(left)
     return float(total)
+
+
+def compute_sample_jt_steps(
+    trace_dict: dict,
+    engine,
+    vocab,
+    *,
+    trace_name: Union[str, Path, None] = None,
+    jt_exact_max: Optional[int] = None,
+    jt_markov_order: Optional[int] = None,
+    jt_large_set: Optional[int] = None,
+    skip: bool = False,
+) -> list[tuple[int, int, float]]:
+    """Jt per unmask step without model forwards (CPU PCFG only).
+
+    Returns ``(step, |S|, Jt)`` in step order. Teacher-forced commits match
+    the Mt/Jt replay path (reference tokens, not selected tokens).
+    """
+    tmap = getattr(engine, "t_idx", None)
+    jobs = _precompute_step_jobs(
+        trace_dict,
+        vocab,
+        tmap=tmap,
+        trace_name=trace_name,
+        include_model_inputs=False,
+    )
+    out: list[tuple[int, int, float]] = []
+    for job in jobs:
+        n_sel = len(job.S_content)
+        jt = compute_jt(
+            engine,
+            job.n_content,
+            job.committed,
+            job.S_content,
+            exact_max=jt_exact_max,
+            markov_order=jt_markov_order,
+            large_set=jt_large_set,
+            skip=skip,
+        )
+        if hasattr(engine, "clear_cache"):
+            engine.clear_cache()
+        out.append((int(job.step), int(n_sel), float(jt)))
+    return out
 
 
 def _pcfg_metrics_for_step(
