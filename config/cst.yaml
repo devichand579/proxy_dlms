@@ -49,7 +49,7 @@ store:
   model_path: ${model_path}
   device: cuda
   scratch_dir: outputs/cst_staging
-  scheduler_mode: top_k_c
+  scheduler_mode: pd_r
   gen_length: 512
   steps: 512
   block_length: null

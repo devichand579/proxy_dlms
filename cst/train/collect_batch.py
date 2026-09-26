@@ -26,6 +26,7 @@ logger = logging.getLogger("cst.collect")
 def _mode_map(short: str) -> tuple[str, Optional[str]]:
     m = {
         "pd": ("pure_diffusion", "confidence"),
+        "pd_r": ("pure_diffusion", "random"),
         "bd": ("block_diffusion", "confidence"),
         "eb": ("eb_sampler", "confidence"),
         "fdm": ("fdm", None),
