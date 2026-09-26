@@ -22,10 +22,6 @@ GATED_TAU = 1.25
 
 # Step-level series aggregated to sample/task caps and trends.
 PROXY_ATTRS = ("M_hat_t", "J_hat_t")
-M_PROXY_ATTRS = ("M_hat_t",)
-J_PROXY_ATTRS = ("J_hat_t",)
-# Kept for import compatibility; empty — old sub-proxies removed.
-SUB_PROXY_ATTRS: Tuple[str, ...] = ()
 
 
 class TraceProxyError(ValueError):
@@ -33,19 +29,10 @@ class TraceProxyError(ValueError):
 
 
 @dataclass
-class CapsPair:
-    """Sample/task cap. ``entropy`` and ``uniform`` are identical (sum caps)."""
-
-    entropy: float = 0.0
-    uniform: float = 0.0
-
-
-@dataclass
 class StepProxies:
     step: int
     M_hat_t: float  # hard-gated commit NLL on S_t
     J_hat_t: float  # star MI on S_t (|S|≥2)
-    weight: float  # unused for sum caps; kept for API stability
     n_committed: int = 0
     n_selected: int = 0
     n_remaining: int = 0
@@ -58,14 +45,12 @@ class SampleProxies:
     M_hat: float
     J_hat: float  # full-traj star sum
     J_hat_early: float
-    M_hat_uniform: float
-    J_hat_uniform: float
-    caps: Dict[str, CapsPair] = field(default_factory=dict)
+    caps: Dict[str, float] = field(default_factory=dict)
     step_proxies: List[StepProxies] = field(default_factory=list)
 
 
-def _empty_caps() -> Dict[str, CapsPair]:
-    return {name: CapsPair() for name in PROXY_ATTRS}
+def _empty_caps() -> Dict[str, float]:
+    return {name: 0.0 for name in PROXY_ATTRS}
 
 
 def _trajectory_early_end(n_steps: int) -> int:
@@ -79,7 +64,7 @@ def _trajectory_early_end(n_steps: int) -> int:
 
 def _aggregate_sample_caps(
     step_proxies: List[StepProxies],
-) -> tuple[Dict[str, CapsPair], float, float]:
+) -> tuple[Dict[str, float], float, float]:
     """Return (caps, J_hat, J_hat_early).
 
     ``caps['J_hat_t']`` stores the **full** star sum (for task averaging / trends).
@@ -95,12 +80,8 @@ def _aggregate_sample_caps(
         j_full += float(sp.J_hat_t)
         if sp.step < early_end:
             j_early += float(sp.J_hat_t)
-    caps = {
-        "M_hat_t": CapsPair(entropy=m_sum, uniform=m_sum),
-        "J_hat_t": CapsPair(entropy=j_full, uniform=j_full),
-    }
+    caps = {"M_hat_t": m_sum, "J_hat_t": j_full}
     return caps, j_full, j_early
-
 
 
 def _to_np(data, dtype=np.float32) -> Optional[np.ndarray]:
@@ -134,7 +115,6 @@ def _zero_step(step: int, n_committed: int, n_remaining: int) -> StepProxies:
         step=step,
         M_hat_t=0.0,
         J_hat_t=0.0,
-        weight=0.0,
         n_committed=n_committed,
         n_selected=0,
         n_remaining=n_remaining,
@@ -152,7 +132,6 @@ def _gated_nll(conf: np.ndarray, ent: np.ndarray, tau: float) -> float:
     c = np.clip(conf.astype(np.float64), 1e-8, 1.0)
     h = ent.astype(np.float64)
     return float(np.sum((-np.log(c)) * (h <= tau)))
-
 
 
 def _mask_diff_selection(
@@ -363,11 +342,14 @@ def compute_sample_proxies(
     trace_dict: dict,
     *,
     trace_name: Optional[Union[str, Path]] = None,
+    tau: Optional[float] = None,
 ) -> SampleProxies:
     """Compute M̂, Ĵ, and per-step proxies for one trace dict.
 
     Raises ``TraceProxyError`` when required fields are missing or inconsistent.
     When no tokens are unmasked at a step, all proxy quantities for that step are 0.
+
+    ``tau`` overrides the hard-gate entropy threshold (default ``GATED_TAU``).
     """
     validate_trace_for_metrics(trace_dict, trace_name=trace_name)
 
@@ -379,8 +361,6 @@ def compute_sample_proxies(
             M_hat=0.0,
             J_hat=0.0,
             J_hat_early=0.0,
-            M_hat_uniform=0.0,
-            J_hat_uniform=0.0,
             caps=empty,
         )
 
@@ -407,7 +387,7 @@ def compute_sample_proxies(
         resolved.append(_resolve_selection(steps, t, gen_length))
 
     step_proxy_list: List[StepProxies] = []
-    tau = GATED_TAU
+    gate = float(GATED_TAU if tau is None else tau)
 
     for t in range(T):
         mask_t = _require_array(
@@ -432,16 +412,14 @@ def compute_sample_proxies(
 
         c_sel = conf_t[S_t]
         h_sel = ent_t[S_t]
-        m_hat_t = _gated_nll(c_sel, h_sel, tau)
+        m_hat_t = _gated_nll(c_sel, h_sel, gate)
         j_hat_t = _star_mi(h_sel.astype(np.float64))
-        weight = float(np.sum(h_sel))
 
         step_proxy_list.append(
             StepProxies(
                 step=t,
                 M_hat_t=m_hat_t,
                 J_hat_t=j_hat_t,
-                weight=weight,
                 n_committed=n_committed,
                 n_selected=n_selected,
                 n_remaining=n_remaining,
@@ -449,13 +427,11 @@ def compute_sample_proxies(
         )
 
     caps, j_full, j_early = _aggregate_sample_caps(step_proxy_list)
-    m_cap = caps["M_hat_t"].entropy
+    m_cap = float(caps["M_hat_t"])
     return SampleProxies(
         M_hat=m_cap,
         J_hat=j_full,
         J_hat_early=j_early,
-        M_hat_uniform=m_cap,
-        J_hat_uniform=j_full,
         caps=caps,
         step_proxies=step_proxy_list,
     )

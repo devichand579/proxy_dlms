@@ -18,12 +18,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ProxyReport:
-    entropy: float = 0.0
-    uniform: float = 0.0
+    cap: float = 0.0
     trend: np.ndarray = field(default_factory=lambda: np.array([]))
     bucket_trend: np.ndarray = field(default_factory=lambda: np.array([]))
-    sample_entropy: List[float] = field(default_factory=list)
-    sample_uniform: List[float] = field(default_factory=list)
+    sample_caps: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -32,8 +30,6 @@ class TaskMetrics:
     M_hat: float
     J_hat: float  # full-traj star sum
     J_hat_early: float
-    M_hat_uniform: float
-    J_hat_uniform: float
     proxies: Dict[str, ProxyReport]
     n_unmasked_trend: np.ndarray
     n_samples: int
@@ -52,19 +48,11 @@ class TaskMetrics:
 
     @property
     def sample_M_hats(self) -> List[float]:
-        return self.proxies["M_hat_t"].sample_entropy
+        return self.proxies["M_hat_t"].sample_caps
 
     @property
     def sample_J_hats(self) -> List[float]:
-        return self.proxies["J_hat_t"].sample_entropy
-
-    @property
-    def sample_M_hats_uniform(self) -> List[float]:
-        return self.proxies["M_hat_t"].sample_uniform
-
-    @property
-    def sample_J_hats_uniform(self) -> List[float]:
-        return self.proxies["J_hat_t"].sample_uniform
+        return self.proxies["J_hat_t"].sample_caps
 
     def summary(self) -> str:
         lines = [
@@ -80,7 +68,7 @@ class TaskMetrics:
         for name in PROXY_ATTRS:
             rep = self.proxies[name]
             lines.append(
-                f"  {name:14s}  cap={rep.entropy:.6f}"
+                f"  {name:14s}  cap={rep.cap:.6f}"
             )
         if self.bucket_size is not None and self.n_buckets > 0:
             lines.extend(self._bucket_summary_lines())
@@ -120,8 +108,7 @@ class TaskMetrics:
             "M_hat": self.M_hat,
             "J_hat": self.J_hat,
             "J_hat_early": self.J_hat_early,
-            "M_hat_uniform": self.M_hat_uniform,
-            "J_hat_uniform": self.J_hat_uniform,
+            "G_hat": float(self.M_hat) + float(self.J_hat),
             "n_samples": self.n_samples,
             "n_steps": self.n_steps,
             "n_unmasked_trend": self.n_unmasked_trend.tolist(),
@@ -131,11 +118,9 @@ class TaskMetrics:
         }
         for name, rep in self.proxies.items():
             entry = {
-                "entropy": rep.entropy,
-                "uniform": rep.uniform,
+                "cap": rep.cap,
                 "trend": rep.trend.tolist(),
-                "sample_entropy": rep.sample_entropy,
-                "sample_uniform": rep.sample_uniform,
+                "sample_caps": rep.sample_caps,
             }
             if self.bucket_size is not None:
                 entry["bucket_trend"] = rep.bucket_trend.tolist()
@@ -239,11 +224,14 @@ def compute_task_metrics(
     max_samples: Optional[int] = None,
     bucket_size: Optional[int] = None,
     verbose: bool = True,
+    tau: Optional[float] = None,
 ) -> TaskMetrics:
     """Compute task-level caps and per-step trends from a trace file.
 
     Streams samples when ``bucket_size`` is None (compare default) so large NPZs
     do not retain every ``SampleProxies`` in RAM before oracle replay.
+
+    ``tau`` overrides the hard-gate threshold used for M̂ (default ``GATED_TAU``).
     """
     trace_path = Path(trace_path)
     if not trace_path.exists():
@@ -254,8 +242,7 @@ def compute_task_metrics(
         raise ValueError(f"bucket_size must be positive, got {bucket_size}")
 
     # Online path (no buckets): O(1) sample retention.
-    sample_entropy = {name: [] for name in PROXY_ATTRS}
-    sample_uniform = {name: [] for name in PROXY_ATTRS}
+    sample_caps = {name: [] for name in PROXY_ATTRS}
     sample_j_early: List[float] = []
     trend_sum = {name: [] for name in PROXY_ATTRS}
     trend_count = {name: [] for name in PROXY_ATTRS}
@@ -271,7 +258,9 @@ def compute_task_metrics(
         if max_samples is not None and i >= max_samples:
             break
         try:
-            sp = compute_sample_proxies(trace_dict, trace_name=trace_path)
+            sp = compute_sample_proxies(
+                trace_dict, trace_name=trace_path, tau=tau
+            )
         except TraceProxyError as e:
             raise TraceProxyError(f"sample {i}: {e}") from e
 
@@ -283,8 +272,7 @@ def compute_task_metrics(
         else:
             sample_j_early.append(float(sp.J_hat_early))
             for name in PROXY_ATTRS:
-                sample_entropy[name].append(float(sp.caps[name].entropy))
-                sample_uniform[name].append(float(sp.caps[name].uniform))
+                sample_caps[name].append(float(sp.caps[name]))
                 _ensure_online_len(trend_sum[name], trend_count[name], t_max)
             _ensure_online_len(n_unmasked_sum, n_unmasked_count, t_max)
             for proxy in sp.step_proxies:
@@ -307,8 +295,6 @@ def compute_task_metrics(
             M_hat=0.0,
             J_hat=0.0,
             J_hat_early=0.0,
-            M_hat_uniform=0.0,
-            J_hat_uniform=0.0,
             proxies=empty,
             n_unmasked_trend=np.array([]),
             n_samples=0,
@@ -327,10 +313,8 @@ def compute_task_metrics(
         t_max = max(len(sp.step_proxies) for sp in all_sample_proxies)
         for name in PROXY_ATTRS:
             rep = proxies[name]
-            rep.sample_entropy = [sp.caps[name].entropy for sp in all_sample_proxies]
-            rep.sample_uniform = [sp.caps[name].uniform for sp in all_sample_proxies]
-            rep.entropy = float(np.mean(rep.sample_entropy))
-            rep.uniform = float(np.mean(rep.sample_uniform))
+            rep.sample_caps = [float(sp.caps[name]) for sp in all_sample_proxies]
+            rep.cap = float(np.mean(rep.sample_caps))
             rep.trend = _step_trends(all_sample_proxies, name, t_max)
         j_early_mean = float(np.mean([sp.J_hat_early for sp in all_sample_proxies]))
         n_unmasked_trend = _step_trends(all_sample_proxies, "n_selected", t_max)
@@ -341,10 +325,8 @@ def compute_task_metrics(
     else:
         for name in PROXY_ATTRS:
             rep = proxies[name]
-            rep.sample_entropy = sample_entropy[name]
-            rep.sample_uniform = sample_uniform[name]
-            rep.entropy = float(np.mean(rep.sample_entropy)) if rep.sample_entropy else 0.0
-            rep.uniform = float(np.mean(rep.sample_uniform)) if rep.sample_uniform else 0.0
+            rep.sample_caps = sample_caps[name]
+            rep.cap = float(np.mean(rep.sample_caps)) if rep.sample_caps else 0.0
             sums, counts = trend_sum[name], trend_count[name]
             rep.trend = np.array(
                 [
@@ -364,13 +346,11 @@ def compute_task_metrics(
             dtype=np.float64,
         )
 
-    j_full = proxies["J_hat_t"].entropy
+    j_full = proxies["J_hat_t"].cap
     return TaskMetrics(
-        M_hat=proxies["M_hat_t"].entropy,
+        M_hat=proxies["M_hat_t"].cap,
         J_hat=j_full,
         J_hat_early=j_early_mean,
-        M_hat_uniform=proxies["M_hat_t"].uniform,
-        J_hat_uniform=j_full,
         proxies=proxies,
         n_unmasked_trend=n_unmasked_trend,
         n_unmasked_bucket_trend=n_unmasked_bucket_trend,
@@ -822,7 +802,6 @@ def build_metrics_row(
     max_samples: Optional[int] = None,
     verbose: bool = False,
     completion: Optional[Mapping[str, Any]] = None,
-    surface_means: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assemble one CSV-ready row for a trace NPZ."""
     trace_path = Path(trace_path)
@@ -867,12 +846,6 @@ def build_metrics_row(
             if key in completion:
                 row[key] = completion[key]
 
-    if surface_means:
-        if "conf_mean" in surface_means:
-            row["conf_mean"] = surface_means["conf_mean"]
-        if "ent_mean" in surface_means:
-            row["ent_mean"] = surface_means["ent_mean"]
-
     if perplexity is not None:
         row["model_commit_ppl"] = perplexity.model_commit_ppl
         row["oracle_ppl"] = perplexity.oracle_ppl
@@ -889,14 +862,16 @@ def collect_sample_proxy_trends(
     trace_path: Union[str, Path],
     *,
     max_samples: Optional[int] = None,
+    tau: Optional[float] = None,
 ) -> tuple[List[SampleProxies], int]:
     """Return per-sample proxies and max step count (fail-hard)."""
-    from schedulerlens.proxies import SampleProxies, compute_sample_proxies
     samples: List = []
     for i, tr in enumerate(_iter_traces(trace_path)):
         if max_samples is not None and i >= max_samples:
             break
-        samples.append(compute_sample_proxies(tr, trace_name=trace_path))
+        samples.append(
+            compute_sample_proxies(tr, trace_name=trace_path, tau=tau)
+        )
     t_max = max((len(sp.step_proxies) for sp in samples), default=0)
     return samples, t_max
 

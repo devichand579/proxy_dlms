@@ -24,7 +24,13 @@ from schedulerlens.metrics import (
     read_metrics_csv,
     write_metrics_csv,
 )
-from schedulerlens.oracle import compute_task_perplexity
+from schedulerlens.oracle import (
+    compute_task_perplexity,
+    empty_task_perplexity,
+    index_oracle_artifacts,
+    resolve_oracle_npz,
+    task_perplexity_from_oracle_npz,
+)
 from schedulerlens.proxies import TraceProxyError
 from traces.hf_trace_upload import (
     cleanup_repo_cache,
@@ -200,11 +206,27 @@ def analyze_one_npz(
     jt_large_set: Optional[int] = None,
     skip_jt: bool = False,
     strace_metrics_path: Optional[Union[str, Path]] = None,
+    oracle_npz: Optional[Union[str, Path]] = None,
+    require_cached_oracle: bool = False,
 ) -> Dict[str, Any]:
-    """Analyze one local NPZ (samples streamed via ``iter_npz_traces``)."""
+    """Analyze one local NPZ (samples streamed via ``iter_npz_traces``).
+
+    When ``oracle_npz`` is set, Mt/Jt/PPL + correlations come from that artifact
+    (no live replay). Otherwise ``--replay-oracle`` gates live PCFG replay.
+
+    With ``require_cached_oracle`` (compare ``--oracle`` mode) and no matching
+    artifact / no replay, PPL/Mt/Jt are left empty instead of walking the PCFG
+    commit-NLL path.
+    """
     meta = parse_run_stem(trace_path)
-    do_replay = should_replay(
-        meta_is_pcfg=meta.is_pcfg, force_pcfg=force_pcfg, replay_oracle=replay_oracle
+    cached_oracle = Path(oracle_npz) if oracle_npz is not None else None
+    do_replay = (
+        cached_oracle is None
+        and should_replay(
+            meta_is_pcfg=meta.is_pcfg,
+            force_pcfg=force_pcfg,
+            replay_oracle=replay_oracle,
+        )
     )
 
     metrics = compute_task_metrics(
@@ -222,26 +244,56 @@ def analyze_one_npz(
         max_samples=max_samples,
     )
 
-    ppl = compute_task_perplexity(
-        trace_path,
-        engine=engine,
-        vocab=vocab,
-        model=model if do_replay else None,
-        device=device,
-        replay_oracle=do_replay,
-        max_samples=max_samples,
-        verbose=verbose,
-        oracle_workers=oracle_workers,
-        step_workers=step_workers,
-        forward_batch_size=forward_batch_size,
-        jt_exact_max=jt_exact_max,
-        jt_markov_order=jt_markov_order,
-        jt_large_set=jt_large_set,
-        skip_jt=skip_jt,
-    )
+    if cached_oracle is not None:
+        logger.info("Using cached oracle %s for %s", cached_oracle, meta.stem)
+        ppl = task_perplexity_from_oracle_npz(cached_oracle)
+    elif do_replay:
+        ppl = compute_task_perplexity(
+            trace_path,
+            engine=engine,
+            vocab=vocab,
+            model=model,
+            device=device,
+            replay_oracle=True,
+            max_samples=max_samples,
+            verbose=verbose,
+            oracle_workers=oracle_workers,
+            step_workers=step_workers,
+            forward_batch_size=forward_batch_size,
+            jt_exact_max=jt_exact_max,
+            jt_markov_order=jt_markov_order,
+            jt_large_set=jt_large_set,
+            skip_jt=skip_jt,
+        )
+    elif require_cached_oracle:
+        logger.warning(
+            "No cached oracle.npz for stem %r (and --replay-oracle off); "
+            "leaving Mt/Jt/PPL/corr empty",
+            meta.stem,
+        )
+        ppl = empty_task_perplexity(n_samples=int(metrics.n_samples))
+    else:
+        ppl = compute_task_perplexity(
+            trace_path,
+            engine=engine,
+            vocab=vocab,
+            model=None,
+            device=device,
+            replay_oracle=False,
+            max_samples=max_samples,
+            verbose=verbose,
+            oracle_workers=oracle_workers,
+            step_workers=step_workers,
+            forward_batch_size=forward_batch_size,
+            jt_exact_max=jt_exact_max,
+            jt_markov_order=jt_markov_order,
+            jt_large_set=jt_large_set,
+            skip_jt=skip_jt,
+        )
 
     correlations = None
-    if do_replay and ppl.mt_trend and ppl.jt_trend:
+    use_oracle_trends = cached_oracle is not None or do_replay
+    if use_oracle_trends and ppl.mt_trend and ppl.jt_trend:
         m_hat = metrics.proxies["M_hat_t"].trend
         j_hat = metrics.proxies["J_hat_t"].trend
         n = min(len(ppl.mt_trend), len(m_hat), len(ppl.jt_trend), len(j_hat))
@@ -272,6 +324,7 @@ def analyze_one_npz(
         "correlations": correlations,
         "meta": meta,
         "completion": completion,
+        "oracle_npz": str(cached_oracle.resolve()) if cached_oracle else None,
     }
 
 
@@ -561,11 +614,17 @@ def run_compare(
     jt_large_set: Optional[int] = None,
     skip_jt: bool = False,
     strace_metrics_path: Optional[Union[str, Path]] = None,
+    oracle_dir: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Discover NPZs (Hub or local), analyze each, write ``schedulerlens_metrics.csv``.
 
     Hub path: purge cache → per-file temp download → stream analyze → delete temp.
     After each NPZ: flush the CSV (so a crash keeps progress and RAM stays flat).
+
+    With ``--oracle`` pointing at a saved ``oracle.npz`` or a folder of them, Mt/Jt
+    and correlations are filled from disk (matched by stem); traces still come from
+    Hub/local. Live ``--replay-oracle`` is only used for stems without a cached
+    artifact.
 
     With ``--replay-oracle`` and no fixed ``--hf-model``/``--model-path``, each
     PCFG stem's ``meta.model`` (e.g. ``llada-100m-pcfg``) is lazy-loaded from
@@ -578,47 +637,58 @@ def run_compare(
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "schedulerlens_metrics.csv"
 
+    oracle_index: dict[str, Path] = {}
+    if oracle_dir is not None:
+        oracle_index = index_oracle_artifacts(oracle_dir)
+        logger.info(
+            "Indexed %d oracle artifact(s) under %s",
+            len(oracle_index),
+            Path(oracle_dir),
+        )
+
     fixed_override = model_path is not None or hf_model is not None
-    engine, vocab, model, device = _load_oracle_stack(
-        replay_oracle=replay_oracle,
-        model_path=model_path if fixed_override else None,
-        hf_model=hf_model if fixed_override else None,
-    )
-    if replay_oracle and engine is None:
-        try:
-            from pcfg_data import build_stack
-
-            _g, _cnf, engine, vocab = build_stack()
-        except Exception as e:
-            logger.warning("PCFG stack unavailable (%s)", e)
-
+    need_live_replay = bool(replay_oracle)
+    engine = vocab = model = device = None
     lazy: Optional[_LazyOracleModels] = None
-    if replay_oracle and not fixed_override:
-        if device is None:
+    if need_live_replay:
+        engine, vocab, model, device = _load_oracle_stack(
+            replay_oracle=True,
+            model_path=model_path if fixed_override else None,
+            hf_model=hf_model if fixed_override else None,
+        )
+        if engine is None:
             try:
-                import torch
+                from pcfg_data import build_stack
 
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            except Exception:
-                device = "cpu"
-        lazy = _LazyOracleModels(
-            engine=engine,
-            vocab=vocab,
-            device=device,
-            namespace=namespace,
-        )
-    elif fixed_override:
-        # Keep a holder so we still unload at the end.
-        lazy = _LazyOracleModels(
-            engine=engine,
-            vocab=vocab,
-            device=device,
-            model_path=model_path,
-            hf_model=hf_model,
-            namespace=namespace,
-        )
-        lazy._model = model
-        lazy._loaded_key = str(hf_model or model_path) if model is not None else None
+                _g, _cnf, engine, vocab = build_stack()
+            except Exception as e:
+                logger.warning("PCFG stack unavailable (%s)", e)
+
+        if not fixed_override:
+            if device is None:
+                try:
+                    import torch
+
+                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                except Exception:
+                    device = "cpu"
+            lazy = _LazyOracleModels(
+                engine=engine,
+                vocab=vocab,
+                device=device,
+                namespace=namespace,
+            )
+        else:
+            lazy = _LazyOracleModels(
+                engine=engine,
+                vocab=vocab,
+                device=device,
+                model_path=model_path,
+                hf_model=hf_model,
+                namespace=namespace,
+            )
+            lazy._model = model
+            lazy._loaded_key = str(hf_model or model_path) if model is not None else None
 
     rows: List[Dict[str, Any]] = []
     repo_label = ""
@@ -700,22 +770,26 @@ def run_compare(
                     )
 
                 meta = parse_run_stem(name)
+                stem = Path(name).stem
+                cached = resolve_oracle_npz(None, stem, index=oracle_index)
+                do_replay = bool(replay_oracle and cached is None)
                 cur_model, cur_vocab, cur_device = model, vocab, device
-                if lazy is not None and replay_oracle:
+                if lazy is not None and do_replay:
                     cur_model, cur_vocab, cur_device = lazy.for_meta(meta)
 
                 logger.info(
-                    "[%d/%d] Analyzing %s (model=%s)",
+                    "[%d/%d] Analyzing %s (model=%s%s)",
                     idx + 1,
                     len(work_items),
                     name,
                     meta.model,
+                    f", oracle={cached.name}" if cached is not None else "",
                 )
                 result = analyze_one_npz(
                     Path(trace_path),
                     repo=repo_label,
                     max_samples=max_samples,
-                    replay_oracle=replay_oracle,
+                    replay_oracle=do_replay,
                     force_pcfg=force_pcfg,
                     model=cur_model,
                     device=cur_device,
@@ -730,6 +804,8 @@ def run_compare(
                     jt_large_set=jt_large_set,
                     skip_jt=skip_jt,
                     strace_metrics_path=strace_metrics_path,
+                    oracle_npz=cached,
+                    require_cached_oracle=bool(oracle_index),
                 )
                 rows.append(result["row"])
                 perplexity = result.get("perplexity")

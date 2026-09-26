@@ -2,7 +2,6 @@
 
 from .proxies import (
     PROXY_ATTRS,
-    CapsPair,
     SampleProxies,
     StepProxies,
     TraceProxyError,
@@ -17,13 +16,18 @@ from .metrics import (
     parse_run_stem,
     write_metrics_csv,
 )
-from .oracle import load_oracle_artifacts, save_oracle_artifacts
+from .oracle import (
+    load_oracle_artifacts,
+    save_oracle_artifacts,
+    index_oracle_artifacts,
+    resolve_oracle_npz,
+    task_perplexity_from_oracle_npz,
+)
 
 __all__ = [
     "PROXY_ATTRS",
     "CSV_COLUMNS",
     "BlockCorrelations",
-    "CapsPair",
     "RunMeta",
     "TraceProxyError",
     "SampleProxies",
@@ -35,4 +39,7 @@ __all__ = [
     "write_metrics_csv",
     "save_oracle_artifacts",
     "load_oracle_artifacts",
+    "index_oracle_artifacts",
+    "resolve_oracle_npz",
+    "task_perplexity_from_oracle_npz",
 ]

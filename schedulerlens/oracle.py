@@ -929,6 +929,19 @@ class TaskPerplexity:
         }
 
 
+def empty_task_perplexity(*, n_samples: int = 0) -> TaskPerplexity:
+    """NaN-filled perplexity row (used when cached oracle is missing and replay is off)."""
+    nan = float("nan")
+    return TaskPerplexity(
+        model_commit_nll=nan,
+        model_commit_ppl=nan,
+        oracle_nll=nan,
+        oracle_ppl=nan,
+        Mt_total=nan,
+        Jt_total=nan,
+        n_samples=int(n_samples),
+    )
+
 def _compute_sample_perplexity_inner(
     trace_dict: dict,
     *,
@@ -950,7 +963,6 @@ def _compute_sample_perplexity_inner(
     """Return (SamplePerplexity, optional OracleSampleMetrics)."""
     meta = trace_dict.get("metadata") or {}
     ref_ids = meta.get("reference_token_ids")
-    token_strings = meta.get("reference_tokens")
     n_commits = len(extract_unmask_events(trace_dict, trace_name=trace_name))
 
     if replay_oracle and model is not None and vocab is not None:
@@ -984,17 +996,12 @@ def _compute_sample_perplexity_inner(
     model_nll = trace_model_commit_nll(
         trace_dict, ref_ids, trace_name=trace_name
     )
-    oracle_nll = float("nan")
-    if engine is not None and token_strings is not None:
-        oracle_nll = trace_oracle_nll(
-            engine, trace_dict, token_strings, trace_name=trace_name
-        )
-
+    # Oracle NLL / Mt / Jt only come from --replay-oracle (or cached oracle.npz).
     return SamplePerplexity(
         model_commit_nll=model_nll,
         model_commit_ppl=nll_to_ppl(model_nll),
-        oracle_nll=oracle_nll,
-        oracle_ppl=nll_to_ppl(oracle_nll),
+        oracle_nll=float("nan"),
+        oracle_ppl=float("nan"),
         Mt_total=float("nan"),
         Jt_total=float("nan"),
         n_commits=n_commits,
@@ -1017,7 +1024,7 @@ def compute_sample_perplexity(
     jt_large_set: Optional[int] = None,
     skip_jt: bool = False,
 ) -> SamplePerplexity:
-    """Per-sample commit NLL/PPL; oracle fields when PCFG metadata + engine present."""
+    """Per-sample model commit NLL/PPL; oracle fields only with ``replay_oracle``."""
     sp, _oracle = _compute_sample_perplexity_inner(
         trace_dict,
         engine=engine,
@@ -1068,7 +1075,8 @@ def compute_task_perplexity(
     from traces.trace_npz import iter_npz_traces
 
     _ensure_pcfg_path()
-    if engine is None or vocab is None:
+    # PCFG stack only needed for live Mt/Jt replay (not for model-commit PPL).
+    if replay_oracle and (engine is None or vocab is None):
         try:
             from pcfg_data import build_stack
 
@@ -1220,7 +1228,8 @@ def compute_task_perplexity(
                 _fold(sample_idx, sp, oracle, n_ts)
                 n_done += 1
                 if verbose and n_done % 10 == 0:
-                    logger.info("Oracle replay: %d samples ...", n_done)
+                    label = "Oracle replay" if do_replay else "Perplexity"
+                    logger.info("%s: %d samples ...", label, n_done)
             return
         with ThreadPoolExecutor(max_workers=n_sample_workers) as ex:
             futs = [ex.submit(_process_one, si, tr) for si, tr in items]
@@ -1229,7 +1238,8 @@ def compute_task_perplexity(
                 _fold(sample_idx, sp, oracle, n_ts)
                 n_done += 1
                 if verbose and n_done % 10 == 0:
-                    logger.info("Oracle replay: %d samples ...", n_done)
+                    label = "Oracle replay" if do_replay else "Perplexity"
+                    logger.info("%s: %d samples ...", label, n_done)
 
     for i, tr in enumerate(iter_npz_traces(trace_path)):
         if max_samples is not None and i >= max_samples:
@@ -1402,4 +1412,127 @@ def load_oracle_artifacts(path: Union[str, Path]) -> dict[str, np.ndarray]:
     path = Path(path)
     with np.load(path, allow_pickle=True) as z:
         return {k: np.asarray(z[k]) for k in z.files}
+
+
+def _oracle_scalar(arr, default: float = float("nan")) -> float:
+    a = np.asarray(arr)
+    if a.size == 0:
+        return float(default)
+    return float(np.asarray(a).reshape(-1)[0])
+
+
+def _oracle_float_list(arr) -> List[float]:
+    a = np.asarray(arr, dtype=np.float64).reshape(-1)
+    return [float(x) for x in a.tolist()]
+
+
+def _oracle_stem_from_array(arr) -> str:
+    a = np.asarray(arr)
+    if a.size == 0:
+        return ""
+    raw = a.reshape(-1)[0]
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    text = str(raw).strip()
+    if not text:
+        return ""
+    return Path(text).stem
+
+
+def task_perplexity_from_oracle_npz(path: Union[str, Path]) -> TaskPerplexity:
+    """Rebuild :class:`TaskPerplexity` from a saved ``oracle.npz`` (no replay)."""
+    arts = load_oracle_artifacts(path)
+    n_samples = int(_oracle_scalar(arts.get("n_samples", 0), default=0))
+    return TaskPerplexity(
+        model_commit_nll=_oracle_scalar(arts.get("model_commit_nll")),
+        model_commit_ppl=_oracle_scalar(arts.get("model_commit_ppl")),
+        oracle_nll=_oracle_scalar(arts.get("oracle_nll")),
+        oracle_ppl=_oracle_scalar(arts.get("oracle_ppl")),
+        Mt_total=_oracle_scalar(arts.get("Mt_total")),
+        Jt_total=_oracle_scalar(arts.get("Jt_total")),
+        n_samples=n_samples,
+        sample_model_nll=_oracle_float_list(arts.get("sample_model_nll", [])),
+        sample_oracle_nll=_oracle_float_list(arts.get("sample_oracle_nll", [])),
+        sample_Mt=_oracle_float_list(arts.get("sample_Mt", [])),
+        sample_Jt=_oracle_float_list(arts.get("sample_Jt", [])),
+        mt_trend=_oracle_float_list(arts.get("mt_trend", [])),
+        jt_trend=_oracle_float_list(arts.get("jt_trend", [])),
+        jt_exact_max=int(_oracle_scalar(arts.get("jt_exact_max", 0), default=0)),
+        jt_markov_order=int(
+            _oracle_scalar(arts.get("jt_markov_order", 0), default=0)
+        ),
+    )
+
+
+def _oracle_keys_for_path(path: Path, *, content_stem: str = "") -> set[str]:
+    """Candidate lookup keys for an oracle artifact path."""
+    keys: set[str] = set()
+    name = path.stem
+    if name == "oracle":
+        pass
+    elif name.endswith("_oracle"):
+        keys.add(name[: -len("_oracle")])
+    elif name.startswith("oracle_"):
+        keys.add(name[len("oracle_") :])
+    else:
+        keys.add(name)
+    if path.name == "oracle.npz" and path.parent.name not in ("", "."):
+        keys.add(path.parent.name)
+    if content_stem:
+        keys.add(Path(content_stem).stem)
+    return {k for k in keys if k}
+
+
+def index_oracle_artifacts(root: Union[str, Path]) -> dict[str, Path]:
+    """Map trace stem → ``oracle.npz`` under a file or directory.
+
+    Accepts a single ``.npz`` or a folder (recursive). Filename stems are matched
+    to Hub/local trace stems; ``oracle.npz`` may also store ``stem`` inside.
+    """
+    root = Path(root)
+    if not root.exists():
+        raise FileNotFoundError(f"Oracle path not found: {root}")
+
+    paths: List[Path]
+    if root.is_file():
+        if root.suffix.lower() != ".npz":
+            raise ValueError(f"Oracle path must be .npz or a directory, got {root}")
+        paths = [root]
+    else:
+        paths = sorted(p for p in root.rglob("*.npz") if p.is_file())
+
+    index: dict[str, Path] = {}
+    for path in paths:
+        content_stem = ""
+        try:
+            arts = load_oracle_artifacts(path)
+            content_stem = _oracle_stem_from_array(arts.get("stem", []))
+        except Exception as e:
+            logger.warning("Skipping unreadable oracle artifact %s: %s", path, e)
+            continue
+        for key in _oracle_keys_for_path(path, content_stem=content_stem):
+            if key in index and index[key].resolve() != path.resolve():
+                logger.warning(
+                    "Duplicate oracle stem %r: keeping %s (ignore %s)",
+                    key,
+                    index[key],
+                    path,
+                )
+                continue
+            index[key] = path
+    return index
+
+
+def resolve_oracle_npz(
+    oracle_root: Optional[Union[str, Path]],
+    stem: str,
+    *,
+    index: Optional[dict[str, Path]] = None,
+) -> Optional[Path]:
+    """Return oracle artifact for ``stem``, or None if missing / unset."""
+    if oracle_root is None and index is None:
+        return None
+    lookup = index if index is not None else index_oracle_artifacts(oracle_root)  # type: ignore[arg-type]
+    stem = Path(stem).stem
+    return lookup.get(stem)
 

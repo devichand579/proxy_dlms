@@ -48,7 +48,6 @@ All commands go through `python -m schedulerlens.run` (or `python -m schedulerle
 | `inventory` | List Hub NPZs (no download) |
 | `analyze` | One Hub NPZ (download→analyze→delete) or `--local` |
 | `compare` | Batch Hub/local → CSV + plots (`analyze-all` alias) |
-| `pos` | POS-stratified unmask analysis |
 
 ```bash
 # Local NPZ
@@ -79,8 +78,10 @@ python -m schedulerlens.run compare \
 # Offline batch
 python -m schedulerlens.run compare --local-dir ./npz_traces -o out/compare --pcfg-only
 
-# POS
-python -m schedulerlens.run pos trace.npz -o out/pos --bucket-size 16
+# Reuse saved oracle.npz (folder or single file) + Hub traces → full CSV (no GPU replay)
+python -m schedulerlens.run compare \
+  --repo llada_pcfg_traces --namespace YOUR_ORG --pattern '*-pcfg_*.npz' --pcfg-only \
+  --oracle outputs/pcfg_oracles -o outputs/schedulerlens/pcfg_compare
 ```
 
 Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp download → stream NPZ samples → metrics → **delete temp**. Batch jobs purge stale HF cache at start.
@@ -117,6 +118,7 @@ Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp downlo
 | `--model` / `--scheduler` / `--steps` | Extra filters from parsed stem |
 | `--pcfg` | Force PCFG oracle gating even if the filename is not PCFG-like |
 | `--replay-oracle` | Exact Mt/Jt + M↔M̂ / J↔Ĵ correlations for PCFG |
+| `--oracle PATH` | Reuse saved `oracle.npz` (file or folder). Matched to Hub/local traces by stem; fills Mt/Jt/PPL + `corr_*` without live replay. With `--replay-oracle`, missing stems still replay |
 | `--oracle-workers N` | Parallel samples in oracle replay (shared model + engine pool; default 1) |
 | `--oracle-step-workers N` | Parallel PCFG Mt/Jt across steps within a sample (default `min(8, CPUs)`) |
 | `--oracle-forward-batch B` | Batched model forwards over precomputed step inputs (default 8) |
@@ -131,7 +133,7 @@ Hub helpers live in **`schedulerlens.hub`** (library): inventory → temp downlo
 | `--resume` | Skip stems already in output CSV |
 | `--no-purge-cache` | Skip Hub cache purge at batch start |
 
-**Oracle gating:** exact Mt/Jt and proxy correlations run only when the trace is PCFG (`-pcfg_` / `pcfg_` in the name, or `--pcfg`) **and** `--replay-oracle` is set. Non-PCFG runs still get M̂/Ĵ + model commit PPL + overview/surface plots.
+**Oracle gating:** `oracle_ppl` / Mt/Jt / `corr_*` only when `--replay-oracle` or a matching `--oracle` artifact is used. Without those, compare still fills M̂/Ĵ + completion (+ cheap `model_commit_ppl` from trace confidences).
 
 NPZ samples are streamed via `traces.trace_npz.iter_npz_traces` (one sample in RAM at a time for proxies).
 
@@ -146,7 +148,7 @@ CSV columns include:
 - **Proxy caps:** `M_hat` (hard-gated NLL sum), `J_hat` (star sum full traj), `J_hat_early` (star sum early third), `G_hat` = M̂+Ĵ
 - **Completion diagnostics:** commit / final-mask / EOS rates, `conf_mean` / `ent_mean`
 - **Eval join** (from `fetch_evals/strace_metrics.csv` via `--strace-metrics`): `accuracy`, `avg_nfe_per_sample`, `strace_name`, `strace_metric_key`
-- **Oracle** (with `--replay-oracle`): `model_commit_ppl`, `oracle_ppl`, `Mt_total`, `Jt_total`, `corr_*`
+- **Oracle** (with `--replay-oracle` or `--oracle`): `model_commit_ppl`, `oracle_ppl`, `Mt_total`, `Jt_total`, `corr_*`
 
 Compare writes `schedulerlens_metrics.csv` only. `file` / `analyze` also write per-run `metrics.csv` / `metrics.json` (and `oracle.npz` when replaying).
 
@@ -162,7 +164,7 @@ Eval join: `accuracy`, `avg_nfe_per_sample` from `strace_metrics.csv` (stem == `
 
 PPL / oracle: `model_commit_ppl`, `oracle_ppl`, `Mt_total`, `Jt_total`
 
-Correlations (PCFG+replay, else empty): `corr_M_{full,early,mid,late}`, `corr_J_{full,early,mid,late}`, `corr_ppl`
+Correlations (PCFG + replay or cached `--oracle`, else empty): `corr_M_{full,early,mid,late}`, `corr_J_{full,early,mid,late}`, `corr_ppl`
 
 Trajectory blocks are equal thirds of `n_steps`.
 
@@ -200,13 +202,6 @@ Raise `exact_max` only if you have the RAM. Concurrent exact CKY `Jt` calls are 
 | `completion.py` | Commit / EOS / mask diagnostics, conf/ent means, strace accuracy/NFE join |
 | `oracle.py` | Commit NLL, PCFG Mt/Jt replay, task perplexity |
 | `hub.py` | Hub inventory / download→analyze→delete / batch compare |
-| `run.py` | **Single CLI** (`file` / `inventory` / `analyze` / `compare` / `pos`) |
-| `pos.py` | POS analysis library |
+| `run.py` | **Single CLI** (`file` / `inventory` / `analyze` / `compare`) |
 
 `compare` / `file` / `analyze` join accuracy and NFE from `fetch_evals/strace_metrics.csv` onto each metrics row (stem == strace `name`; fallback model+task+steps+mode). Override with `--strace-metrics`.
-
----
-
-## POS unmasking analysis
-
-Separate from M̂/Ĵ: `python -m schedulerlens.run pos TRACE.npz -o OUT/`.

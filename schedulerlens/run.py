@@ -6,7 +6,6 @@ Subcommands:
   inventory    List Hub NPZs (no download)
   analyze      Download/analyze one Hub NPZ (or --local path)
   compare      Batch Hub/local compare → CSV
-  pos          POS-stratified unmask analysis
 """
 
 from __future__ import annotations
@@ -65,13 +64,21 @@ def run_schedulerlens(
     jt_large_set: Optional[int] = None,
     skip_jt: bool = False,
     strace_metrics_path: Optional[Union[str, Path]] = None,
+    oracle: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Compute metrics and write metrics.json / metrics.csv to output_dir."""
+    from schedulerlens.oracle import (
+        resolve_oracle_npz,
+        task_perplexity_from_oracle_npz,
+    )
+
     _ensure_pcfg_path()
     trace_path = Path(trace_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     meta = parse_run_stem(trace_path)
+
+    cached_oracle = resolve_oracle_npz(oracle, meta.stem) if oracle else None
 
     metrics = compute_task_metrics(
         trace_path,
@@ -106,8 +113,6 @@ def run_schedulerlens(
         "J_hat": metrics.J_hat,
         "J_hat_early": metrics.J_hat_early,
         "G_hat": float(metrics.M_hat) + float(metrics.J_hat),
-        "M_hat_uniform": metrics.M_hat_uniform,
-        "J_hat_uniform": metrics.J_hat_uniform,
         "n_samples": metrics.n_samples,
         "n_steps": metrics.n_steps,
         "metrics_path": str(metrics_path.resolve()),
@@ -118,18 +123,26 @@ def run_schedulerlens(
 
     ppl = None
     correlations = None
-    do_replay = replay_oracle and (meta.is_pcfg or force_pcfg)
+    do_replay = (
+        cached_oracle is None
+        and replay_oracle
+        and (meta.is_pcfg or force_pcfg)
+    )
 
     if compute_perplexity:
-        engine = vocab = model = device = None
-        if meta.is_pcfg or force_pcfg:
-            try:
-                from pcfg_data import build_stack
-
-                _g, _cnf, engine, vocab = build_stack()
-            except Exception as e:
-                logger.warning("PCFG stack unavailable: %s", e)
+        if cached_oracle is not None:
+            logger.info("Using cached oracle %s", cached_oracle)
+            ppl = task_perplexity_from_oracle_npz(cached_oracle)
+            result["oracle_artifacts_path"] = str(cached_oracle.resolve())
+        else:
+            engine = vocab = model = device = None
             if do_replay:
+                try:
+                    from pcfg_data import build_stack
+
+                    _g, _cnf, engine, vocab = build_stack()
+                except Exception as e:
+                    logger.warning("PCFG stack unavailable: %s", e)
                 from schedulerlens.hub import _load_oracle_stack
 
                 _e, vocab2, model, device = _load_oracle_stack(
@@ -142,43 +155,45 @@ def run_schedulerlens(
                 if vocab2 is not None:
                     vocab = vocab2
 
-        ppl = compute_task_perplexity(
-            trace_path,
-            engine=engine,
-            vocab=vocab,
-            model=model,
-            device=device,
-            replay_oracle=do_replay and model is not None,
-            max_samples=max_samples,
-            verbose=verbose,
-            oracle_workers=oracle_workers,
-            step_workers=step_workers,
-            forward_batch_size=forward_batch_size,
-            jt_exact_max=jt_exact_max,
-            jt_markov_order=jt_markov_order,
-            jt_large_set=jt_large_set,
-            skip_jt=skip_jt,
-        )
+            ppl = compute_task_perplexity(
+                trace_path,
+                engine=engine,
+                vocab=vocab,
+                model=model,
+                device=device,
+                replay_oracle=do_replay and model is not None,
+                max_samples=max_samples,
+                verbose=verbose,
+                oracle_workers=oracle_workers,
+                step_workers=step_workers,
+                forward_batch_size=forward_batch_size,
+                jt_exact_max=jt_exact_max,
+                jt_markov_order=jt_markov_order,
+                jt_large_set=jt_large_set,
+                skip_jt=skip_jt,
+            )
+            tables = getattr(ppl, "oracle_tables", None) or {}
+            if do_replay and (
+                tables.get("step_sample_idx")
+                or any(s is not None for s in ppl.sample_oracle)
+            ):
+                oracle_path = save_oracle_artifacts(
+                    output_dir / "oracle.npz",
+                    ppl,
+                    stem=meta.stem,
+                )
+                result["oracle_artifacts_path"] = str(oracle_path.resolve())
+                ppl.oracle_tables = {}
+                ppl.sample_oracle = []
+
         ppl_path = output_dir / "perplexity.json"
         with ppl_path.open("w", encoding="utf-8") as f:
             json.dump(ppl.to_dict(), f, indent=2)
         result["perplexity"] = ppl
         result["perplexity_path"] = str(ppl_path.resolve())
-        tables = getattr(ppl, "oracle_tables", None) or {}
-        if do_replay and (
-            tables.get("step_sample_idx")
-            or any(s is not None for s in ppl.sample_oracle)
-        ):
-            oracle_path = save_oracle_artifacts(
-                output_dir / "oracle.npz",
-                ppl,
-                stem=meta.stem,
-            )
-            result["oracle_artifacts_path"] = str(oracle_path.resolve())
-            ppl.oracle_tables = {}
-            ppl.sample_oracle = []
 
-        if do_replay and ppl.mt_trend and ppl.jt_trend:
+        use_oracle_trends = cached_oracle is not None or do_replay
+        if use_oracle_trends and ppl.mt_trend and ppl.jt_trend:
             m_hat = metrics.proxies["M_hat_t"].trend
             j_hat = metrics.proxies["J_hat_t"].trend
             n = min(len(ppl.mt_trend), len(m_hat), len(ppl.jt_trend), len(j_hat))
@@ -312,11 +327,22 @@ def _add_oracle_args(p: argparse.ArgumentParser) -> None:
         help="Path to strace_metrics.csv for accuracy/NFE join "
         "(default: fetch_evals/strace_metrics.csv)",
     )
+    p.add_argument(
+        "--oracle",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Reuse saved oracle.npz (file or directory). Matched to traces by "
+            "stem; fills Mt/Jt/PPL + corr_* without live replay. With "
+            "--replay-oracle, missing stems still replay."
+        ),
+    )
 
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="SchedulerLens — single entrypoint for metrics, Hub, and POS.",
+        description="SchedulerLens — single entrypoint for metrics and Hub analysis.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -369,17 +395,6 @@ def build_argparser() -> argparse.ArgumentParser:
     p_cmp.add_argument("--no-purge-cache", action="store_true")
     p_cmp.add_argument("-q", "--quiet", action="store_true")
 
-    # --- pos ---
-    p_pos = sub.add_parser("pos", help="POS-stratified unmask analysis")
-    p_pos.add_argument("trace_path", type=Path)
-    p_pos.add_argument("-o", "--output-dir", type=Path, required=True)
-    p_pos.add_argument("--max-samples", type=int, default=None)
-    p_pos.add_argument("--bucket-size", type=int, default=None, metavar="N")
-    p_pos.add_argument("--top-k", type=int, default=10)
-    p_pos.add_argument("--model-path", type=Path, default=None)
-    p_pos.add_argument("--models-root", type=Path, default=None)
-    p_pos.add_argument("-q", "--quiet", action="store_true")
-
     return parser
 
 
@@ -413,6 +428,7 @@ def _cmd_file(args: argparse.Namespace) -> int:
             jt_large_set=args.oracle_jt_large_set,
             skip_jt=args.oracle_no_jt,
             strace_metrics_path=args.strace_metrics,
+            oracle=args.oracle,
         )
     except TraceProxyError as e:
         logger.error("Aborted (bad trace data): %s", e)
@@ -470,16 +486,18 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         _load_oracle_stack,
         analyze_hub_file,
         analyze_local_file,
+        hf_model_id_for_meta,
     )
+    from schedulerlens.oracle import resolve_oracle_npz
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    engine = vocab = model = device = None
-    if args.replay_oracle:
-        from schedulerlens.hub import hf_model_id_for_meta
-        from schedulerlens.metrics import parse_run_stem
+    meta = parse_run_stem(args.filename)
+    cached = resolve_oracle_npz(args.oracle, meta.stem) if args.oracle else None
+    do_replay = bool(args.replay_oracle and cached is None)
 
-        meta = parse_run_stem(args.filename)
+    engine = vocab = model = device = None
+    if do_replay:
         resolved = args.hf_model or (
             None
             if args.model_path is not None
@@ -500,13 +518,15 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             jt_large_set=args.oracle_jt_large_set,
             skip_jt=args.oracle_no_jt,
             strace_metrics_path=args.strace_metrics,
+            oracle_npz=cached,
+            require_cached_oracle=bool(args.oracle),
         )
         if args.local:
             result = analyze_local_file(
                 args.filename,
                 repo=str(Path(args.filename).resolve().parent),
                 max_samples=args.max_samples,
-                replay_oracle=args.replay_oracle,
+                replay_oracle=do_replay,
                 force_pcfg=args.pcfg,
                 model=model,
                 device=device,
@@ -522,7 +542,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
                 namespace=args.namespace,
                 revision=args.revision,
                 max_samples=args.max_samples,
-                replay_oracle=args.replay_oracle,
+                replay_oracle=do_replay,
                 force_pcfg=args.pcfg,
                 model=model,
                 device=device,
@@ -578,6 +598,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             jt_large_set=args.oracle_jt_large_set,
             skip_jt=args.oracle_no_jt,
             strace_metrics_path=args.strace_metrics,
+            oracle_dir=args.oracle,
         )
     except TraceProxyError as e:
         logger.error("%s", e)
@@ -588,36 +609,6 @@ def _cmd_compare(args: argparse.Namespace) -> int:
 
     print(f"Runs: {len(result['rows'])}")
     print(f"CSV : {result['csv_path']}")
-    return 0
-
-
-def _cmd_pos(args: argparse.Namespace) -> int:
-    from schedulerlens.pos import run_pos_analysis
-
-    if not args.trace_path.exists():
-        logger.error("Trace file not found: %s", args.trace_path)
-        return 1
-    if args.trace_path.suffix.lower() != ".npz":
-        logger.error("Expected NPZ, got %s", args.trace_path.name)
-        return 1
-    try:
-        result = run_pos_analysis(
-            args.trace_path,
-            args.output_dir,
-            max_samples=args.max_samples,
-            bucket_size=args.bucket_size,
-            top_k=args.top_k,
-            model_path=args.model_path,
-            models_root=args.models_root,
-            verbose=not args.quiet,
-        )
-    except Exception as e:
-        logger.error("POS analysis failed: %s", e)
-        return 1
-
-    print(result["metrics"].summary())
-    print(f"\nOutput dir: {args.output_dir.resolve()}")
-    print(f"  pos_metrics.json : {result['metrics_path']}")
     return 0
 
 
@@ -639,8 +630,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_analyze(args)
     if cmd in ("compare", "analyze-all"):
         return _cmd_compare(args)
-    if cmd == "pos":
-        return _cmd_pos(args)
     logger.error("Unknown command: %s", cmd)
     return 1
 

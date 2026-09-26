@@ -82,6 +82,7 @@ Filters:
 
 Oracle / PCFG:
   --replay-oracle             Exact Mt/Jt + proxy correlations (PCFG)
+  --oracle PATH               Reuse saved oracle.npz (file or folder); match by stem
   --pcfg                      Force PCFG oracle gating
   --model-path PATH|REPO      Local checkpoint or HF id for all traces
   --hf-model REPO             Fixed HF model for all traces
@@ -108,6 +109,9 @@ Examples:
     --pattern 'llada-300m-pcfg-1B-pcfg_*.npz' --pcfg-only \
     --replay-oracle --pcfg -o outputs/pcfg_compare_1b --slurm
 
+  ./scripts/schedulerlens_compare.sh --repo llada-pcfg-traces --pcfg-only \
+    --oracle outputs/pcfg_oracles -o outputs/pcfg_compare --device 0
+
   ./scripts/schedulerlens_compare.sh --local-dir ./npz_traces --pcfg-only \
     -o outputs/local_compare --device 0
 EOF
@@ -124,6 +128,7 @@ SCHEDULER_FILTER=""
 STEPS_FILTER=""
 PCFG_ONLY=false
 REPLAY_ORACLE=false
+ORACLE=""
 FORCE_PCFG=false
 MODEL_PATH=""
 HF_MODEL=""
@@ -191,6 +196,10 @@ while [[ $# -gt 0 ]]; do
     --replay-oracle)
       REPLAY_ORACLE=true
       shift
+      ;;
+    --oracle)
+      ORACLE="$2"
+      shift 2
       ;;
     --pcfg)
       FORCE_PCFG=true
@@ -349,6 +358,7 @@ fi
 [[ -n "$STEPS_FILTER" ]] && CMD+=(--steps "$STEPS_FILTER")
 [[ "$PCFG_ONLY" == "true" ]] && CMD+=(--pcfg-only)
 [[ "$REPLAY_ORACLE" == "true" ]] && CMD+=(--replay-oracle)
+[[ -n "$ORACLE" ]] && CMD+=(--oracle "$ORACLE")
 [[ "$FORCE_PCFG" == "true" ]] && CMD+=(--pcfg)
 [[ -n "$MODEL_PATH" ]] && CMD+=(--model-path "$MODEL_PATH")
 [[ -n "$HF_MODEL" ]] && CMD+=(--hf-model "$HF_MODEL")
@@ -370,7 +380,7 @@ echo "  cwd: $REPO_ROOT"
 echo "  output: $OUTPUT_DIR"
 echo "  source: ${REPO_ID:-$LOCAL_DIR}"
 echo "  pattern: $PATTERN"
-echo "  pcfg-only: $PCFG_ONLY  replay-oracle: $REPLAY_ORACLE  pcfg: $FORCE_PCFG"
+echo "  pcfg-only: $PCFG_ONLY  replay-oracle: $REPLAY_ORACLE  oracle: ${ORACLE:-}  pcfg: $FORCE_PCFG"
 echo "  slurm/srun: $SLURM_MODE  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 echo "  cmd: ${CMD[*]}"
 echo ""
