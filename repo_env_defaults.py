@@ -1,4 +1,4 @@
-"""Repo default credentials (mirrors ".env.example").
+"""Repo default credentials
 """
 
 from __future__ import annotations
