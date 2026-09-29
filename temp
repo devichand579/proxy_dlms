@@ -1,4 +1,4 @@
-python -m schedulerlens.run causal \
+/scripts/schedulerlens_compare.sh --command causal  \
   --repo schedulerlens-traces --namespace devichand \
   --predictor llada --controller llada1_5 \
   --steps 128 --exclude-task arc_challenge_chat \
