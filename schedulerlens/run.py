@@ -5,7 +5,7 @@ Subcommands:
   file         Analyze one local NPZ (metrics CSV/JSON)
   inventory    List Hub NPZs (no download)
   compare      Batch Hub/local compare → CSV
-  causal       Predictor–controller audit / swap / adaptive
+  causal       Predictor–controller audit
   prefix-sweep      Prefix M-hat, J-hat, and G-hat/f for each run
   prefix-sweep-pcfg Same sweep on PCFG traces against oracle M
   prefix-selection  Scheduler with the lowest prefix G-hat/f
@@ -521,7 +521,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
     p_causal = sub.add_parser(
         "causal",
-        help="Predictor–controller causal experiments (audit, swap, adaptive)",
+        help="Predictor–controller audit",
     )
     p_causal.add_argument("causal_argv", nargs=argparse.REMAINDER)
 
@@ -698,7 +698,12 @@ def _cmd_compare(args: argparse.Namespace) -> int:
 def main(argv: Optional[list[str]] = None) -> int:
     apply_repo_env_defaults()
     _ensure_pcfg_path()
-    args = build_argparser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["causal"]:
+        from schedulerlens.causal.__main__ import main as causal_main
+
+        return causal_main(raw[1:])
+    args = build_argparser().parse_args(raw)
     quiet = bool(getattr(args, "quiet", False))
     logging.basicConfig(
         level=logging.WARNING if quiet else logging.INFO,
@@ -711,10 +716,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_inventory(args)
     if cmd == "compare":
         return _cmd_compare(args)
-    if cmd == "causal":
-        from schedulerlens.causal.__main__ import main as causal_main
-
-        return causal_main(args.causal_argv)
     if cmd == "prefix-sweep":
         from schedulerlens.prefix_sweep import main as prefix_sweep_main
 

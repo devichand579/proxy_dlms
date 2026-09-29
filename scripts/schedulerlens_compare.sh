@@ -40,6 +40,14 @@
 # Prefix selection:
 #   ./scripts/schedulerlens_compare.sh --command prefix-selection --tau 1.0
 #
+# Causal audit (steps 128, ARC-C omitted; FHS and FDM are not scored):
+#   sbatch scripts/schedulerlens_compare.sh --command causal \
+#     --repo schedulerlens-traces --namespace devichand \
+#     --predictor llada --controller llada \
+#     --steps 128 --exclude-task arc_challenge_chat \
+#     --device-map split --batch-size 8 \
+#     -o outputs/schedulerlens/causal_audit --slurm
+#
 # Slurm:
 #   sbatch scripts/schedulerlens_compare.sh --repo llada-pcfg-traces \
 #     --pattern 'llada-300m-pcfg-1B-pcfg_pd_s128.npz' --pcfg-only \
@@ -72,7 +80,7 @@ SchedulerLens launcher.
   ./scripts/schedulerlens_compare.sh [OPTIONS]
 
 Command (default: compare):
-  --command NAME              compare | prefix-sweep | prefix-sweep-pcfg | prefix-selection
+  --command NAME              compare | prefix-sweep | prefix-sweep-pcfg | prefix-selection | causal
 
 Keep aside:
   --exclude-task NAMES        Comma-separated tasks to skip (e.g. arc_challenge_chat)
@@ -138,6 +146,14 @@ Examples:
     --exclude-task arc_challenge_chat --exclude-scheduler fhs
 
   ./scripts/schedulerlens_compare.sh --command prefix-selection --tau 1.0
+
+Causal audit (resume is always on; --exclude-scheduler is not used):
+  sbatch scripts/schedulerlens_compare.sh --command causal \
+    --repo schedulerlens-traces --namespace devichand \
+    --predictor llada --controller llada \
+    --steps 128 --exclude-task arc_challenge_chat \
+    --device-map split --batch-size 8 \
+    -o outputs/schedulerlens/causal_audit --slurm
 EOF
 }
 
@@ -175,6 +191,10 @@ METRICS_ONLY=false
 COMMAND="compare"
 EXCLUDE_TASK=""
 EXCLUDE_SCHEDULER=""
+PREDICTOR=""
+CONTROLLER=""
+DEVICE_MAP=""
+BATCH_SIZE=""
 RUNS_CSV=""
 TAU=""
 CSV_NAME=""
@@ -195,6 +215,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --exclude-scheduler)
       EXCLUDE_SCHEDULER="$2"
+      shift 2
+      ;;
+    --predictor)
+      PREDICTOR="$2"
+      shift 2
+      ;;
+    --controller)
+      CONTROLLER="$2"
+      shift 2
+      ;;
+    --device-map)
+      DEVICE_MAP="$2"
+      shift 2
+      ;;
+    --batch-size)
+      BATCH_SIZE="$2"
       shift 2
       ;;
     --runs)
@@ -343,8 +379,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$COMMAND" == "compare" && -z "$REPO_ID" && -z "$LOCAL_DIR" ]]; then
+if [[ "$COMMAND" == "compare" || "$COMMAND" == "causal" ]] && [[ -z "$REPO_ID" && -z "$LOCAL_DIR" ]]; then
   echo "Error: provide --repo or --local-dir"
+  usage
+  exit 1
+fi
+if [[ "$COMMAND" == "causal" && -z "$OUTPUT_DIR" ]]; then
+  echo "Error: causal audit requires -o / --output-dir"
   usage
   exit 1
 fi
@@ -353,7 +394,7 @@ if [[ -n "$REPO_ID" && -n "$LOCAL_DIR" ]]; then
   exit 1
 fi
 case "$COMMAND" in
-  compare|prefix-sweep|prefix-sweep-pcfg|prefix-selection)
+  compare|prefix-sweep|prefix-sweep-pcfg|prefix-selection|causal)
     ;;
   *)
     echo "Error: unknown --command '$COMMAND'"
@@ -397,6 +438,8 @@ if [[ "$SLURM_MODE" != "true" ]]; then
         echo "Warning: unrecognized --device '$DEVICE' (leaving CUDA_VISIBLE_DEVICES as-is)"
         ;;
     esac
+  elif [[ "$COMMAND" == "causal" ]]; then
+    : # leave every allocated GPU visible for --device-map split
   else
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
   fi
@@ -407,10 +450,20 @@ if [[ -n "$OUTPUT_DIR" ]]; then
   mkdir -p "$OUTPUT_DIR"
 fi
 
-CMD=(python -m schedulerlens.run "$COMMAND")
+if [[ "$COMMAND" == "causal" ]]; then
+  CMD=(python -m schedulerlens.run causal)
+else
+  CMD=(python -m schedulerlens.run "$COMMAND")
+fi
 [[ -n "$EXCLUDE_TASK" ]] && CMD+=(--exclude-task "$EXCLUDE_TASK")
-[[ -n "$EXCLUDE_SCHEDULER" ]] && CMD+=(--exclude-scheduler "$EXCLUDE_SCHEDULER")
-[[ "$QUIET" == "true" ]] && CMD+=(--quiet)
+if [[ "$COMMAND" == "causal" && -n "$EXCLUDE_SCHEDULER" ]]; then
+  echo "Note: causal audit ignores --exclude-scheduler (FHS and FDM are already omitted)"
+elif [[ -n "$EXCLUDE_SCHEDULER" ]]; then
+  CMD+=(--exclude-scheduler "$EXCLUDE_SCHEDULER")
+fi
+if [[ "$COMMAND" != "causal" && "$QUIET" == "true" ]]; then
+  CMD+=(--quiet)
+fi
 
 if [[ "$COMMAND" == "compare" ]]; then
   CMD+=(-o "$OUTPUT_DIR" --pattern "$PATTERN")
@@ -455,6 +508,32 @@ if [[ "$COMMAND" == "compare" ]]; then
   [[ -n "$PREFIX_STEPS" ]] && CMD+=(--prefix-steps "$PREFIX_STEPS")
   [[ "$METRICS_ONLY" == "true" ]] && CMD+=(--metrics-only)
   [[ -n "$CSV_NAME" ]] && CMD+=(--csv "$CSV_NAME")
+elif [[ "$COMMAND" == "causal" ]]; then
+  CMD+=(-o "$OUTPUT_DIR" --pattern "$PATTERN")
+  if [[ -n "$REPO_ID" ]]; then
+    CMD+=(--repo "$REPO_ID")
+  else
+    if [[ -d "$LOCAL_DIR" ]]; then
+      :
+    elif [[ -d "$REPO_ROOT/$LOCAL_DIR" ]]; then
+      LOCAL_DIR="$REPO_ROOT/$LOCAL_DIR"
+    else
+      echo "Error: --local-dir not found: $LOCAL_DIR"
+      exit 1
+    fi
+    CMD+=(--local-dir "$LOCAL_DIR")
+  fi
+  [[ -n "$NAMESPACE" ]] && CMD+=(--namespace "$NAMESPACE")
+  [[ -n "$PREDICTOR" ]] && CMD+=(--predictor "$PREDICTOR")
+  [[ -n "$CONTROLLER" ]] && CMD+=(--controller "$CONTROLLER")
+  [[ -n "$DEVICE_MAP" ]] && CMD+=(--device-map "$DEVICE_MAP")
+  [[ -n "$BATCH_SIZE" ]] && CMD+=(--batch-size "$BATCH_SIZE")
+  [[ -n "$STEPS_FILTER" ]] && CMD+=(--steps "$STEPS_FILTER")
+  [[ -n "$MAX_SAMPLES" ]] && CMD+=(--max-samples "$MAX_SAMPLES")
+  [[ -n "$LIMIT" ]] && CMD+=(--limit "$LIMIT")
+  if [[ "$NO_RESUME" == "true" ]]; then
+    echo "Note: causal audit always resumes from causal_audit.csv in the output directory"
+  fi
 elif [[ "$COMMAND" == "prefix-selection" ]]; then
   [[ -n "$OUTPUT_DIR" ]] && CMD+=(-o "$OUTPUT_DIR")
   [[ -n "$CSV_NAME" ]] && CMD+=(--csv "$CSV_NAME")
@@ -474,6 +553,11 @@ if [[ "$COMMAND" == "compare" ]]; then
   echo "  source: ${REPO_ID:-$LOCAL_DIR}"
   echo "  pattern: $PATTERN"
   echo "  pcfg-only: $PCFG_ONLY  replay-oracle: $REPLAY_ORACLE  oracle: ${ORACLE:-}  pcfg: $FORCE_PCFG"
+elif [[ "$COMMAND" == "causal" ]]; then
+  echo "  output: $OUTPUT_DIR"
+  echo "  source: ${REPO_ID:-$LOCAL_DIR}"
+  echo "  predictor: ${PREDICTOR:-llada}  controller: ${CONTROLLER:-llada1_5}"
+  echo "  device-map: ${DEVICE_MAP:-split}  batch-size: ${BATCH_SIZE:-8}  steps: ${STEPS_FILTER:-256}"
 fi
 echo "  slurm/srun: $SLURM_MODE  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 echo "  cmd: ${CMD[*]}"
