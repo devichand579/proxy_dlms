@@ -78,6 +78,19 @@ def generate_pc(
         device=dev_p,
     )
     x[:, :prompt_len] = prompt
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(dev_p)
+        attention_mask = torch.cat(
+            [
+                attention_mask,
+                torch.ones(
+                    (batch, gen_length),
+                    dtype=attention_mask.dtype,
+                    device=dev_p,
+                ),
+            ],
+            dim=-1,
+        )
     steps_taken = 0
     blocks = 1 if not block_length or block_length >= gen_length else gen_length // int(block_length)
 
