@@ -1,0 +1,6 @@
+python -m schedulerlens.run causal \
+  --repo schedulerlens-traces --namespace devichand \
+  --predictor llada --controller llada1_5 \
+  --steps 128 --exclude-task arc_challenge_chat \
+  --device-map split --batch-size 64 \
+  -o outputs/schedulerlens/causal_audit
