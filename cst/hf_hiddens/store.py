@@ -281,6 +281,7 @@ def upload_hidden_chunk(
     scope: str = "train",
     skip_if_exists: bool = False,
     n_rows: Optional[int] = None,
+    skip_manifest_push: bool = False,
 ) -> ChunkRecord:
     """Upload one hidden .pt and update the Hub manifest.
 
@@ -321,7 +322,8 @@ def upload_hidden_chunk(
     prev_chunks = list(manifest.chunks)
     manifest.upsert_chunk(rec)
     try:
-        push_manifest(manifest, repo_id, revision=revision, token=token, cache_dir=cache_dir)
+        if not skip_manifest_push:
+            push_manifest(manifest, repo_id, revision=revision, token=token, cache_dir=cache_dir)
     except Exception:
         manifest.chunks = prev_chunks
         raise

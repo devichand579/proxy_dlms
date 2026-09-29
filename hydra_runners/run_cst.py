@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import sys
+import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
@@ -38,7 +39,7 @@ from cst.hf_hiddens.manifest import (
     store_fingerprint_required_keys,
 )
 from cst.hf_hiddens.store import (
-    HubStorageFullError,
+    HubStorageFullError as HfHubStorageFullError,
     download_all_chunks,
     download_hidden_chunk,
     fetch_manifest,
@@ -46,7 +47,8 @@ from cst.hf_hiddens.store import (
     push_manifest,
     upload_hidden_chunk,
 )
-from cst.pre_logits import DiskFullError
+from cst.azure_hiddens.store import HubStorageFullError as AzureHubStorageFullError
+from cst.pre_logits import DiskFullError, read_cst_hidden_meta
 from cst.store_budget import (
     max_inference_batch_size,
     model_weight_bytes,
@@ -58,6 +60,7 @@ from cst.train.adam_bf16 import AdamBF16
 from cst.train.memory_budget import plan_from_train_cfg
 from cst.naming import (
     cst_ckpt_name_token,
+    cst_hidden_chunk_basename,
     cst_hidden_name_token,
     model_label_from_path,
     resolve_train_best_in_dir,
@@ -154,15 +157,19 @@ def _cst_log_stem(cfg: DictConfig) -> str:
 
 def _setup_cst_file_logging(cfg: DictConfig) -> Path:
     """Write store/train/eval logger output to ``logs/cst_{mode}_*.log`` (same dir as eval.py)."""
+    import os
+    rank = os.environ.get("RANK", os.environ.get("SLURM_PROCID"))
+    rank_str = f"_rank{rank}" if rank is not None else ""
     log_dir = _REPO_ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"{_cst_log_stem(cfg)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_file = log_dir / f"{_cst_log_stem(cfg)}{rank_str}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.addHandler(fh)
+    logging.getLogger("azure").setLevel(logging.WARNING)
     has_console = any(
         isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
         for h in root.handlers
@@ -170,7 +177,7 @@ def _setup_cst_file_logging(cfg: DictConfig) -> Path:
     if not has_console:
         sh = logging.StreamHandler()
         sh.setLevel(logging.INFO)
-        sh.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        sh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         root.addHandler(sh)
     return log_file
 
@@ -386,26 +393,59 @@ def _store_row_groups(
 
 
 def _cut_row_groups(
-    groups: List[List[Dict[str, Any]]], batch_size: int
+    groups: List[List[Dict[str, Any]]],
+    batch_size: Optional[int] = None,
+    *,
+    store_cfg: Any = None,
+    yaml_bs: int = 1,
+    tokenizer=None,
+    model_path: str = "",
+    default_gen: int = 0,
+    default_steps: int = 0,
+    repo_id: str = "",
+    name_token: str = "",
+    scope: str = "",
 ) -> List[List[Dict[str, Any]]]:
-    """Cut each length-bucket group into batches of at most ``batch_size``."""
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
+    """Cut each length-bucket group into batches. If batch_size is None, dynamically compute per bucket."""
     out: List[List[Dict[str, Any]]] = []
     for grp in groups:
-        for start in range(0, len(grp), batch_size):
-            out.append(grp[start : start + batch_size])
+        if not grp:
+            continue
+        b_cap = batch_size
+        if b_cap is None:
+            b_cap = _choose_store_batch_size(
+                store_cfg,
+                yaml_bs=yaml_bs,
+                rows=grp,
+                tokenizer=tokenizer,
+                model_path=model_path,
+                default_gen=default_gen,
+                default_steps=default_steps,
+                repo_id=repo_id,
+                name_token=name_token,
+                scope=scope,
+                silent=True,
+            )
+        if b_cap <= 0:
+            raise ValueError("batch_size must be positive")
+        for start in range(0, len(grp), b_cap):
+            out.append(grp[start : start + b_cap])
     return out
 
 
 def _bucket_row_batches(
     flat: List[Dict[str, Any]],
-    batch_size: int,
+    batch_size: Optional[int],
     default_gen: int,
     default_steps: int,
     *,
     tokenizer,
     model_path: str,
+    store_cfg: Any = None,
+    yaml_bs: int = 1,
+    repo_id: str = "",
+    name_token: str = "",
+    scope: str = "",
 ) -> List[List[Dict[str, Any]]]:
     """Batch by gen_length, then eval.py prompt-length buckets (sorted within bucket)."""
     return _cut_row_groups(
@@ -417,6 +457,15 @@ def _bucket_row_batches(
             model_path=model_path,
         ),
         batch_size,
+        store_cfg=store_cfg,
+        yaml_bs=yaml_bs,
+        tokenizer=tokenizer,
+        model_path=model_path,
+        default_gen=default_gen,
+        default_steps=default_steps,
+        repo_id=repo_id,
+        name_token=name_token,
+        scope=scope,
     )
 
 
@@ -539,6 +588,7 @@ def _choose_store_batch_size(
     repo_id: str,
     name_token: str,
     scope: str,
+    silent: bool = False,
 ) -> int:
     """YAML cap, or lower from free disk/RAM/VRAM for this row set."""
     requested = max(int(yaml_bs), 1)
@@ -581,15 +631,17 @@ def _choose_store_batch_size(
         max_chunk_gb=max_chunk_gb,
         model_bytes=model_weight_bytes(model_path),
         device=str(store_cfg.get("device", "cuda")),
+        silent=silent,
     )
     if chosen != requested:
-        logger.info(
-            "store auto-batch: lowered inference_batch_size %d -> %d "
-            "(this run records B=%d; resume keeps uploaded files and re-batches the rest)",
-            requested,
-            chosen,
-            chosen,
-        )
+        if not silent:
+            logger.info(
+                "store auto-batch: lowered inference_batch_size %d -> %d "
+                "(this run records B=%d; resume keeps uploaded files and re-batches the rest)",
+                requested,
+                chosen,
+                chosen,
+            )
     return chosen
 
 
@@ -671,8 +723,25 @@ def _store_hiddens(
         raise RuntimeError(f"store.scope={scope}: no rows to collect")
 
     hub_revision = str(store_cfg.get("hf_hiddens_revision", "main"))
-    hub_tok = hf_token(store_cfg)
-    manifest = fetch_manifest(
+    
+    storage_backend = str(store_cfg.get("storage_backend", "hf")).strip().lower()
+    if storage_backend == "azure":
+        from cst.azure_hiddens.config import azure_connection_string as resolve_token
+        from cst.azure_hiddens.store import fetch_manifest as backend_fetch_manifest
+        from cst.azure_hiddens.store import list_hub_chunks as backend_list_hub_chunks
+        from cst.azure_hiddens.store import push_manifest as backend_push_manifest
+        from cst.azure_hiddens.store import upload_hidden_chunk as backend_upload_hidden_chunk
+        from cst.azure_hiddens.store import HubStorageFullError as backend_HubStorageFullError
+    else:
+        from cst.hf_hiddens.config import hf_token as resolve_token
+        from cst.hf_hiddens.store import fetch_manifest as backend_fetch_manifest
+        from cst.hf_hiddens.store import list_hub_chunks as backend_list_hub_chunks
+        from cst.hf_hiddens.store import push_manifest as backend_push_manifest
+        from cst.hf_hiddens.store import upload_hidden_chunk as backend_upload_hidden_chunk
+        from cst.hf_hiddens.store import HubStorageFullError as backend_HubStorageFullError
+
+    hub_tok = resolve_token(store_cfg)
+    manifest = backend_fetch_manifest(
         repo_id,
         name_token,
         cache_dir=cache_dir,
@@ -682,7 +751,7 @@ def _store_hiddens(
     )
     stored_idx = {int(c.batch_idx) for c in manifest.all_chunks_sorted()}
     hub_chunks = (
-        list_hub_chunks(repo_id, name_token, revision=hub_revision, token=hub_tok)
+        backend_list_hub_chunks(repo_id, name_token, revision=hub_revision, token=hub_tok)
         if resume
         else []
     )
@@ -742,7 +811,7 @@ def _store_hiddens(
             if manifest.sampling_fingerprint is None:
                 manifest.sampling_fingerprint = dict(sampling_state)
             try:
-                push_manifest(
+                backend_push_manifest(
                     manifest,
                     repo_id,
                     revision=hub_revision,
@@ -817,32 +886,25 @@ def _store_hiddens(
                     n_done,
                 )
             else:
-                inference_bs = _choose_store_batch_size(
-                    store_cfg,
-                    yaml_bs=yaml_bs,
-                    rows=remaining_rows,
-                    tokenizer=tokenizer,
-                    model_path=model_path,
-                    default_gen=default_gen,
-                    default_steps=default_steps,
-                    repo_id=repo_id,
-                    name_token=name_token,
-                    scope=scope,
-                )
                 row_batches = _bucket_row_batches(
                     remaining_rows,
-                    inference_bs,
+                    None,
                     default_gen,
                     default_steps,
                     tokenizer=tokenizer,
                     model_path=model_path,
+                    store_cfg=store_cfg,
+                    yaml_bs=yaml_bs,
+                    repo_id=repo_id,
+                    name_token=name_token,
+                    scope=scope,
                 )
+                inference_bs = max(int(yaml_bs), 1)
                 logger.info(
                     "store resume: keeping %d Hub file(s) (%d rows); "
-                    "auto-batch B=%d for %d remaining rows (%d new files, Hub index %d+)",
+                    "dynamic auto-batch for %d remaining rows (%d new files, Hub index %d+)",
                     k,
                     n_done,
-                    inference_bs,
                     len(remaining_rows),
                     len(row_batches),
                     start_idx,
@@ -857,19 +919,20 @@ def _store_hiddens(
         sampling_state["cst_train_tokens"] = int(total_cst_train_tokens)
         sampling_state["cst_train_samples"] = int(total_samples)
     elif stored_idx and not resume:
-        inference_bs = _choose_store_batch_size(
-            store_cfg,
-            yaml_bs=yaml_bs,
-            rows=rows,
+        row_batches = _bucket_row_batches(
+            rows,
+            None,
+            default_gen,
+            default_steps,
             tokenizer=tokenizer,
             model_path=model_path,
-            default_gen=default_gen,
-            default_steps=default_steps,
+            store_cfg=store_cfg,
+            yaml_bs=yaml_bs,
             repo_id=repo_id,
             name_token=name_token,
             scope=scope,
         )
-        row_batches = _cut_row_groups(groups, inference_bs)
+        inference_bs = max(int(yaml_bs), 1)
         sampling_state[bs_key] = int(inference_bs)
         logger.warning(
             "store.resume=false: Hub already has %d chunks for %s; re-collecting all %d batches",
@@ -878,19 +941,20 @@ def _store_hiddens(
             len(row_batches),
         )
     else:
-        inference_bs = _choose_store_batch_size(
-            store_cfg,
-            yaml_bs=yaml_bs,
-            rows=rows,
+        row_batches = _bucket_row_batches(
+            rows,
+            None,
+            default_gen,
+            default_steps,
             tokenizer=tokenizer,
             model_path=model_path,
-            default_gen=default_gen,
-            default_steps=default_steps,
+            store_cfg=store_cfg,
+            yaml_bs=yaml_bs,
             repo_id=repo_id,
             name_token=name_token,
             scope=scope,
         )
-        row_batches = _cut_row_groups(groups, inference_bs)
+        inference_bs = max(int(yaml_bs), 1)
         sampling_state[bs_key] = int(inference_bs)
 
     _log_store_batching(row_batches, inference_bs)
@@ -938,58 +1002,91 @@ def _store_hiddens(
     disk_headroom = 40.0 if _is_blank(dh) else float(dh)
 
     ueh = _coerce_use_eos_harness(store_cfg.get("use_eos_harness", True))
+
+    import os
+    world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", "1")))
+    rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
+
+    if world_size > 1:
+        logger.warning(
+            "multi-GPU store detected (WORLD_SIZE=%d, RANK=%d). "
+            "Auto-batching MUST be false to ensure consistent row alignment across workers. "
+            "Manifest pushes will be disabled. Run a single-GPU worker afterwards to seal the manifest.",
+            world_size, rank
+        )
+
     try:
         for offset, batch_rows in enumerate(row_batches):
             bi = start_idx + offset
+            if bi % world_size != rank:
+                continue
             if bi in skip:
                 continue
             logger.info("=== collect batch %d / %d ===", bi + 1, nbat)
-            b_gen, b_steps = _batch_gen_length_steps(
-                batch_rows,
-                int(store_cfg.get("gen_length", 512)),
-                int(store_cfg.get("steps", 512)),
-            )
-            if (b_gen, b_steps) != (
-                int(store_cfg.get("gen_length", 512)),
-                int(store_cfg.get("steps", 512)),
-            ):
+            candidate_path = scratch / cst_hidden_chunk_basename(name_token, bi)
+            cached_meta = read_cst_hidden_meta(candidate_path)
+            if cached_meta is not None:
                 logger.info(
-                    "batch %d: gen_length=%d steps=%d (ARC/CSQA override)",
-                    bi + 1,
-                    b_gen,
-                    b_steps,
+                    "reusing existing local chunk %s (skipping collection)",
+                    candidate_path.name,
                 )
-            try:
-                out_path, meta = collect_hidden_row_batch(
-                    model,
-                    tokenizer,
-                    model_path,
-                    scratch,
-                    rows=batch_rows,
-                    batch_idx=bi,
-                    name_token=name_token,
-                    device=str(device),
-                    mode_key=sched_m,
-                    gen_length=int(b_gen),
-                    steps=int(b_steps),
-                    block_length=store_cfg.get("block_length"),
-                    top_k=int(store_cfg.get("top_k", 1)),
-                    capture_context=capture_context,
-                    use_eos_harness=ueh,
-                    stream_to_disk=stream_to_disk,
-                    disk_headroom_gb=disk_headroom,
-                    scratch_dir=scratch,
-                    disk_label=f"batch {bi + 1}/{nbat}",
+                out_path = candidate_path
+                meta = cached_meta
+            else:
+                b_gen, b_steps = _batch_gen_length_steps(
+                    batch_rows,
+                    int(store_cfg.get("gen_length", 512)),
+                    int(store_cfg.get("steps", 512)),
                 )
-            except DiskFullError:
-                raise
+                if (b_gen, b_steps) != (
+                    int(store_cfg.get("gen_length", 512)),
+                    int(store_cfg.get("steps", 512)),
+                ):
+                    logger.info(
+                        "batch %d: gen_length=%d steps=%d (ARC/CSQA override)",
+                        bi + 1,
+                        b_gen,
+                        b_steps,
+                    )
+                try:
+                    out_path, meta = collect_hidden_row_batch(
+                        model,
+                        tokenizer,
+                        model_path,
+                        scratch,
+                        rows=batch_rows,
+                        batch_idx=bi,
+                        name_token=name_token,
+                        device=str(device),
+                        mode_key=sched_m,
+                        gen_length=int(b_gen),
+                        steps=int(b_steps),
+                        block_length=store_cfg.get("block_length"),
+                        top_k=int(store_cfg.get("top_k", 1)),
+                        capture_context=capture_context,
+                        use_eos_harness=ueh,
+                        stream_to_disk=stream_to_disk,
+                        disk_headroom_gb=disk_headroom,
+                        scratch_dir=scratch,
+                        disk_label=f"batch {bi + 1}/{nbat}",
+                    )
+                except DiskFullError:
+                    raise
             b_q = int(meta.get("n_question_tokens", 0))
             b_g = int(meta.get("n_gen_tokens", 0))
             b_t = int(meta.get("cst_train_tokens", b_q + b_g))
-            b_n = int(meta.get("batch_size", len(batch_rows)))
+            b_n = int(meta.get("batch_size", meta.get("n_samples", len(batch_rows))))
             nbytes = Path(out_path).stat().st_size
+            logger.info(
+                "batch %d / %d: generation finished (gen_time=%.2fs, %.3f GB); starting upload",
+                bi + 1,
+                nbat,
+                float(meta.get("gen_time", 0.0)),
+                nbytes / 1e9,
+            )
+            upload_start = time.monotonic()
             try:
-                rec = upload_hidden_chunk(
+                rec = backend_upload_hidden_chunk(
                     repo_id,
                     name_token,
                     out_path,
@@ -1003,23 +1100,24 @@ def _store_hiddens(
                     ),
                     cache_dir=cache_dir,
                     revision=str(store_cfg.get("hf_hiddens_revision", "main")),
-                    token=hf_token(store_cfg),
+                    token=hub_tok,
                     private_repo=bool(store_cfg.get("hf_hiddens_private", False)),
                     delete_local_after=delete_local,
                     scope=scope,
                     skip_if_exists=resume,
                     n_rows=int(b_n),
+                    skip_manifest_push=(world_size > 1),
                 )
-            except (HubStorageFullError, DiskFullError) as e:
+            except (HfHubStorageFullError, AzureHubStorageFullError, DiskFullError) as e:
                 try:
                     Path(out_path).unlink(missing_ok=True)
                 except OSError:
                     pass
                 n_on_hub = len(manifest.all_chunks_sorted())
-                kind = "Hub storage" if isinstance(e, HubStorageFullError) else "local disk"
+                kind = "Hub/Azure storage" if isinstance(e, (HfHubStorageFullError, AzureHubStorageFullError)) else "local disk"
                 logger.warning(
                     "%s full while uploading batch %d / %d for %s; "
-                    "finishing store early. %d batch(es) already on Hub. "
+                    "finishing store early. %d batch(es) already on Hub/Azure. "
                     "Free space and re-run the same command to resume. (%s)",
                     kind,
                     bi + 1,
@@ -1038,10 +1136,11 @@ def _store_hiddens(
             sampling_state["cst_train_tokens"] = int(total_cst_train_tokens)
             sampling_state["cst_train_samples"] = int(total_samples)
             logger.info(
-                "uploaded %s (%.3f GB, gen_time=%.2fs, cst_tokens=%d question=%d gen=%d, total_cst_tokens=%d)",
+                "uploaded %s (%.3f GB, gen_time=%.2fs, upload_time=%.2fs, cst_tokens=%d question=%d gen=%d, total_cst_tokens=%d)",
                 rec.filename,
                 nbytes / 1e9,
                 float(meta.get("gen_time", 0.0)),
+                time.monotonic() - upload_start,
                 b_t,
                 b_q,
                 b_g,
@@ -1243,11 +1342,11 @@ def store_train_hiddens(cfg: DictConfig) -> int:
     store_cfg = cfg.get("store") or OmegaConf.create({})
 
     sp_cfg = store_cfg.get("samples")
-    if _is_blank(sp_cfg):
-        raise ValueError("store.samples must be set")
-    n_sp = int(sp_cfg)
-    if n_sp < 1:
-        raise ValueError("store.samples must be >= 1")
+    n_sp: Optional[int] = None
+    if not _is_blank(sp_cfg):
+        n_sp = int(sp_cfg)
+        if n_sp < 1:
+            raise ValueError("store.samples must be >= 1 when set")
 
     inference_bs = int(store_cfg.inference_batch_size)
     seed = int(store_cfg.get("seed", 0))
@@ -1258,12 +1357,20 @@ def store_train_hiddens(cfg: DictConfig) -> int:
     name_token = _hidden_name_token(
         store_cfg, model_path, gen_length=yaml_g, steps=yaml_s
     )
-    hf_train_repo = resolve_train_repo_id(store_cfg)
+    storage_backend = str(store_cfg.get("storage_backend", "hf")).strip().lower()
+    if storage_backend == "azure":
+        from cst.azure_hiddens.config import resolve_train_repo_id as backend_resolve_train_repo_id
+    else:
+        from cst.hf_hiddens.config import resolve_train_repo_id as backend_resolve_train_repo_id
+    hf_train_repo = backend_resolve_train_repo_id(store_cfg)
 
     flat = sample_uniform(n_sp, seed=seed)
     tokenizer = load_tokenizer(model_path)
     sampling_state = _sampling_state_from_store(
-        store_cfg, n_samples=n_sp, inference_bs=inference_bs, sched_m=sched_m
+        store_cfg,
+        n_samples=n_sp if n_sp is not None else len(flat),
+        inference_bs=inference_bs,
+        sched_m=sched_m,
     )
     return _store_hiddens(
         cfg,
@@ -1339,7 +1446,12 @@ def _store_eval_one_task(
         steps=steps,
     )
 
-    repo_id = resolve_eval_repo_id(store, store=store)
+    storage_backend = str(store.get("storage_backend", "hf")).strip().lower()
+    if storage_backend == "azure":
+        from cst.azure_hiddens.config import resolve_eval_repo_id as backend_resolve_eval_repo_id
+    else:
+        from cst.hf_hiddens.config import resolve_eval_repo_id as backend_resolve_eval_repo_id
+    repo_id = backend_resolve_eval_repo_id(store, store=store)
     inference_bs = int(store.inference_batch_size)
     seed = int(store.get("seed", 0))
 
@@ -1410,7 +1522,7 @@ def run_store(cfg: DictConfig) -> int:
             return store_train_hiddens(cfg)
         if scope == "eval":
             return store_eval_hiddens(cfg)
-    except HubStorageFullError as e:
+    except (HfHubStorageFullError, AzureHubStorageFullError) as e:
         logger.warning(
             "store finished early (Hub storage full). Batches already on Hub are kept; "
             "re-run the same command after freeing space to resume. (%s)",

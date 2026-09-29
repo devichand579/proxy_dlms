@@ -44,10 +44,12 @@ cst:
 # ---------------------------------------------------------------------------
 store:
   scope: train          # train | eval
+  storage_backend: azure   # hf | azure
+  azure_conn_str: DefaultEndpointsProtocol=https;AccountName=strace;AccountKey=o/hmwyKYgLAePShr4mvKgL/USycLa4WJcKOMuJAkxOu/7XjfakOQihod+1hp9CDEVOU40TRYQlUk+AStlV79KA==;EndpointSuffix=core.windows.net  # null = read from AZURE_STORAGE_CONNECTION_STRING
   model_path: ${model_path}
   device: cuda
   scratch_dir: outputs/cst_staging
-  scheduler_mode: top_k_c
+  scheduler_mode: pd_r
   gen_length: 512
   steps: 512
   block_length: null
@@ -57,7 +59,7 @@ store:
   max_chunk_gb: null        # optional cap on one .pt; null = only free disk/RAM/VRAM
   cpu_headroom_gb: 16
   vram_headroom_gb: 8
-  samples: null
+  samples: null         # null = all rows (train: whole mixed pool; eval: no limit)
   seed: 0
   # Re-run the same store job after a crash: skip Hub chunks already in the
   # manifest *or* already uploaded as .pt (even if the manifest write failed)

@@ -227,7 +227,7 @@ def load_pools(
 
 
 def sample_uniform(
-    num_samples: int,
+    num_samples: Optional[int],
     *,
     seed: int = 0,
     specs: Optional[Sequence[SourceSpec]] = None,
@@ -238,8 +238,8 @@ def sample_uniform(
     arc_csqa_num_fewshot: Optional[int] = None,
     arc_csqa_fewshot_seed: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """``num_samples`` distinct rows: proportional split across pools, random sample per pool, then shuffle (seeded)."""
-    if num_samples <= 0:
+    """``num_samples`` distinct rows (all rows when None): proportional split across pools, random sample per pool, then shuffle (seeded)."""
+    if num_samples is not None and num_samples <= 0:
         return []
     spec_list = list(specs) if specs is not None else default_source_specs()
     rng = random.Random(seed)
@@ -259,6 +259,8 @@ def sample_uniform(
     if not active:
         raise RuntimeError("No examples loaded from any source.")
     sizes = [len(pools[n]) for n in active]
+    if num_samples is None:
+        num_samples = sum(sizes)
     counts = _allocate_counts_proportional_no_replacement(num_samples, sizes)
     out: List[Dict[str, Any]] = []
 
@@ -278,7 +280,7 @@ def sample_uniform(
 
 
 def sample_uniform_batched(
-    num_samples: int,
+    num_samples: Optional[int],
     batch_size: int,
     *,
     seed: int = 0,

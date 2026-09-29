@@ -124,3 +124,4 @@ word2number==1.1
 xxhash==3.6.0
 yarl==1.22.0
 zstandard==0.25.0
+azure-storage-blob

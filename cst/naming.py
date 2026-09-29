@@ -117,6 +117,7 @@ def cst_resumable_eval_agg_path(output_dir: str, cst_eval_name_token: str) -> st
 # Inverse of collect ``_mode_map``: (mode, strategy) -> short code for filenames.
 _MODE_STRATEGY_TO_SHORT: dict[tuple[str, str], str] = {
     ("pure_diffusion", "confidence"): "pd",
+    ("pure_diffusion", "random"): "pd_r",
     ("block_diffusion", "confidence"): "bd",
     ("eb_sampler", "confidence"): "eb",
     ("fdm", "confidence"): "fdm",

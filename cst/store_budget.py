@@ -151,6 +151,7 @@ def max_inference_batch_size(
     max_chunk_gb: Optional[float] = None,
     model_bytes: int = 0,
     device: str = "cuda",
+    silent: bool = False,
 ) -> Tuple[int, Dict[str, int]]:
     """Largest B in ``[1, requested]`` that fits disk, RAM, VRAM, and optional chunk cap."""
     req = max(int(requested), 1)
@@ -192,27 +193,29 @@ def max_inference_batch_size(
     chosen = min(req, limits["disk"], limits["cpu"], limits["vram"], limits["chunk"])
     chosen = max(int(chosen), 1)
     if chosen < req:
-        logger.info(
-            "store auto-batch: B=%d (yaml max %d); limits disk=%d cpu=%d vram=%d "
-            "max_chunk=%d | packed_L=%d full_L=%d T=%d d=%d",
-            chosen,
-            req,
-            limits["disk"],
-            limits["cpu"],
-            limits["vram"],
-            limits["chunk"],
-            packed,
-            full,
-            t,
-            d,
-        )
+        if not silent:
+            logger.info(
+                "store auto-batch: B=%d (yaml max %d); limits disk=%d cpu=%d vram=%d "
+                "max_chunk=%d | packed_L=%d full_L=%d T=%d d=%d",
+                chosen,
+                req,
+                limits["disk"],
+                limits["cpu"],
+                limits["vram"],
+                limits["chunk"],
+                packed,
+                full,
+                t,
+                d,
+            )
     else:
-        logger.info(
-            "store auto-batch: keeping B=%d (disk=%d cpu=%d vram=%d max_chunk=%d)",
-            chosen,
-            limits["disk"],
-            limits["cpu"],
-            limits["vram"],
-            limits["chunk"],
-        )
+        if not silent:
+            logger.info(
+                "store auto-batch: keeping B=%d (disk=%d cpu=%d vram=%d max_chunk=%d)",
+                chosen,
+                limits["disk"],
+                limits["cpu"],
+                limits["vram"],
+                limits["chunk"],
+            )
     return chosen, limits
