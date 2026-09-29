@@ -1,12 +1,7 @@
-"""Per-step M̂_t and Ĵ_t proxies from a generation trace.
+"""Per-step M̂ and Ĵ from a generation trace.
 
-Definitions (hard-gated / star):
-  M̂_t = Σ_{i∈S_t} (−log c_i) · 1[H_i ≤ τ]     (τ = 1.25)
-  Ĵ_t = (Σ H − max H) on S_t if |S_t|≥2 else 0   (star MI)
-  Sample M̂         = Σ_t M̂_t
-  Sample Ĵ         = Σ_t Ĵ_t              (full trajectory)
-  Sample Ĵ_early   = Σ_t Ĵ_t over the early third of steps
-  Sample Ĝ         = M̂ + Ĵ
+M̂ sums −log c over the lowest-entropy tokens of the committed set whose entropies sum to at most γ = 1.
+Ĵ is ΣH − max H on that set when it has at least two tokens. Sample caps sum the steps; Ĝ is M̂ + Ĵ.
 """
 
 from __future__ import annotations
@@ -17,8 +12,9 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-# Hard-gate threshold on predictive entropy (nats).
-GATED_TAU = 1.25
+# Entropy budget for M̂. Committed tokens are admitted from lowest entropy upward
+# while the sum of admitted entropies stays within this value.
+M_GAMMA = 1.0
 
 # Step-level series aggregated to sample/task caps and trends.
 PROXY_ATTRS = ("M_hat_t", "J_hat_t")
@@ -31,8 +27,8 @@ class TraceProxyError(ValueError):
 @dataclass
 class StepProxies:
     step: int
-    M_hat_t: float  # hard-gated commit NLL on S_t
-    J_hat_t: float  # star MI on S_t (|S|≥2)
+    M_hat_t: float  # m_hat on S_t (γ = M_GAMMA)
+    J_hat_t: float  # j_hat on S_t (|S|≥2)
     n_committed: int = 0
     n_selected: int = 0
     n_remaining: int = 0
@@ -40,11 +36,10 @@ class StepProxies:
 
 @dataclass
 class SampleProxies:
-    """Per-sample caps for M̂ and star Ĵ (full + early)."""
+    """Per-sample caps for M̂ and Ĵ."""
 
     M_hat: float
-    J_hat: float  # full-traj star sum
-    J_hat_early: float
+    J_hat: float  # full-trajectory j_hat sum
     caps: Dict[str, float] = field(default_factory=dict)
     step_proxies: List[StepProxies] = field(default_factory=list)
 
@@ -53,35 +48,58 @@ def _empty_caps() -> Dict[str, float]:
     return {name: 0.0 for name in PROXY_ATTRS}
 
 
-def _trajectory_early_end(n_steps: int) -> int:
-    """Match ``metrics.trajectory_blocks`` early third end (exclusive)."""
-    if n_steps <= 0:
-        return 0
-    if n_steps < 3:
-        return n_steps
-    return n_steps // 3
-
-
 def _aggregate_sample_caps(
     step_proxies: List[StepProxies],
-) -> tuple[Dict[str, float], float, float]:
-    """Return (caps, J_hat, J_hat_early).
-
-    ``caps['J_hat_t']`` stores the **full** star sum (for task averaging / trends).
-    """
-    early_end = _trajectory_early_end(len(step_proxies))
+) -> tuple[Dict[str, float], float]:
+    """Sample sums of M̂ and Ĵ."""
     m_sum = 0.0
     j_full = 0.0
-    j_early = 0.0
     for sp in step_proxies:
         if sp.n_selected <= 0:
             continue
         m_sum += float(sp.M_hat_t)
         j_full += float(sp.J_hat_t)
-        if sp.step < early_end:
-            j_early += float(sp.J_hat_t)
     caps = {"M_hat_t": m_sum, "J_hat_t": j_full}
-    return caps, j_full, j_early
+    return caps, j_full
+
+
+def cumulative_caps(
+    step_proxies: List[StepProxies],
+    prefix_steps: int,
+) -> tuple[float, float, float]:
+    """M̂, Ĵ, and Ĝ summed over steps before ``prefix_steps``."""
+    k = int(prefix_steps)
+    if k <= 0:
+        return 0.0, 0.0, 0.0
+    m_sum = 0.0
+    j_sum = 0.0
+    for sp in step_proxies:
+        if int(sp.step) >= k:
+            continue
+        if sp.n_selected <= 0:
+            continue
+        m_sum += float(sp.M_hat_t)
+        j_sum += float(sp.J_hat_t)
+    return m_sum, j_sum, m_sum + j_sum
+
+
+def prefix_commit_fraction(
+    step_proxies: List[StepProxies],
+    prefix_steps: int,
+    gen_length: int,
+) -> float:
+    """Share of the gen region unmasked after steps before ``prefix_steps``."""
+    length = int(gen_length)
+    if length <= 0 or not step_proxies:
+        return 0.0
+    k = int(prefix_steps)
+    later = [sp for sp in step_proxies if int(sp.step) >= k]
+    if later:
+        committed = int(min(later, key=lambda sp: int(sp.step)).n_committed)
+    else:
+        last = max(step_proxies, key=lambda sp: int(sp.step))
+        committed = int(last.n_committed) + int(last.n_selected)
+    return float(committed) / float(length)
 
 
 def _to_np(data, dtype=np.float32) -> Optional[np.ndarray]:
@@ -110,7 +128,7 @@ def _require_array(
 
 
 def _zero_step(step: int, n_committed: int, n_remaining: int) -> StepProxies:
-    """All proxy quantities are zero when no tokens are unmasked."""
+    """A step that unmasks nothing."""
     return StepProxies(
         step=step,
         M_hat_t=0.0,
@@ -121,17 +139,24 @@ def _zero_step(step: int, n_committed: int, n_remaining: int) -> StepProxies:
     )
 
 
-def _star_mi(entropies: np.ndarray) -> float:
-    """Σ H − max H; 0 if fewer than 2 positions."""
+def j_hat(entropies: np.ndarray) -> float:
+    """Ĵ on one committed set."""
     if entropies.size < 2:
         return 0.0
     return float(max(np.sum(entropies) - np.max(entropies), 0.0))
 
 
-def _gated_nll(conf: np.ndarray, ent: np.ndarray, tau: float) -> float:
-    c = np.clip(conf.astype(np.float64), 1e-8, 1.0)
-    h = ent.astype(np.float64)
-    return float(np.sum((-np.log(c)) * (h <= tau)))
+def m_hat(conf: np.ndarray, ent: np.ndarray, gamma: float) -> float:
+    """M̂ on one committed set: −log c inside the entropy budget γ."""
+    if ent.size == 0:
+        return 0.0
+    order = np.argsort(ent, kind="mergesort")
+    h = ent[order].astype(np.float64)
+    c = np.clip(conf[order].astype(np.float64), 1e-8, 1.0)
+    keep = np.cumsum(h) <= float(gamma)
+    if not np.any(keep):
+        return 0.0
+    return float(np.sum(-np.log(c[keep])))
 
 
 def _mask_diff_selection(
@@ -139,7 +164,7 @@ def _mask_diff_selection(
     t: int,
     gen_length: int,
 ) -> Optional[np.ndarray]:
-    """Positions that become unmasked between step t and t+1; None if unknown."""
+    """Positions unmasked between this step and the next."""
     mask_t = steps[t]["mask_index"]
     if mask_t is None:
         return None
@@ -160,13 +185,7 @@ def validate_trace_for_metrics(
     *,
     trace_name: Optional[Union[str, Path]] = None,
 ) -> None:
-    """Fail hard if the trace is not repair-clean for SchedulerLens metrics.
-
-    Catches issues that convert/repair-npz are meant to fix (selection↔mask-diff
-    mismatch, FDM/FHS phantom steps, untrimmed tail, missing required fields).
-    Does **not** silently repair. Pass ``trace_name`` (NPZ/JSONL path or stem) so
-    FDM plateau / FHS corrector phantom checks are filename-gated like repair.
-    """
+    """Raise if the trace is missing fields or still needs repair."""
     from traces.trace_checks import (
         count_phantom_extra_steps,
         count_selection_mask_mismatches,
@@ -303,7 +322,7 @@ def _resolve_selection(
     t: int,
     gen_length: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (selected_positions, selected_tokens). Fail hard on format/repair issues."""
+    """Selected positions and tokens for one step."""
     st = steps[t]
     sel = st["selected_positions"]
     sel_tok = st["selected_tokens"]
@@ -342,15 +361,9 @@ def compute_sample_proxies(
     trace_dict: dict,
     *,
     trace_name: Optional[Union[str, Path]] = None,
-    tau: Optional[float] = None,
+    gamma: Optional[float] = None,
 ) -> SampleProxies:
-    """Compute M̂, Ĵ, and per-step proxies for one trace dict.
-
-    Raises ``TraceProxyError`` when required fields are missing or inconsistent.
-    When no tokens are unmasked at a step, all proxy quantities for that step are 0.
-
-    ``tau`` overrides the hard-gate entropy threshold (default ``GATED_TAU``).
-    """
+    """M̂, Ĵ, and the per-step values for one sample."""
     validate_trace_for_metrics(trace_dict, trace_name=trace_name)
 
     step_traces = trace_dict.get("step_traces", [])
@@ -360,7 +373,6 @@ def compute_sample_proxies(
         return SampleProxies(
             M_hat=0.0,
             J_hat=0.0,
-            J_hat_early=0.0,
             caps=empty,
         )
 
@@ -387,7 +399,7 @@ def compute_sample_proxies(
         resolved.append(_resolve_selection(steps, t, gen_length))
 
     step_proxy_list: List[StepProxies] = []
-    gate = float(GATED_TAU if tau is None else tau)
+    budget = float(M_GAMMA if gamma is None else gamma)
 
     for t in range(T):
         mask_t = _require_array(
@@ -412,8 +424,8 @@ def compute_sample_proxies(
 
         c_sel = conf_t[S_t]
         h_sel = ent_t[S_t]
-        m_hat_t = _gated_nll(c_sel, h_sel, gate)
-        j_hat_t = _star_mi(h_sel.astype(np.float64))
+        m_hat_t = m_hat(c_sel, h_sel, budget)
+        j_hat_t = j_hat(h_sel.astype(np.float64))
 
         step_proxy_list.append(
             StepProxies(
@@ -426,12 +438,11 @@ def compute_sample_proxies(
             )
         )
 
-    caps, j_full, j_early = _aggregate_sample_caps(step_proxy_list)
+    caps, j_full = _aggregate_sample_caps(step_proxy_list)
     m_cap = float(caps["M_hat_t"])
     return SampleProxies(
         M_hat=m_cap,
         J_hat=j_full,
-        J_hat_early=j_early,
         caps=caps,
         step_proxies=step_proxy_list,
     )

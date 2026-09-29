@@ -38,7 +38,7 @@ def _ensure_pcfg_path() -> None:
 
 @dataclass
 class OracleTokenMetrics:
-    """Per-commit (token) oracle quantities within a step."""
+    """Oracle quantities for one committed token."""
 
     gen_pos: int
     content_pos: int
@@ -122,11 +122,7 @@ def extract_unmask_events(
     *,
     trace_name: str | Path | None = None,
 ) -> list[tuple[int, int, int]]:
-    """Return (step, gen_pos, token_id) for each commit in a trace.
-
-    Positions are gen-relative (0 .. gen_length-1), matching trace fields.
-    Fail-hard on unrepaired selection/mask/phantom issues (same as proxies).
-    """
+    """Each commit as step, gen position, and token id."""
     from schedulerlens.proxies import TraceProxyError, validate_trace_for_metrics
 
     validate_trace_for_metrics(trace_dict, trace_name=trace_name)
@@ -172,7 +168,7 @@ def reference_token_ids(trace_dict: dict, metadata: dict | None = None) -> list[
 
 
 def _pcfg_layout(trace_dict: dict, vocab=None) -> dict:
-    """Resolve PCFG content / prompt / gen layout from trace metadata."""
+    """Content, prompt, and gen lengths for this trace."""
     meta = trace_dict.get("metadata") or {}
     token_strings = meta.get("reference_tokens")
     if token_strings is None:
@@ -204,7 +200,7 @@ def _pcfg_layout(trace_dict: dict, vocab=None) -> dict:
 
 
 def gen_to_content_pos(gen_pos: int, n_visible: int, n_content: int) -> int | None:
-    """Map gen-relative index → content index, or None if outside content (e.g. EOS pad)."""
+    """Content index for a gen position, or None outside the content."""
     content_pos = int(n_visible) + int(gen_pos)
     if content_pos < 0 or content_pos >= int(n_content):
         return None
@@ -212,7 +208,7 @@ def gen_to_content_pos(gen_pos: int, n_visible: int, n_content: int) -> int | No
 
 
 def model_logprobs_from_logits(logits, positions: Iterable[int]) -> dict[int, np.ndarray]:
-    """Softmax log-probs over vocab for each sequence position."""
+    """Log-probabilities at the given positions."""
     import torch.nn.functional as F
 
     logp = F.log_softmax(logits.float(), dim=-1)
@@ -250,7 +246,7 @@ def trace_model_commit_nll(
     *,
     trace_name: Union[str, Path, None] = None,
 ) -> float:
-    """Proxy NLL from trace confidences at commit time (gen-relative indices)."""
+    """Mean −log c of committed tokens from the trace confidences."""
     ref = reference_ids if reference_ids is not None else reference_token_ids(trace_dict)
     if ref is None:
         return float("nan")
@@ -278,10 +274,7 @@ def trace_oracle_nll(
     *,
     trace_name: Union[str, Path, None] = None,
 ) -> float:
-    """Exact oracle NLL -log q(x_i | prefix∪prior commits) along the unmask order.
-
-    Uses teacher-forced reference tokens. Gen indices map to content via n_visible.
-    """
+    """Mean oracle −log q along the unmask order."""
     meta = trace_dict.get("metadata") or {}
     tokens = list(token_strings or meta.get("reference_tokens") or [])
     if not tokens:
@@ -317,7 +310,7 @@ def _build_eval_style_input(
     vocab,
     device,
 ):
-    """Left-pad visible prefix + masked gen region (matches pcfg_eval batching)."""
+    """Left-padded input: visible prefix, then a masked gen region."""
     import torch
 
     _ensure_pcfg_path()
@@ -344,7 +337,7 @@ def _build_eval_style_input(
 
 @dataclass
 class _StepJob:
-    """One unmask step with teacher-forced pre-step state (known from the trace)."""
+    """One unmask step and the teacher-forced state before that commit."""
 
     step: int
     n_content: int
@@ -359,7 +352,7 @@ class _StepJob:
 
 
 class _EnginePool:
-    """Thread-safe pool of PCFGEngine instances (mutable chart cache is not shareable)."""
+    """Pool of PCFG engines, one per thread."""
 
     def __init__(self, size: int):
         _ensure_pcfg_path()
@@ -392,7 +385,7 @@ def _precompute_step_jobs(
     trace_name: Union[str, Path, None] = None,
     include_model_inputs: bool = True,
 ) -> list[_StepJob]:
-    """Build per-step jobs; each has independent pre-step committed + input_ids."""
+    """One independent job per unmask step."""
     layout = _pcfg_layout(trace_dict, vocab)
     tokens = layout["token_strings"][: layout["n_content"]]
     n_content = layout["n_content"]
@@ -478,7 +471,7 @@ def _batched_forward_logprobs(
     *,
     model_lock: Optional[threading.Lock] = None,
 ) -> list[dict[int, np.ndarray]]:
-    """One batched model forward for a chunk of step jobs."""
+    """Log-probabilities from one batched model forward."""
     import torch
 
     if not jobs:
@@ -513,22 +506,22 @@ def _env_int(name: str, default: int) -> int:
 
 
 def default_jt_exact_max() -> int:
-    """Max |S| for exact Jt. Exact |S|=k chart RAM grows ~exponentially in k."""
+    """Largest committed set scored with exact Jt."""
     return max(2, _env_int("SCHEDULERLENS_JT_EXACT_MAX", 3))
 
 
 def default_jt_markov_order() -> int:
-    """Markov order for large-|S| Jt (window size = order+1, capped by exact_max)."""
+    """Markov order used once the committed set is larger than the exact limit."""
     return max(1, _env_int("SCHEDULERLENS_JT_MARKOV_ORDER", 2))
 
 
 def default_jt_concurrency() -> int:
-    """Max concurrent exact CKY Jt calls (each can hold multi-GB chart caches)."""
+    """How many exact Jt calls may run at once."""
     return max(1, _env_int("SCHEDULERLENS_JT_CONCURRENCY", 2))
 
 
 def default_jt_large_set() -> int:
-    """If |S| > this, force pairwise Markov (order 1) for speed. 0 = disable."""
+    """Set size above which Jt uses pairwise joints. Zero disables the cutoff."""
     return max(0, _env_int("SCHEDULERLENS_JT_LARGE_SET", 6))
 
 
@@ -545,7 +538,7 @@ def _jt_semaphore() -> threading.Semaphore:
 
 
 def _jt_exact(engine, n_content: int, committed: dict, positions: Sequence[int]) -> float:
-    """Exact multi-information Jt on ``positions``; clears engine chart cache after."""
+    """Exact Jt on these positions."""
     S = sorted({int(p) for p in positions})
     if len(S) < 2:
         return 0.0
@@ -568,26 +561,8 @@ def compute_jt(
     exact_max: Optional[int] = None,
     markov_order: Optional[int] = None,
     large_set: Optional[int] = None,
-    skip: bool = False,
 ) -> float:
-    """PCFG multi-information Jt = Σ H(X_i) − H(X_S) on the simultaneous set S.
-
-    Exact CKY joint entropy is exponential in |S| (≈35 GB peak at |S|=8 on
-    LLaDA-PCFG). For large parallel unmasks (DUS, EB, …) we use a Markov
-    chain-rule approximation of order ``markov_order``:
-
-        Jt(S) ≈ Σ_i [ Jt(S[i−m : i+1]) − Jt(S[i−m : i]) ]
-
-    with m = markov_order. Each term only needs exact joints of size ≤ m+1
-    (capped by ``exact_max``). When |S| ≤ exact_max this equals the exact Jt.
-
-    If ``|S| > large_set`` (default 6), force pairwise order-1 joints only —
-    EB/DUS steps with |S|=15+ otherwise dominate wall time. Pass ``skip=True``
-    to omit Jt (returns NaN; Mt/NLL still computed elsewhere).
-    """
-    if skip:
-        return float("nan")
-
+    """Jt on the committed set: exact when the set is small, Markov when it is large."""
     positions = sorted({int(p) for p in S})
     if len(positions) < 2:
         return 0.0
@@ -634,13 +609,8 @@ def compute_sample_jt_steps(
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
-    skip: bool = False,
 ) -> list[tuple[int, int, float]]:
-    """Jt per unmask step without model forwards (CPU PCFG only).
-
-    Returns ``(step, |S|, Jt)`` in step order. Teacher-forced commits match
-    the Mt/Jt replay path (reference tokens, not selected tokens).
-    """
+    """Jt at each unmask step, from the PCFG only."""
     tmap = getattr(engine, "t_idx", None)
     jobs = _precompute_step_jobs(
         trace_dict,
@@ -660,7 +630,6 @@ def compute_sample_jt_steps(
             exact_max=jt_exact_max,
             markov_order=jt_markov_order,
             large_set=jt_large_set,
-            skip=skip,
         )
         if hasattr(engine, "clear_cache"):
             engine.clear_cache()
@@ -677,9 +646,8 @@ def _pcfg_metrics_for_step(
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
-    skip_jt: bool = False,
 ) -> OracleStepMetrics:
-    """Mt / Jt / NLLs for one precomputed step (uses a private engine)."""
+    """Mt, Jt, and the NLLs for one precomputed step."""
     q_batch = engine.marginals_batch(job.n_content, job.committed, job.S_content)
     jt = compute_jt(
         engine,
@@ -689,7 +657,6 @@ def _pcfg_metrics_for_step(
         exact_max=jt_exact_max,
         markov_order=jt_markov_order,
         large_set=jt_large_set,
-        skip=skip_jt,
     )
     if hasattr(engine, "clear_cache"):
         engine.clear_cache()
@@ -751,18 +718,8 @@ def replay_oracle_mt_jt(
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
-    skip_jt: bool = False,
 ) -> OracleSampleMetrics:
-    """Re-forward model at each trace step; compute exact Mt and Jt vs PCFG oracle.
-
-    Parallelism (all optional):
-    - Batched GPU/CPU model forwards over precomputed step inputs.
-    - Thread pool over steps for PCFG Mt/Jt (each thread borrows an engine).
-    - Pipeline: submit CPU work for chunk t while GPU runs chunk t+1.
-
-    Large simultaneous unmask sets (|S| > ``jt_exact_max``) use Markov Jt
-    (see :func:`compute_jt`) so DUS/EB-style steps do not OOM.
-    """
+    """Mt and Jt for one sample, replaying the model against the PCFG."""
     _ensure_pcfg_path()
     from pcfg_engine import kl
 
@@ -787,12 +744,11 @@ def replay_oracle_mt_jt(
     max_s = max((len(j.S_content) for j in jobs), default=0)
     if max_s > k_exact:
         logger.debug(
-            "Oracle Jt: max |S|=%d exact_max=%d markov=%d large_set=%d skip=%s",
+            "Oracle Jt: max |S|=%d exact_max=%d markov=%d large_set=%d",
             max_s,
             k_exact,
             min(m_order, k_exact - 1),
             large,
-            skip_jt,
         )
 
     n_workers = max(1, int(step_workers if step_workers is not None else _default_step_workers()))
@@ -813,7 +769,6 @@ def replay_oracle_mt_jt(
                 jt_exact_max=k_exact,
                 jt_markov_order=m_order,
                 jt_large_set=large,
-                skip_jt=skip_jt,
             )
         finally:
             pool.release(eng)
@@ -930,7 +885,7 @@ class TaskPerplexity:
 
 
 def empty_task_perplexity(*, n_samples: int = 0) -> TaskPerplexity:
-    """NaN-filled perplexity row (used when cached oracle is missing and replay is off)."""
+    """A perplexity row filled with NaN."""
     nan = float("nan")
     return TaskPerplexity(
         model_commit_nll=nan,
@@ -958,9 +913,8 @@ def _compute_sample_perplexity_inner(
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
-    skip_jt: bool = False,
 ):
-    """Return (SamplePerplexity, optional OracleSampleMetrics)."""
+    """Perplexity for one sample, with oracle metrics when replay is on."""
     meta = trace_dict.get("metadata") or {}
     ref_ids = meta.get("reference_token_ids")
     n_commits = len(extract_unmask_events(trace_dict, trace_name=trace_name))
@@ -981,7 +935,6 @@ def _compute_sample_perplexity_inner(
             jt_exact_max=jt_exact_max,
             jt_markov_order=jt_markov_order,
             jt_large_set=jt_large_set,
-            skip_jt=skip_jt,
         )
         return SamplePerplexity(
             model_commit_nll=oracle.model_nll,
@@ -1022,9 +975,8 @@ def compute_sample_perplexity(
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
-    skip_jt: bool = False,
 ) -> SamplePerplexity:
-    """Per-sample model commit NLL/PPL; oracle fields only with ``replay_oracle``."""
+    """Commit perplexity for one sample, plus oracle fields when replay is on."""
     sp, _oracle = _compute_sample_perplexity_inner(
         trace_dict,
         engine=engine,
@@ -1038,7 +990,6 @@ def compute_sample_perplexity(
         jt_exact_max=jt_exact_max,
         jt_markov_order=jt_markov_order,
         jt_large_set=jt_large_set,
-        skip_jt=skip_jt,
     )
     return sp
 
@@ -1059,19 +1010,8 @@ def compute_task_perplexity(
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
-    skip_jt: bool = False,
 ) -> TaskPerplexity:
-    """Aggregate perplexity / oracle metrics over a trace file.
-
-    Parallelism when ``replay_oracle``:
-    - ``forward_batch_size``: batched model forwards within a sample
-    - ``step_workers``: parallel PCFG Mt/Jt across steps (engine pool)
-    - ``oracle_workers``: parallel samples (shared model + lock; shared engine pool)
-
-    Large-|S| Jt uses Markov approximation (``jt_exact_max`` / ``jt_markov_order``).
-    Sets larger than ``jt_large_set`` fall back to pairwise order-1. ``skip_jt``
-    computes Mt/NLL only.
-    """
+    """Mean perplexity and oracle metrics over one trace file."""
     from traces.trace_npz import iter_npz_traces
 
     _ensure_pcfg_path()
@@ -1185,7 +1125,7 @@ def compute_task_perplexity(
         if verbose:
             logger.info(
                 "Oracle replay: samples=%d step_workers=%d forward_batch=%d "
-                "engine_pool=%d jt_exact_max=%d jt_markov=%d jt_large_set=%d skip_jt=%s",
+                "engine_pool=%d jt_exact_max=%d jt_markov=%d jt_large_set=%d",
                 n_sample_workers,
                 n_step_workers,
                 forward_batch_size,
@@ -1193,7 +1133,6 @@ def compute_task_perplexity(
                 k_exact,
                 min(m_order, k_exact - 1),
                 large,
-                skip_jt,
             )
 
     def _process_one(sample_idx: int, tr: dict):
@@ -1212,7 +1151,6 @@ def compute_task_perplexity(
             jt_exact_max=k_exact,
             jt_markov_order=m_order,
             jt_large_set=large,
-            skip_jt=skip_jt,
         ), len(tr.get("step_traces") or [])
 
     n_done = 0
@@ -1303,12 +1241,7 @@ def save_oracle_artifacts(
     *,
     stem: str = "",
 ) -> Path:
-    """Persist granular oracle replay results (sample / step / token) to NPZ.
-
-    Expensive oracle quantities are kept so analyses can be redone without
-    replaying the PCFG model. Proxy M̂/Ĵ caps are intentionally omitted
-    (cheap to recompute from traces).
-    """
+    """Write the oracle replay to an NPZ."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1408,7 +1341,7 @@ def save_oracle_artifacts(
 
 
 def load_oracle_artifacts(path: Union[str, Path]) -> dict[str, np.ndarray]:
-    """Load ``oracle.npz`` written by :func:`save_oracle_artifacts`."""
+    """Arrays stored in an oracle NPZ."""
     path = Path(path)
     with np.load(path, allow_pickle=True) as z:
         return {k: np.asarray(z[k]) for k in z.files}
@@ -1440,7 +1373,7 @@ def _oracle_stem_from_array(arr) -> str:
 
 
 def task_perplexity_from_oracle_npz(path: Union[str, Path]) -> TaskPerplexity:
-    """Rebuild :class:`TaskPerplexity` from a saved ``oracle.npz`` (no replay)."""
+    """Task perplexity rebuilt from a saved oracle NPZ."""
     arts = load_oracle_artifacts(path)
     n_samples = int(_oracle_scalar(arts.get("n_samples", 0), default=0))
     return TaskPerplexity(
@@ -1465,7 +1398,7 @@ def task_perplexity_from_oracle_npz(path: Union[str, Path]) -> TaskPerplexity:
 
 
 def _oracle_keys_for_path(path: Path, *, content_stem: str = "") -> set[str]:
-    """Candidate lookup keys for an oracle artifact path."""
+    """Stems this oracle file can match."""
     keys: set[str] = set()
     name = path.stem
     if name == "oracle":
@@ -1484,11 +1417,7 @@ def _oracle_keys_for_path(path: Path, *, content_stem: str = "") -> set[str]:
 
 
 def index_oracle_artifacts(root: Union[str, Path]) -> dict[str, Path]:
-    """Map trace stem → ``oracle.npz`` under a file or directory.
-
-    Accepts a single ``.npz`` or a folder (recursive). Filename stems are matched
-    to Hub/local trace stems; ``oracle.npz`` may also store ``stem`` inside.
-    """
+    """Trace stem to oracle NPZ, for one file or a directory of them."""
     root = Path(root)
     if not root.exists():
         raise FileNotFoundError(f"Oracle path not found: {root}")
@@ -1529,7 +1458,7 @@ def resolve_oracle_npz(
     *,
     index: Optional[dict[str, Path]] = None,
 ) -> Optional[Path]:
-    """Return oracle artifact for ``stem``, or None if missing / unset."""
+    """Oracle NPZ for this stem, or None."""
     if oracle_root is None and index is None:
         return None
     lookup = index if index is not None else index_oracle_artifacts(oracle_root)  # type: ignore[arg-type]

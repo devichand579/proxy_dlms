@@ -11,7 +11,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .proxies import PROXY_ATTRS, SampleProxies, TraceProxyError, compute_sample_proxies
+from .proxies import (
+    PROXY_ATTRS,
+    SampleProxies,
+    TraceProxyError,
+    compute_sample_proxies,
+    cumulative_caps,
+    prefix_commit_fraction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +33,9 @@ class ProxyReport:
 
 @dataclass
 class TaskMetrics:
-    """Task-level caps and per-step trends for hard-gated M̂ / star Ĵ."""
+    """Task-level caps and per-step trends for M̂ (γ = 1) and Ĵ."""
     M_hat: float
-    J_hat: float  # full-traj star sum
-    J_hat_early: float
+    J_hat: float  # full-trajectory j_hat sum
     proxies: Dict[str, ProxyReport]
     n_unmasked_trend: np.ndarray
     n_samples: int
@@ -37,6 +43,14 @@ class TaskMetrics:
     n_unmasked_bucket_trend: np.ndarray = field(default_factory=lambda: np.array([]))
     bucket_size: Optional[int] = None
     n_buckets: int = 0
+    # K -> (M_hat, J_hat, G_hat) sample means over steps with step < K
+    prefix_caps: Dict[int, Tuple[float, float, float]] = field(default_factory=dict)
+    # K -> per-sample lists of cumulative M̂ and Ĵ over steps with step < K
+    prefix_samples: Dict[int, Dict[str, List[float]]] = field(default_factory=dict)
+    # K -> sample-mean fraction of the gen region unmasked after step < K
+    prefix_commit_frac: Dict[int, float] = field(default_factory=dict)
+    # Sample-mean fraction unmasked at the end of the trajectory
+    commit_frac: float = float("nan")
 
     @property
     def M_hat_trend(self) -> np.ndarray:
@@ -59,12 +73,20 @@ class TaskMetrics:
             f"Samples : {self.n_samples}",
             f"Steps   : {self.n_steps}",
             "",
-            "Hard-gated M̂ / star Ĵ (sample means of sum caps):",
+            "M̂ / Ĵ (sample means of sum caps):",
             f"  M_hat        {self.M_hat:.6f}",
             f"  J_hat        {self.J_hat:.6f}",
-            f"  J_hat_early  {self.J_hat_early:.6f}",
             f"  G_hat        {self.M_hat + self.J_hat:.6f}",
         ]
+        if self.prefix_caps:
+            lines.append("Prefix caps (sum over step < K, sample means):")
+            for k in sorted(self.prefix_caps):
+                m, j, g = self.prefix_caps[k]
+                frac = self.prefix_commit_frac.get(k, float("nan"))
+                lines.append(
+                    f"  K={k:<4d}  M_hat={m:.6f}  J_hat={j:.6f}  G_hat={g:.6f}  "
+                    f"commit_frac={frac:.4f}"
+                )
         for name in PROXY_ATTRS:
             rep = self.proxies[name]
             lines.append(
@@ -107,7 +129,6 @@ class TaskMetrics:
         out = {
             "M_hat": self.M_hat,
             "J_hat": self.J_hat,
-            "J_hat_early": self.J_hat_early,
             "G_hat": float(self.M_hat) + float(self.J_hat),
             "n_samples": self.n_samples,
             "n_steps": self.n_steps,
@@ -129,7 +150,32 @@ class TaskMetrics:
             out["bucket_size"] = self.bucket_size
             out["n_buckets"] = self.n_buckets
             out["n_unmasked_bucket_trend"] = self.n_unmasked_bucket_trend.tolist()
+        if self.prefix_caps:
+            out["prefix_caps"] = {
+                str(k): {"M_hat": m, "J_hat": j, "G_hat": g}
+                for k, (m, j, g) in sorted(self.prefix_caps.items())
+            }
         return out
+
+
+def parse_prefix_steps(spec: Optional[Union[str, Sequence[int]]]) -> List[int]:
+    """Parse ``8,16,32,64`` or an int sequence into sorted unique positive Ks."""
+    if spec is None:
+        return []
+    if isinstance(spec, str):
+        parts = [p.strip() for p in spec.split(",") if p.strip()]
+        values = [int(p) for p in parts]
+    else:
+        values = [int(k) for k in spec]
+    out: List[int] = []
+    seen: set[int] = set()
+    for k in values:
+        if k <= 0:
+            raise ValueError(f"prefix_steps must be positive, got {k}")
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return sorted(out)
 
 
 def _empty_proxy_reports() -> Dict[str, ProxyReport]:
@@ -224,14 +270,15 @@ def compute_task_metrics(
     max_samples: Optional[int] = None,
     bucket_size: Optional[int] = None,
     verbose: bool = True,
-    tau: Optional[float] = None,
+    prefix_steps: Optional[Sequence[int]] = None,
 ) -> TaskMetrics:
     """Compute task-level caps and per-step trends from a trace file.
 
     Streams samples when ``bucket_size`` is None (compare default) so large NPZs
     do not retain every ``SampleProxies`` in RAM before oracle replay.
 
-    ``tau`` overrides the hard-gate threshold used for M̂ (default ``GATED_TAU``).
+    ``prefix_steps`` (e.g. ``[8, 16, 32, 64]``) also accumulates sample-mean
+    cumulative M̂/Ĵ/Ĝ over steps with ``step < K`` into ``TaskMetrics.prefix_caps``.
     """
     trace_path = Path(trace_path)
     if not trace_path.exists():
@@ -241,9 +288,14 @@ def compute_task_metrics(
     if need_buckets and bucket_size <= 0:
         raise ValueError(f"bucket_size must be positive, got {bucket_size}")
 
+    prefix_ks = parse_prefix_steps(prefix_steps)
+    prefix_sample: Dict[int, Dict[str, List[float]]] = {
+        k: {"M": [], "J": [], "C": []} for k in prefix_ks
+    }
+    end_commit_frac: List[float] = []
+
     # Online path (no buckets): O(1) sample retention.
     sample_caps = {name: [] for name in PROXY_ATTRS}
-    sample_j_early: List[float] = []
     trend_sum = {name: [] for name in PROXY_ATTRS}
     trend_count = {name: [] for name in PROXY_ATTRS}
     n_unmasked_sum: List[float] = []
@@ -258,19 +310,33 @@ def compute_task_metrics(
         if max_samples is not None and i >= max_samples:
             break
         try:
-            sp = compute_sample_proxies(
-                trace_dict, trace_name=trace_path, tau=tau
-            )
+            sp = compute_sample_proxies(trace_dict, trace_name=trace_path)
         except TraceProxyError as e:
             raise TraceProxyError(f"sample {i}: {e}") from e
 
         n_samples += 1
         t_max = max(t_max, len(sp.step_proxies))
 
+        gen_length = int(trace_dict.get("gen_length") or 0)
+        if gen_length <= 0 and sp.step_proxies:
+            head = sp.step_proxies[0]
+            gen_length = (
+                int(head.n_committed) + int(head.n_selected) + int(head.n_remaining)
+            )
+        for k in prefix_ks:
+            m_k, j_k, _ = cumulative_caps(sp.step_proxies, k)
+            prefix_sample[k]["M"].append(m_k)
+            prefix_sample[k]["J"].append(j_k)
+            prefix_sample[k]["C"].append(
+                prefix_commit_fraction(sp.step_proxies, k, gen_length)
+            )
+        end_commit_frac.append(
+            prefix_commit_fraction(sp.step_proxies, t_max + 1, gen_length)
+        )
+
         if need_buckets:
             all_sample_proxies.append(sp)
         else:
-            sample_j_early.append(float(sp.J_hat_early))
             for name in PROXY_ATTRS:
                 sample_caps[name].append(float(sp.caps[name]))
                 _ensure_online_len(trend_sum[name], trend_count[name], t_max)
@@ -288,17 +354,36 @@ def compute_task_metrics(
         if verbose and (i + 1) % 50 == 0:
             logger.info("Processed %d samples ...", i + 1)
 
+    def _mean_prefix_caps() -> Dict[int, Tuple[float, float, float]]:
+        out: Dict[int, Tuple[float, float, float]] = {}
+        for k in prefix_ks:
+            ms = prefix_sample[k]["M"]
+            js = prefix_sample[k]["J"]
+            m_mean = float(np.mean(ms)) if ms else 0.0
+            j_mean = float(np.mean(js)) if js else 0.0
+            out[k] = (m_mean, j_mean, m_mean + j_mean)
+        return out
+
+    def _mean_prefix_commit_frac() -> Dict[int, float]:
+        out: Dict[int, float] = {}
+        for k in prefix_ks:
+            cs = prefix_sample[k]["C"]
+            out[k] = float(np.mean(cs)) if cs else 0.0
+        return out
+
     if n_samples == 0:
         logger.warning("No valid samples found in %s", trace_path)
         empty = _empty_proxy_reports()
         return TaskMetrics(
             M_hat=0.0,
             J_hat=0.0,
-            J_hat_early=0.0,
             proxies=empty,
             n_unmasked_trend=np.array([]),
             n_samples=0,
             n_steps=0,
+            prefix_caps={},
+            prefix_commit_frac={},
+            commit_frac=float("nan"),
         )
 
     if verbose:
@@ -307,8 +392,6 @@ def compute_task_metrics(
     proxies = _empty_proxy_reports()
     n_buckets = 0
     n_unmasked_bucket_trend = np.array([])
-    j_early_mean = 0.0
-
     if need_buckets:
         t_max = max(len(sp.step_proxies) for sp in all_sample_proxies)
         for name in PROXY_ATTRS:
@@ -316,7 +399,6 @@ def compute_task_metrics(
             rep.sample_caps = [float(sp.caps[name]) for sp in all_sample_proxies]
             rep.cap = float(np.mean(rep.sample_caps))
             rep.trend = _step_trends(all_sample_proxies, name, t_max)
-        j_early_mean = float(np.mean([sp.J_hat_early for sp in all_sample_proxies]))
         n_unmasked_trend = _step_trends(all_sample_proxies, "n_selected", t_max)
         n_buckets, n_unmasked_bucket_trend = _apply_bucket_trends(
             all_sample_proxies, proxies, t_max, int(bucket_size)
@@ -335,7 +417,6 @@ def compute_task_metrics(
                 ],
                 dtype=np.float64,
             )
-        j_early_mean = float(np.mean(sample_j_early)) if sample_j_early else 0.0
         n_unmasked_trend = np.array(
             [
                 (n_unmasked_sum[t] / n_unmasked_count[t])
@@ -350,7 +431,6 @@ def compute_task_metrics(
     return TaskMetrics(
         M_hat=proxies["M_hat_t"].cap,
         J_hat=j_full,
-        J_hat_early=j_early_mean,
         proxies=proxies,
         n_unmasked_trend=n_unmasked_trend,
         n_unmasked_bucket_trend=n_unmasked_bucket_trend,
@@ -358,6 +438,12 @@ def compute_task_metrics(
         n_steps=t_max,
         bucket_size=bucket_size,
         n_buckets=n_buckets,
+        prefix_caps=_mean_prefix_caps(),
+        prefix_samples=prefix_sample,
+        prefix_commit_frac=_mean_prefix_commit_frac(),
+        commit_frac=(
+            float(np.mean(end_commit_frac)) if end_commit_frac else float("nan")
+        ),
     )
 
 # --- from run_meta.py ---
@@ -524,22 +610,25 @@ def parse_run_stem(path: Union[str, Path]) -> RunMeta:
 
 
 # --- from export_csv.py ---
-CSV_COLUMNS: List[str] = [
+_IDENTITY_COLUMNS: List[str] = [
     "repo",
     "filename",
     "model",
     "scheduler",
     "task",
     "steps",
+    "prefix_steps",
     "is_pcfg",
     "n_samples",
     "n_steps",
-    # Hard-gated M̂ / star Ĵ (sums over steps; early = first third)
+]
+_CAP_COLUMNS: List[str] = [
     "M_hat",
     "J_hat",
-    "J_hat_early",
     "G_hat",
-    # Completion diagnostics
+    "commit_frac",
+]
+_COMPLETION_COLUMNS: List[str] = [
     "mean_commits_per_step",
     "max_commits_per_step",
     "total_commits",
@@ -553,25 +642,37 @@ CSV_COLUMNS: List[str] = [
     "gen_length",
     "conf_mean",
     "ent_mean",
-    # Eval scores joined from strace_metrics.csv
+]
+_EVAL_COLUMNS: List[str] = [
     "accuracy",
     "avg_nfe_per_sample",
     "strace_name",
     "strace_metric_key",
+]
+_ORACLE_COLUMNS: List[str] = [
     "model_commit_ppl",
     "oracle_ppl",
     "Mt_total",
     "Jt_total",
-    "corr_M_full",
-    "corr_M_early",
-    "corr_M_mid",
-    "corr_M_late",
-    "corr_J_full",
-    "corr_J_early",
-    "corr_J_mid",
-    "corr_J_late",
-    "corr_ppl",
+    "pearson_M",
+    "pearson_J",
+    "pearson_G",
 ]
+NORMAL_CSV_COLUMNS: List[str] = (
+    _IDENTITY_COLUMNS + _CAP_COLUMNS + _COMPLETION_COLUMNS + _EVAL_COLUMNS
+)
+PCFG_CSV_COLUMNS: List[str] = (
+    _IDENTITY_COLUMNS + _CAP_COLUMNS + _COMPLETION_COLUMNS + _ORACLE_COLUMNS
+)
+CSV_COLUMNS: List[str] = NORMAL_CSV_COLUMNS
+
+# Cleared on prefix-K rows (full-trajectory oracle totals).
+_PREFIX_ROW_CLEAR_KEYS: Tuple[str, ...] = (
+    "model_commit_ppl",
+    "oracle_ppl",
+    "Mt_total",
+    "Jt_total",
+)
 
 
 def _fmt(value: Any) -> Any:
@@ -586,14 +687,22 @@ def _fmt(value: Any) -> Any:
     return value
 
 
+def _row_is_pcfg(row: Mapping[str, Any]) -> bool:
+    value = row.get("is_pcfg")
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value)
+
+
 def empty_metrics_row(**overrides: Any) -> Dict[str, Any]:
     """Return a CSV row dict with NaN/empty defaults, then apply overrides."""
-    row: Dict[str, Any] = {col: "" for col in CSV_COLUMNS}
+    columns = list(dict.fromkeys(NORMAL_CSV_COLUMNS + PCFG_CSV_COLUMNS))
+    row: Dict[str, Any] = {col: "" for col in columns}
     for key in (
         "M_hat",
         "J_hat",
-        "J_hat_early",
         "G_hat",
+        "commit_frac",
         "mean_commits_per_step",
         "max_commits_per_step",
         "total_commits",
@@ -609,19 +718,7 @@ def empty_metrics_row(**overrides: Any) -> Dict[str, Any]:
         "ent_mean",
         "accuracy",
         "avg_nfe_per_sample",
-        "model_commit_ppl",
-        "oracle_ppl",
-        "Mt_total",
-        "Jt_total",
-        "corr_M_full",
-        "corr_M_early",
-        "corr_M_mid",
-        "corr_M_late",
-        "corr_J_full",
-        "corr_J_early",
-        "corr_J_mid",
-        "corr_J_late",
-        "corr_ppl",
+        *_ORACLE_COLUMNS,
     ):
         row[key] = float("nan")
     row.update(overrides)
@@ -633,18 +730,27 @@ def write_metrics_csv(
     rows: Sequence[Mapping[str, Any]],
     *,
     append: bool = False,
+    pcfg: Optional[bool] = None,
 ) -> Path:
-    """Write or append unified SchedulerLens metrics rows."""
+    """Write or append SchedulerLens metrics rows.
+
+    A normal sheet has the eval columns. A PCFG sheet has the oracle and
+    correlation columns instead.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if pcfg is None:
+        flags = [_row_is_pcfg(row) for row in rows]
+        pcfg = bool(flags) and all(flags)
+    columns = PCFG_CSV_COLUMNS if pcfg else NORMAL_CSV_COLUMNS
     write_header = not append or not path.exists() or path.stat().st_size == 0
     mode = "a" if append and path.exists() else "w"
     with path.open(mode, encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
         if write_header:
             writer.writeheader()
         for row in rows:
-            writer.writerow({col: _fmt(row.get(col, "")) for col in CSV_COLUMNS})
+            writer.writerow({col: _fmt(row.get(col, "")) for col in columns})
     return path
 
 
@@ -656,53 +762,14 @@ def read_metrics_csv(path: Union[str, Path]) -> List[Dict[str, str]]:
         return list(csv.DictReader(f))
 
 
-# --- from correlation.py ---
-BLOCK_NAMES = ("full", "early", "mid", "late")
-
-
-@dataclass
-class BlockCorrelations:
-    corr_M_full: float = float("nan")
-    corr_M_early: float = float("nan")
-    corr_M_mid: float = float("nan")
-    corr_M_late: float = float("nan")
-    corr_J_full: float = float("nan")
-    corr_J_early: float = float("nan")
-    corr_J_mid: float = float("nan")
-    corr_J_late: float = float("nan")
-    corr_ppl: float = float("nan")
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-def trajectory_blocks(n_steps: int) -> Dict[str, Tuple[int, int]]:
-    """Equal thirds of [0, n_steps): early / mid / late, plus full.
-
-    For ``n_steps < 3``, early/mid/late collapse to the full span (avoid
-    overlapping partial thirds that look like independent blocks).
-    """
-    if n_steps <= 0:
-        return {name: (0, 0) for name in BLOCK_NAMES}
-    if n_steps < 3:
-        full = (0, n_steps)
-        return {name: full for name in BLOCK_NAMES}
-    third = n_steps // 3
-    early_end = third
-    mid_end = 2 * third
-    # Give remainder to late so union covers [0, n_steps).
-    return {
-        "full": (0, n_steps),
-        "early": (0, early_end),
-        "mid": (early_end, mid_end),
-        "late": (mid_end, n_steps),
-    }
+# --- sample-level prefix correlations (PCFG) ---
+CORR_PREFIXES: Tuple[int, ...] = (8, 16, 32, 64)
 
 
 def pearson_corr(x: Sequence[float], y: Sequence[float]) -> float:
     """Pearson correlation; NaN if fewer than 2 finite paired points or zero variance."""
-    xs = np.asarray(x, dtype=np.float64)
-    ys = np.asarray(y, dtype=np.float64)
+    xs = np.asarray(x, dtype=np.float64).reshape(-1)
+    ys = np.asarray(y, dtype=np.float64).reshape(-1)
     if xs.shape != ys.shape:
         raise ValueError(f"shape mismatch: {xs.shape} vs {ys.shape}")
     mask = np.isfinite(xs) & np.isfinite(ys)
@@ -715,78 +782,73 @@ def pearson_corr(x: Sequence[float], y: Sequence[float]) -> float:
     return float(np.corrcoef(a, b)[0, 1])
 
 
-def block_correlations(
-    oracle: Sequence[float],
-    proxy: Sequence[float],
-    *,
-    n_steps: Optional[int] = None,
-) -> Dict[str, float]:
-    """Pearson ρ of oracle vs proxy over full / early / mid / late."""
-    n = n_steps if n_steps is not None else len(oracle)
-    blocks = trajectory_blocks(n)
-    out: Dict[str, float] = {}
-    for name, (start, end) in blocks.items():
-        out[name] = pearson_corr(oracle[start:end], proxy[start:end])
+def per_sample_prefix_sums(
+    sample_idx: Sequence[int],
+    step: Sequence[int],
+    values: Sequence[float],
+    n_samples: int,
+    prefixes: Sequence[int],
+) -> Dict[str, np.ndarray]:
+    """Sum ``values`` per sample over steps before each prefix, plus the full sum."""
+    idx = np.asarray(sample_idx, dtype=np.int64).reshape(-1)
+    st = np.asarray(step, dtype=np.int64).reshape(-1)
+    val = np.asarray(values, dtype=np.float64).reshape(-1)
+    if not (idx.shape == st.shape == val.shape):
+        raise ValueError("oracle step arrays have different lengths")
+    n = max(int(n_samples), int(idx.max()) + 1 if idx.size else 0)
+    finite = np.isfinite(val)
+    out: Dict[str, np.ndarray] = {}
+    cuts: List[Tuple[str, Optional[int]]] = [("full", None)]
+    cuts.extend((str(int(k)), int(k)) for k in prefixes)
+    for label, limit in cuts:
+        mask = finite if limit is None else finite & (st < limit)
+        totals = np.zeros(n, dtype=np.float64)
+        if int(mask.sum()):
+            np.add.at(totals, idx[mask], val[mask])
+        out[label] = totals
     return out
 
 
-def mean_step_series(
-    per_sample_series: Iterable[Sequence[float]],
-    n_steps: int,
-) -> np.ndarray:
-    """Mean across samples of aligned per-step series (pad missing with nan)."""
-    by_step: List[List[float]] = [[] for _ in range(n_steps)]
-    for series in per_sample_series:
-        for t, val in enumerate(series):
-            if t < n_steps and np.isfinite(val):
-                by_step[t].append(float(val))
-    return np.array([
-        float(np.mean(vals)) if vals else float("nan") for vals in by_step
-    ])
-
-
-def _pad_to(series: Sequence[float], n: int) -> np.ndarray:
-    out = np.full(n, np.nan, dtype=np.float64)
-    arr = np.asarray(series, dtype=np.float64).ravel()
-    m = min(n, arr.size)
-    if m > 0:
-        out[:m] = arr[:m]
-    return out
-
-
-def compute_oracle_proxy_correlations(
+def prefix_pearsons(
+    metrics: TaskMetrics,
     *,
-    mt_trend: Sequence[float],
-    m_hat_trend: Sequence[float],
-    jt_trend: Sequence[float],
-    j_hat_trend: Sequence[float],
-    sample_oracle_ppl: Sequence[float] | None = None,
-    sample_model_ppl: Sequence[float] | None = None,
-) -> BlockCorrelations:
-    """Build BlockCorrelations from task-level trends and optional sample PPL lists."""
-    n = min(len(mt_trend), len(m_hat_trend), len(jt_trend), len(j_hat_trend))
-    if n <= 0:
-        n = max(len(mt_trend), len(m_hat_trend), len(jt_trend), len(j_hat_trend), 0)
-    mt = _pad_to(mt_trend, n)
-    mh = _pad_to(m_hat_trend, n)
-    jt = _pad_to(jt_trend, n)
-    jh = _pad_to(j_hat_trend, n)
-    m_blocks = block_correlations(mt, mh, n_steps=n)
-    j_blocks = block_correlations(jt, jh, n_steps=n)
-    corr_ppl = float("nan")
-    if sample_oracle_ppl is not None and sample_model_ppl is not None:
-        corr_ppl = pearson_corr(sample_oracle_ppl, sample_model_ppl)
-    return BlockCorrelations(
-        corr_M_full=m_blocks["full"],
-        corr_M_early=m_blocks["early"],
-        corr_M_mid=m_blocks["mid"],
-        corr_M_late=m_blocks["late"],
-        corr_J_full=j_blocks["full"],
-        corr_J_early=j_blocks["early"],
-        corr_J_mid=j_blocks["mid"],
-        corr_J_late=j_blocks["late"],
-        corr_ppl=corr_ppl,
-    )
+    step_sample_idx: Sequence[int],
+    step: Sequence[int],
+    step_mt: Sequence[float],
+    step_jt: Sequence[float],
+) -> Dict[str, Tuple[float, float, float]]:
+    """Sample-level Pearson of M̂/Mt, Ĵ/Jt, and Ĝ/G at each prefix and full.
+
+    Ĝ is M̂ + Ĵ and G is Mt + Jt, summed over the same steps as the pair.
+    """
+    prefixes = tuple(sorted(int(k) for k in metrics.prefix_samples))
+    n = int(metrics.n_samples)
+    mt = per_sample_prefix_sums(step_sample_idx, step, step_mt, n, prefixes)
+    jt = per_sample_prefix_sums(step_sample_idx, step, step_jt, n, prefixes)
+    m_hat: Dict[str, Sequence[float]] = {
+        "full": metrics.proxies["M_hat_t"].sample_caps,
+    }
+    j_hat: Dict[str, Sequence[float]] = {
+        "full": metrics.proxies["J_hat_t"].sample_caps,
+    }
+    for k, bucket in metrics.prefix_samples.items():
+        label = str(int(k))
+        m_hat[label] = bucket["M"]
+        j_hat[label] = bucket["J"]
+    out: Dict[str, Tuple[float, float, float]] = {}
+    for label, mh in m_hat.items():
+        if label not in mt or label not in jt or label not in j_hat:
+            continue
+        mh_arr = np.asarray(mh, dtype=np.float64).reshape(-1)
+        jh_arr = np.asarray(j_hat[label], dtype=np.float64).reshape(-1)
+        mt_arr = np.asarray(mt[label][:n], dtype=np.float64).reshape(-1)
+        jt_arr = np.asarray(jt[label][:n], dtype=np.float64).reshape(-1)
+        out[label] = (
+            pearson_corr(mh_arr, mt_arr),
+            pearson_corr(jh_arr, jt_arr),
+            pearson_corr(mh_arr + jh_arr, mt_arr + jt_arr),
+        )
+    return out
 
 
 # --- from analyze.py ---
@@ -796,14 +858,14 @@ def build_metrics_row(
     *,
     metrics: Optional[TaskMetrics] = None,
     perplexity: Optional[Any] = None,
-    correlations: Optional[BlockCorrelations] = None,
+    prefix_pearson: Optional[Mapping[str, Tuple[float, float, float]]] = None,
     meta: Optional[RunMeta] = None,
     repo: str = "",
     max_samples: Optional[int] = None,
     verbose: bool = False,
     completion: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Assemble one CSV-ready row for a trace NPZ."""
+    """Assemble one CSV-ready row for a trace NPZ (full trajectory)."""
     trace_path = Path(trace_path)
     meta = meta or parse_run_stem(trace_path)
     if metrics is None:
@@ -818,13 +880,14 @@ def build_metrics_row(
         scheduler=meta.scheduler,
         task=meta.task,
         steps=meta.steps if meta.steps is not None else "",
+        prefix_steps="",
         is_pcfg=meta.is_pcfg,
         n_samples=metrics.n_samples,
         n_steps=metrics.n_steps,
         M_hat=metrics.M_hat,
         J_hat=metrics.J_hat,
-        J_hat_early=metrics.J_hat_early,
         G_hat=float(metrics.M_hat) + float(metrics.J_hat),
+        commit_frac=metrics.commit_frac,
     )
 
     if completion:
@@ -852,52 +915,59 @@ def build_metrics_row(
         row["Mt_total"] = perplexity.Mt_total
         row["Jt_total"] = perplexity.Jt_total
 
-    if correlations is not None:
-        row.update(correlations.to_dict())
+    full_m, full_j, full_g = (prefix_pearson or {}).get(
+        "full", (float("nan"), float("nan"), float("nan"))
+    )
+    row["pearson_M"] = full_m
+    row["pearson_J"] = full_j
+    row["pearson_G"] = full_g
 
     return row
+
+
+def expand_prefix_metric_rows(
+    base_row: Mapping[str, Any],
+    metrics: TaskMetrics,
+    prefix_pearson: Optional[Mapping[str, Tuple[float, float, float]]] = None,
+) -> List[Dict[str, Any]]:
+    """Full-traj row plus one row per K in ``metrics.prefix_caps``.
+
+    Prefix rows overwrite ``M_hat`` / ``J_hat`` / ``G_hat`` with cumulative caps
+    over ``step < K``. ``pearson_M``, ``pearson_J``, and ``pearson_G`` are the
+    sample-level Pearson values for that same prefix.
+    """
+    pearson = prefix_pearson or {}
+    rows: List[Dict[str, Any]] = [dict(base_row)]
+    if not metrics.prefix_caps:
+        return rows
+    for k in sorted(metrics.prefix_caps):
+        m, j, g = metrics.prefix_caps[k]
+        row = dict(base_row)
+        row["prefix_steps"] = int(k)
+        row["M_hat"] = float(m)
+        row["J_hat"] = float(j)
+        row["G_hat"] = float(g)
+        row["commit_frac"] = float(metrics.prefix_commit_frac.get(k, float("nan")))
+        pair = pearson.get(str(int(k)))
+        if pair is not None:
+            row["pearson_M"], row["pearson_J"], row["pearson_G"] = pair
+        for key in _PREFIX_ROW_CLEAR_KEYS:
+            row[key] = float("nan")
+        rows.append(row)
+    return rows
 
 
 def collect_sample_proxy_trends(
     trace_path: Union[str, Path],
     *,
     max_samples: Optional[int] = None,
-    tau: Optional[float] = None,
 ) -> tuple[List[SampleProxies], int]:
     """Return per-sample proxies and max step count (fail-hard)."""
     samples: List = []
     for i, tr in enumerate(_iter_traces(trace_path)):
         if max_samples is not None and i >= max_samples:
             break
-        samples.append(
-            compute_sample_proxies(tr, trace_name=trace_path, tau=tau)
-        )
+        samples.append(compute_sample_proxies(tr, trace_name=trace_path))
     t_max = max((len(sp.step_proxies) for sp in samples), default=0)
     return samples, t_max
-
-
-def correlations_from_trends(
-    *,
-    mt_trend: Sequence[float],
-    m_hat_trend: Sequence[float],
-    jt_trend: Sequence[float],
-    j_hat_trend: Sequence[float],
-    sample_oracle_nll: Sequence[float] | None = None,
-    sample_model_nll: Sequence[float] | None = None,
-) -> BlockCorrelations:
-    from schedulerlens.oracle import nll_to_ppl as _ppl
-    sample_oracle_ppl = (
-        [_ppl(x) for x in sample_oracle_nll] if sample_oracle_nll is not None else None
-    )
-    sample_model_ppl = (
-        [_ppl(x) for x in sample_model_nll] if sample_model_nll is not None else None
-    )
-    return compute_oracle_proxy_correlations(
-        mt_trend=mt_trend,
-        m_hat_trend=m_hat_trend,
-        jt_trend=jt_trend,
-        j_hat_trend=j_hat_trend,
-        sample_oracle_ppl=sample_oracle_ppl,
-        sample_model_ppl=sample_model_ppl,
-    )
 

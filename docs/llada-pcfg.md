@@ -419,7 +419,7 @@ python -m schedulerlens.run file \
   eval_outputs/pcfg/llada-100m-pcfg-pcfg_pd_s128/trace_outputs/llada-100m-pcfg_pd_s128.npz \
   -o outputs/schedulerlens/pcfg_pd --replay-oracle --model-path /path/to/llada-100m-pcfg
 
-# Hub: inventory → download→analyze→delete → CSV
+# Hub: inventory → compare → CSV
 python -m schedulerlens.run inventory --repo schedulerlens-npz --pcfg-only
 python -m schedulerlens.run compare \
   --repo schedulerlens-npz --pattern '*-pcfg_*.npz' \
@@ -427,7 +427,7 @@ python -m schedulerlens.run compare \
   --replay-oracle --model-path /path/to/llada-100m-pcfg
 ```
 
-`perplexity.json` / `schedulerlens_metrics.csv` include `model_commit_ppl` and `oracle_ppl`. With `--replay-oracle` + `--model-path`, exact `Mt`/`Jt` and M↔M̂ / J↔Ĵ correlations (full / early / mid / late) are written. See [schedulerlens.md](schedulerlens.md).
+`perplexity.json` and `schedulerlens_metrics_pcfg.csv` include `model_commit_ppl` and `oracle_ppl`. With `--replay-oracle` + `--model-path`, exact `Mt`/`Jt` are written, plus sample-level Pearson of M̂ with Mt, Ĵ with Jt, and Ĝ = M̂+Ĵ with G = Mt+Jt at prefixes 8, 16, 32, 64 and full (`pearson_M`, `pearson_J`, `pearson_G`). See [schedulerlens.md](schedulerlens.md).
 
 PCFG metrics are computed by `pcfg_eval.py` and `schedulerlens` — not the lm-eval trace audit pipeline. PCFG traces (`pcfg_*` / `*-pcfg_*`) get hook/structure checks in `trace_audit.py`. **Sample count** is compared to the **`pcfg-code` Hub test split** (override with `--pcfg-dataset` / `--pcfg-namespace`; lm-eval / W&B accuracy is still skipped).
 

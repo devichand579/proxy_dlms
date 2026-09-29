@@ -1,26 +1,25 @@
-"""
-Discover NPZs on a dataset repo (no download)
-One file at a time: temp download -> stream samples -> metrics CSV -> delete temp
-Batch start: purge stale HF cache for the repo
-Optional CSV resume
-"""
+"""Download SchedulerLens NPZs, stream each into a metrics CSV, and delete the temp copy."""
 from __future__ import annotations
 
 import csv
 import fnmatch
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from schedulerlens.completion import (
     compute_completion_metrics,
+    duplicate_run_stems,
     join_rows_with_strace,
 )
 from schedulerlens.metrics import (
+    CORR_PREFIXES,
     build_metrics_row,
     compute_task_metrics,
-    correlations_from_trends,
+    expand_prefix_metric_rows,
+    parse_prefix_steps,
     parse_run_stem,
+    prefix_pearsons,
     read_metrics_csv,
     write_metrics_csv,
 )
@@ -30,6 +29,7 @@ from schedulerlens.oracle import (
     index_oracle_artifacts,
     resolve_oracle_npz,
     task_perplexity_from_oracle_npz,
+    load_oracle_artifacts,
 )
 from schedulerlens.proxies import TraceProxyError
 from traces.hf_trace_upload import (
@@ -44,13 +44,11 @@ from traces.hf_trace_upload import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_METRICS_CSV = Path(__file__).resolve().parent.parent / "outputs/schedulerlens/schedulerlens_metrics.csv"
+DEFAULT_METRICS_CSV = Path(__file__).resolve().parent.parent / "outputs/schedulerlens/compare/schedulerlens_metrics.csv"
 
 # Re-export Hub primitives so callers import from one place.
 __all__ = [
     "DEFAULT_METRICS_CSV",
-    "analyze_hub_file",
-    "analyze_local_file",
     "analyze_one_npz",
     "cleanup_repo_cache",
     "discover_hub_npz",
@@ -83,7 +81,7 @@ def discover_hub_npz(
     pattern: str = "*.npz",
     token: bool | str | None = True,
 ) -> List[str]:
-    """List Hub NPZ paths matching ``pattern`` (filename glob)."""
+    """Hub NPZ paths whose filename matches ``pattern``."""
     files = list_repo_files(
         repo_id=repo_id, namespace=namespace, revision=revision, token=token
     )
@@ -97,6 +95,16 @@ def discover_hub_npz(
     return sorted(npz)
 
 
+def _name_set(spec: Optional[Union[str, Sequence[str]]]) -> set[str]:
+    if spec is None:
+        return set()
+    if isinstance(spec, str):
+        parts = spec.split(",")
+    else:
+        parts = spec
+    return {str(p).strip() for p in parts if str(p).strip()}
+
+
 def filter_by_meta(
     filenames: Sequence[str],
     *,
@@ -104,7 +112,11 @@ def filter_by_meta(
     scheduler: Optional[str] = None,
     steps: Optional[int] = None,
     pcfg_only: bool = False,
+    exclude_scheduler: Optional[Union[str, Sequence[str]]] = None,
+    exclude_task: Optional[Union[str, Sequence[str]]] = None,
 ) -> List[str]:
+    drop_sched = _name_set(exclude_scheduler)
+    drop_task = _name_set(exclude_task)
     out: List[str] = []
     for name in filenames:
         meta = parse_run_stem(name)
@@ -115,6 +127,10 @@ def filter_by_meta(
         if scheduler is not None and meta.scheduler != scheduler:
             continue
         if steps is not None and meta.steps != steps:
+            continue
+        if meta.scheduler in drop_sched:
+            continue
+        if meta.task in drop_task:
             continue
         out.append(name)
     return out
@@ -130,9 +146,11 @@ def hub_inventory(
     scheduler: Optional[str] = None,
     steps: Optional[int] = None,
     pcfg_only: bool = False,
+    exclude_scheduler: Optional[Union[str, Sequence[str]]] = None,
+    exclude_task: Optional[Union[str, Sequence[str]]] = None,
     token: bool | str | None = True,
 ) -> dict[str, Any]:
-    """Filename inventory for SchedulerLens NPZs (no downloads)."""
+    """Matching NPZ filenames, without downloading them."""
     full_repo = resolve_repo(repo_id, namespace)
     rev = revision if revision is not None else trace_hf_revision()
     files = list_repo_files(repo_id=full_repo, revision=rev, token=token)
@@ -146,6 +164,8 @@ def hub_inventory(
         scheduler=scheduler,
         steps=steps,
         pcfg_only=pcfg_only,
+        exclude_scheduler=exclude_scheduler,
+        exclude_task=exclude_task,
     )
     pcfg = [f for f in matched if parse_run_stem(f).is_pcfg]
     return {
@@ -204,20 +224,15 @@ def analyze_one_npz(
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
-    skip_jt: bool = False,
     strace_metrics_path: Optional[Union[str, Path]] = None,
     oracle_npz: Optional[Union[str, Path]] = None,
     require_cached_oracle: bool = False,
+    prefix_steps: Optional[Sequence[int]] = None,
+    metrics_only: bool = False,
+    skip_completion: bool = False,
+    skip_perplexity: bool = False,
 ) -> Dict[str, Any]:
-    """Analyze one local NPZ (samples streamed via ``iter_npz_traces``).
-
-    When ``oracle_npz`` is set, Mt/Jt/PPL + correlations come from that artifact
-    (no live replay). Otherwise ``--replay-oracle`` gates live PCFG replay.
-
-    With ``require_cached_oracle`` (compare ``--oracle`` mode) and no matching
-    artifact / no replay, PPL/Mt/Jt are left empty instead of walking the PCFG
-    commit-NLL path.
-    """
+    """Metrics rows for one local NPZ. Oracle columns come from a cached file or a live PCFG replay."""
     meta = parse_run_stem(trace_path)
     cached_oracle = Path(oracle_npz) if oracle_npz is not None else None
     do_replay = (
@@ -228,21 +243,29 @@ def analyze_one_npz(
             replay_oracle=replay_oracle,
         )
     )
+    prefix_ks = parse_prefix_steps(prefix_steps)
+    if (meta.is_pcfg or force_pcfg) and not prefix_ks:
+        prefix_ks = CORR_PREFIXES
+    skip_completion = bool(metrics_only or skip_completion)
+    skip_perplexity = bool(metrics_only or skip_perplexity)
 
     metrics = compute_task_metrics(
         trace_path,
         max_samples=max_samples,
         bucket_size=bucket_size,
         verbose=verbose,
+        prefix_steps=prefix_ks or None,
     )
 
-    steps_budget = int(meta.steps) if meta.steps is not None else int(metrics.n_steps)
-    completion = compute_completion_metrics(
-        trace_path,
-        model=meta.model,
-        steps_budget=steps_budget,
-        max_samples=max_samples,
-    )
+    completion = None
+    if not skip_completion:
+        steps_budget = int(meta.steps) if meta.steps is not None else int(metrics.n_steps)
+        completion = compute_completion_metrics(
+            trace_path,
+            model=meta.model,
+            steps_budget=steps_budget,
+            max_samples=max_samples,
+        )
 
     if cached_oracle is not None:
         logger.info("Using cached oracle %s for %s", cached_oracle, meta.stem)
@@ -263,14 +286,14 @@ def analyze_one_npz(
             jt_exact_max=jt_exact_max,
             jt_markov_order=jt_markov_order,
             jt_large_set=jt_large_set,
-            skip_jt=skip_jt,
         )
-    elif require_cached_oracle:
-        logger.warning(
-            "No cached oracle.npz for stem %r (and --replay-oracle off); "
-            "leaving Mt/Jt/PPL/corr empty",
-            meta.stem,
-        )
+    elif require_cached_oracle or skip_perplexity:
+        if require_cached_oracle and not skip_perplexity:
+            logger.warning(
+                "No cached oracle.npz for stem %r (and --replay-oracle off); "
+                "leaving Mt/Jt/PPL/corr empty",
+                meta.stem,
+            )
         ppl = empty_task_perplexity(n_samples=int(metrics.n_samples))
     else:
         ppl = compute_task_perplexity(
@@ -288,93 +311,54 @@ def analyze_one_npz(
             jt_exact_max=jt_exact_max,
             jt_markov_order=jt_markov_order,
             jt_large_set=jt_large_set,
-            skip_jt=skip_jt,
         )
 
-    correlations = None
-    use_oracle_trends = cached_oracle is not None or do_replay
-    if use_oracle_trends and ppl.mt_trend and ppl.jt_trend:
-        m_hat = metrics.proxies["M_hat_t"].trend
-        j_hat = metrics.proxies["J_hat_t"].trend
-        n = min(len(ppl.mt_trend), len(m_hat), len(ppl.jt_trend), len(j_hat))
-        correlations = correlations_from_trends(
-            mt_trend=ppl.mt_trend[:n],
-            m_hat_trend=m_hat[:n],
-            jt_trend=ppl.jt_trend[:n],
-            j_hat_trend=j_hat[:n],
-            sample_oracle_nll=ppl.sample_oracle_nll,
-            sample_model_nll=ppl.sample_model_nll,
-        )
+    prefix_pearson = None
+    use_oracle = cached_oracle is not None or do_replay
+    if use_oracle:
+        if cached_oracle is not None:
+            arts = load_oracle_artifacts(cached_oracle)
+            step_sample_idx = arts.get("step_sample_idx", [])
+            step = arts.get("step", [])
+            step_mt = arts.get("step_Mt", [])
+            step_jt = arts.get("step_Jt", [])
+        else:
+            tables = getattr(ppl, "oracle_tables", None) or {}
+            step_sample_idx = tables.get("step_sample_idx", [])
+            step = tables.get("step", [])
+            step_mt = tables.get("step_Mt", [])
+            step_jt = tables.get("step_Jt", [])
+        if len(step):
+            prefix_pearson = prefix_pearsons(
+                metrics,
+                step_sample_idx=step_sample_idx,
+                step=step,
+                step_mt=step_mt,
+                step_jt=step_jt,
+            )
 
     row = build_metrics_row(
         trace_path,
         metrics=metrics,
         perplexity=ppl,
-        correlations=correlations,
+        prefix_pearson=prefix_pearson,
         meta=meta,
         repo=repo,
         completion=completion,
     )
     row = join_rows_with_strace([row], strace_path=strace_metrics_path)[0]
+    rows = expand_prefix_metric_rows(row, metrics, prefix_pearson)
 
     return {
         "row": row,
+        "rows": rows,
         "metrics": metrics,
         "perplexity": ppl,
-        "correlations": correlations,
+        "prefix_pearson": prefix_pearson,
         "meta": meta,
         "completion": completion,
         "oracle_npz": str(cached_oracle.resolve()) if cached_oracle else None,
     }
-
-
-def analyze_local_file(
-    trace_path: Union[str, Path],
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    return analyze_one_npz(Path(trace_path), **kwargs)
-
-
-def analyze_hub_file(
-    filename: str,
-    *,
-    repo_id: Optional[str] = None,
-    namespace: Optional[str] = None,
-    revision: Optional[str] = None,
-    keep_download: bool = False,
-    dest: Optional[Union[str, Path]] = None,
-    **analyze_kwargs: Any,
-) -> Dict[str, Any]:
-    """Download one Hub NPZ → analyze (streaming samples) → delete temp (default)."""
-    full_repo = resolve_repo(repo_id, namespace)
-    temp_dir = None
-    try:
-        if dest is not None:
-            trace_path = download_file(
-                filename,
-                dest=Path(dest),
-                repo_id=repo_id,
-                namespace=namespace,
-                revision=revision,
-            )
-        else:
-            trace_path, temp_dir = download_file_to_temp(
-                filename,
-                repo_id=repo_id,
-                namespace=namespace,
-                revision=revision,
-            )
-        result = analyze_one_npz(
-            Path(trace_path),
-            repo=full_repo,
-            **analyze_kwargs,
-        )
-        result["hub_filename"] = filename
-        result["local_path"] = str(Path(trace_path).resolve())
-        return result
-    finally:
-        if temp_dir is not None and not keep_download:
-            remove_temp_download(temp_dir)
 
 
 def resolve_pcfg_model_dir(
@@ -383,7 +367,7 @@ def resolve_pcfg_model_dir(
     hf_model: Optional[str] = None,
     token: bool | str | None = True,
 ) -> Optional[Path]:
-    """Resolve a local checkpoint dir or download an HF model id via snapshot_download."""
+    """Local checkpoint directory, downloading an HF model id when that is what was given."""
     if model_path is not None:
         path = Path(model_path)
         if path.is_dir():
@@ -404,7 +388,7 @@ def resolve_pcfg_model_dir(
 
 
 def _release_model(model) -> None:
-    """Drop model weights and free CUDA cache if possible."""
+    """Drop the model and free the CUDA cache."""
     if model is None:
         return
     try:
@@ -426,12 +410,7 @@ def hf_model_id_for_meta(
     hf_model: Optional[str] = None,
     namespace: Optional[str] = None,
 ) -> Optional[str]:
-    """Resolve HF model repo for a trace.
-
-    Priority: explicit ``hf_model`` override → ``{namespace}/{meta.model}``
-    where ``meta.model`` is the short name from the stem (e.g. ``llada-100m-pcfg``).
-    Namespace defaults to ``--namespace`` / ``TRACE_HF_NAMESPACE`` / whoami.
-    """
+    """HF repo id for this trace: the explicit override, or ``{namespace}/{model}``."""
     if hf_model:
         return str(hf_model).strip()
     short = (getattr(meta, "model", None) or "").strip()
@@ -464,7 +443,7 @@ def _load_oracle_stack(
     model_path: Optional[Union[str, Path]] = None,
     hf_model: Optional[str] = None,
 ):
-    """Build PCFG engine; optionally load one fixed checkpoint (non-lazy path)."""
+    """PCFG engine, and one fixed checkpoint when a model path is given."""
     from schedulerlens.oracle import _ensure_pcfg_path
 
     _ensure_pcfg_path()
@@ -507,7 +486,7 @@ def _load_oracle_stack(
 
 
 class _LazyOracleModels:
-    """Load one HF/local PCFG checkpoint at a time; unload on model switch."""
+    """One PCFG checkpoint at a time, unloaded when the trace model changes."""
 
     def __init__(
         self,
@@ -529,7 +508,7 @@ class _LazyOracleModels:
         self._loaded_key: Optional[str] = None
 
     def for_meta(self, meta):
-        """Return (model, vocab, device) for this trace's model; may unload previous."""
+        """Model, vocab, and device for this trace."""
         if self.model_path is not None or self.hf_model is not None:
             # Fixed override — already loaded (or failed) once via _load_oracle_stack.
             return self._model, self.vocab, self.device
@@ -572,16 +551,55 @@ class _LazyOracleModels:
         self._loaded_key = None
 
 
-def _load_done_stems(csv_path: Path) -> set[str]:
+def _prefix_label(value: object) -> str:
+    text = "" if value is None else str(value).strip()
+    if not text or text.lower() == "nan":
+        return ""
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if number == int(number):
+        return str(int(number))
+    return text
+
+
+def _load_done_stems(
+    csv_path: Path,
+    prefix_steps: Optional[Sequence[int]] = None,
+) -> set[str]:
+    """Stems that already have the full row and every requested prefix.
+
+    A stem with only some of those rows is left out, so the next pass
+    replaces it.
+    """
     if not csv_path.is_file():
         return set()
-    done: set[str] = set()
+    required = {str(int(k)) for k in (prefix_steps or [])}
+    present: dict[str, set[str]] = {}
     with csv_path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             name = (row.get("filename") or row.get("name") or "").strip()
-            if name:
-                done.add(Path(name).stem)
+            if not name:
+                continue
+            present.setdefault(Path(name).stem, set()).add(
+                _prefix_label(row.get("prefix_steps"))
+            )
+    done = {
+        stem
+        for stem, labels in present.items()
+        if "" in labels and required <= labels
+    }
+    partial = len(present) - len(done)
+    if partial:
+        logger.info(
+            "Resume: %d stems already have every prefix; %d are missing a prefix and will be redone",
+            len(done),
+            partial,
+        )
+    elif done:
+        logger.info("Resume: skipping %d stems already in %s", len(done), csv_path)
     return done
 
 
@@ -597,13 +615,15 @@ def run_compare(
     scheduler_filter: Optional[str] = None,
     steps_filter: Optional[int] = None,
     pcfg_only: bool = False,
+    exclude_scheduler: Optional[Union[str, Sequence[str]]] = None,
+    exclude_task: Optional[Union[str, Sequence[str]]] = None,
     force_pcfg: bool = False,
     replay_oracle: bool = False,
     model_path: Optional[Union[str, Path]] = None,
     hf_model: Optional[str] = None,
     max_samples: Optional[int] = None,
     limit: Optional[int] = None,
-    resume: bool = False,
+    resume: bool = True,
     purge_cache: bool = True,
     verbose: bool = True,
     oracle_workers: int = 1,
@@ -612,30 +632,26 @@ def run_compare(
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
-    skip_jt: bool = False,
     strace_metrics_path: Optional[Union[str, Path]] = None,
+    skip_duplicate_budgets: bool = True,
     oracle_dir: Optional[Union[str, Path]] = None,
+    prefix_steps: Optional[Sequence[int]] = None,
+    metrics_only: bool = False,
+    skip_completion: bool = False,
+    skip_perplexity: bool = False,
+    csv_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Discover NPZs (Hub or local), analyze each, write ``schedulerlens_metrics.csv``.
+    """Analyze each discovered NPZ and write the compare CSV.
 
-    Hub path: purge cache → per-file temp download → stream analyze → delete temp.
-    After each NPZ: flush the CSV (so a crash keeps progress and RAM stays flat).
-
-    With ``--oracle`` pointing at a saved ``oracle.npz`` or a folder of them, Mt/Jt
-    and correlations are filled from disk (matched by stem); traces still come from
-    Hub/local. Live ``--replay-oracle`` is only used for stems without a cached
-    artifact.
-
-    With ``--replay-oracle`` and no fixed ``--hf-model``/``--model-path``, each
-    PCFG stem's ``meta.model`` (e.g. ``llada-100m-pcfg``) is lazy-loaded from
-    ``{namespace}/{meta.model}``; the previous weights are unloaded on switch.
+    A normal batch writes ``schedulerlens_metrics.csv``. A PCFG batch writes
+    ``schedulerlens_metrics_pcfg.csv``.
     """
     from schedulerlens.oracle import _ensure_pcfg_path
 
     _ensure_pcfg_path()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "schedulerlens_metrics.csv"
+    prefix_ks = parse_prefix_steps(prefix_steps)
 
     oracle_index: dict[str, Path] = {}
     if oracle_dir is not None:
@@ -693,12 +709,6 @@ def run_compare(
     rows: List[Dict[str, Any]] = []
     repo_label = ""
 
-    done_stems: set[str] = set()
-    if resume and csv_path.is_file():
-        done_stems = _load_done_stems(csv_path)
-        if done_stems:
-            logger.info("Resume: skipping %d stems already in %s", len(done_stems), csv_path)
-
     if local_dir is not None:
         local_dir = Path(local_dir)
         paths = discover_local_npz(local_dir, pattern)
@@ -708,6 +718,8 @@ def run_compare(
             scheduler=scheduler_filter,
             steps=steps_filter,
             pcfg_only=pcfg_only,
+            exclude_scheduler=exclude_scheduler,
+            exclude_task=exclude_task,
         )
         path_map = {p.name: p for p in paths}
         repo_label = str(local_dir.resolve())
@@ -734,8 +746,46 @@ def run_compare(
             scheduler=scheduler_filter,
             steps=steps_filter,
             pcfg_only=pcfg_only,
+            exclude_scheduler=exclude_scheduler,
+            exclude_task=exclude_task,
         )
         work_items = [(name, None, name) for name in hub_files]
+
+    pcfg_sheet = bool(pcfg_only or force_pcfg) or (
+        bool(work_items)
+        and all(parse_run_stem(name).is_pcfg for name, _, _ in work_items)
+    )
+    csv_name = (
+        csv_name
+        if csv_name
+        else (
+            "schedulerlens_metrics_pcfg.csv"
+            if pcfg_sheet
+            else "schedulerlens_metrics.csv"
+        )
+    )
+    given = Path(csv_name)
+    csv_path = given if given.is_absolute() else output_dir / given
+
+    done_stems: set[str] = set()
+    if resume and csv_path.is_file():
+        required_prefixes = list(prefix_ks)
+        if pcfg_sheet and not required_prefixes:
+            required_prefixes = list(CORR_PREFIXES)
+        done_stems = _load_done_stems(csv_path, required_prefixes)
+
+    if skip_duplicate_budgets:
+        dropped = duplicate_run_stems(strace_metrics_path)
+        before = len(work_items)
+        work_items = [
+            (n, lp, hn)
+            for n, lp, hn in work_items
+            if Path(n).stem not in dropped
+        ]
+        logger.info(
+            "Skipped %d traces whose NFE repeats a lower step budget",
+            before - len(work_items),
+        )
 
     if done_stems:
         work_items = [
@@ -752,7 +802,7 @@ def run_compare(
 
     if not work_items and not (resume and csv_path.is_file()):
         logger.warning("No NPZ traces matched filters")
-        write_metrics_csv(csv_path, [])
+        write_metrics_csv(csv_path, [], pcfg=pcfg_sheet)
         return {"rows": [], "csv_path": str(csv_path)}
 
     try:
@@ -802,12 +852,15 @@ def run_compare(
                     jt_exact_max=jt_exact_max,
                     jt_markov_order=jt_markov_order,
                     jt_large_set=jt_large_set,
-                    skip_jt=skip_jt,
                     strace_metrics_path=strace_metrics_path,
                     oracle_npz=cached,
                     require_cached_oracle=bool(oracle_index),
+                    prefix_steps=prefix_ks or None,
+                    metrics_only=metrics_only,
+                    skip_completion=skip_completion,
+                    skip_perplexity=skip_perplexity,
                 )
-                rows.append(result["row"])
+                rows.extend(result.get("rows") or [result["row"]])
                 perplexity = result.get("perplexity")
                 if perplexity is not None:
                     if hasattr(perplexity, "sample_oracle"):
@@ -826,7 +879,7 @@ def run_compare(
                     all_so_far = prior_kept + rows
                 else:
                     all_so_far = rows
-                write_metrics_csv(csv_path, all_so_far, append=False)
+                write_metrics_csv(csv_path, all_so_far, append=False, pcfg=pcfg_sheet)
                 logger.info(
                     "Flushed CSV after %s (%d run(s))",
                     name,
@@ -850,10 +903,10 @@ def run_compare(
             r for r in prior if Path(str(r.get("filename") or "")).stem in done_stems
         ]
         all_rows = prior_kept + rows
-        write_metrics_csv(csv_path, all_rows, append=False)
+        write_metrics_csv(csv_path, all_rows, append=False, pcfg=pcfg_sheet)
     else:
         all_rows = rows
-        write_metrics_csv(csv_path, all_rows, append=False)
+        write_metrics_csv(csv_path, all_rows, append=False, pcfg=pcfg_sheet)
 
     return {
         "rows": all_rows,

@@ -4,8 +4,11 @@
 Subcommands:
   file         Analyze one local NPZ (metrics CSV/JSON)
   inventory    List Hub NPZs (no download)
-  analyze      Download/analyze one Hub NPZ (or --local path)
   compare      Batch Hub/local compare → CSV
+  causal       Predictor–controller audit / swap / adaptive
+  prefix-sweep      Prefix M-hat, J-hat, and G-hat/f for each run
+  prefix-sweep-pcfg Same sweep on PCFG traces against oracle M
+  prefix-selection  Scheduler with the lowest prefix G-hat/f
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Sequence, Union
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -28,10 +31,13 @@ from schedulerlens.completion import (  # noqa: E402
 )
 from schedulerlens.metrics import (  # noqa: E402
     TaskMetrics,
+    CORR_PREFIXES,
     build_metrics_row,
     compute_task_metrics,
-    correlations_from_trends,
+    expand_prefix_metric_rows,
+    parse_prefix_steps,
     parse_run_stem,
+    prefix_pearsons,
     write_metrics_csv,
 )
 from schedulerlens.oracle import (  # noqa: E402
@@ -62,12 +68,15 @@ def run_schedulerlens(
     jt_exact_max: Optional[int] = None,
     jt_markov_order: Optional[int] = None,
     jt_large_set: Optional[int] = None,
-    skip_jt: bool = False,
     strace_metrics_path: Optional[Union[str, Path]] = None,
     oracle: Optional[Union[str, Path]] = None,
+    prefix_steps: Optional[Sequence[int]] = None,
+    metrics_only: bool = False,
+    csv_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compute metrics and write metrics.json / metrics.csv to output_dir."""
     from schedulerlens.oracle import (
+        load_oracle_artifacts,
         resolve_oracle_npz,
         task_perplexity_from_oracle_npz,
     )
@@ -77,6 +86,11 @@ def run_schedulerlens(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     meta = parse_run_stem(trace_path)
+    prefix_ks = parse_prefix_steps(prefix_steps)
+    if (meta.is_pcfg or force_pcfg) and not prefix_ks:
+        prefix_ks = CORR_PREFIXES
+    if metrics_only:
+        compute_perplexity = False
 
     cached_oracle = resolve_oracle_npz(oracle, meta.stem) if oracle else None
 
@@ -85,15 +99,18 @@ def run_schedulerlens(
         max_samples=max_samples,
         bucket_size=bucket_size,
         verbose=verbose,
+        prefix_steps=prefix_ks or None,
     )
 
-    steps_budget = int(meta.steps) if meta.steps is not None else int(metrics.n_steps)
-    completion = compute_completion_metrics(
-        trace_path,
-        model=meta.model,
-        steps_budget=steps_budget,
-        max_samples=max_samples,
-    )
+    completion = None
+    if not metrics_only:
+        steps_budget = int(meta.steps) if meta.steps is not None else int(metrics.n_steps)
+        completion = compute_completion_metrics(
+            trace_path,
+            model=meta.model,
+            steps_budget=steps_budget,
+            max_samples=max_samples,
+        )
 
     metrics_path = output_dir / "metrics.json"
     with open(metrics_path, "w", encoding="utf-8") as f:
@@ -111,7 +128,6 @@ def run_schedulerlens(
     result: Dict[str, Any] = {
         "M_hat": metrics.M_hat,
         "J_hat": metrics.J_hat,
-        "J_hat_early": metrics.J_hat_early,
         "G_hat": float(metrics.M_hat) + float(metrics.J_hat),
         "n_samples": metrics.n_samples,
         "n_steps": metrics.n_steps,
@@ -122,7 +138,7 @@ def run_schedulerlens(
     }
 
     ppl = None
-    correlations = None
+    prefix_pearson = None
     do_replay = (
         cached_oracle is None
         and replay_oracle
@@ -170,7 +186,6 @@ def run_schedulerlens(
                 jt_exact_max=jt_exact_max,
                 jt_markov_order=jt_markov_order,
                 jt_large_set=jt_large_set,
-                skip_jt=skip_jt,
             )
             tables = getattr(ppl, "oracle_tables", None) or {}
             if do_replay and (
@@ -183,6 +198,18 @@ def run_schedulerlens(
                     stem=meta.stem,
                 )
                 result["oracle_artifacts_path"] = str(oracle_path.resolve())
+                step_sample_idx = list(ppl.oracle_tables.get("step_sample_idx", []))
+                step = list(ppl.oracle_tables.get("step", []))
+                step_mt = list(ppl.oracle_tables.get("step_Mt", []))
+                step_jt = list(ppl.oracle_tables.get("step_Jt", []))
+                if len(step):
+                    prefix_pearson = prefix_pearsons(
+                        metrics,
+                        step_sample_idx=step_sample_idx,
+                        step=step,
+                        step_mt=step_mt,
+                        step_jt=step_jt,
+                    )
                 ppl.oracle_tables = {}
                 ppl.sample_oracle = []
 
@@ -192,26 +219,32 @@ def run_schedulerlens(
         result["perplexity"] = ppl
         result["perplexity_path"] = str(ppl_path.resolve())
 
-        use_oracle_trends = cached_oracle is not None or do_replay
-        if use_oracle_trends and ppl.mt_trend and ppl.jt_trend:
-            m_hat = metrics.proxies["M_hat_t"].trend
-            j_hat = metrics.proxies["J_hat_t"].trend
-            n = min(len(ppl.mt_trend), len(m_hat), len(ppl.jt_trend), len(j_hat))
-            correlations = correlations_from_trends(
-                mt_trend=ppl.mt_trend[:n],
-                m_hat_trend=m_hat[:n],
-                jt_trend=ppl.jt_trend[:n],
-                j_hat_trend=j_hat[:n],
-                sample_oracle_nll=ppl.sample_oracle_nll,
-                sample_model_nll=ppl.sample_model_nll,
-            )
-            result["correlations"] = correlations
+        if cached_oracle is not None:
+            arts = load_oracle_artifacts(cached_oracle)
+            step = arts.get("step", [])
+            if len(step):
+                prefix_pearson = prefix_pearsons(
+                    metrics,
+                    step_sample_idx=arts.get("step_sample_idx", []),
+                    step=step,
+                    step_mt=arts.get("step_Mt", []),
+                    step_jt=arts.get("step_Jt", []),
+                )
+        if prefix_pearson:
+            result["prefix_pearson"] = prefix_pearson
 
         with metrics_path.open("r", encoding="utf-8") as f:
             merged = json.load(f)
         merged["perplexity"] = ppl.to_dict()
-        if correlations is not None:
-            merged["correlations"] = correlations.to_dict()
+        if prefix_pearson:
+            merged["prefix_pearson"] = {
+                label: {
+                    "pearson_M": pair[0],
+                    "pearson_J": pair[1],
+                    "pearson_G": pair[2],
+                }
+                for label, pair in prefix_pearson.items()
+            }
         with metrics_path.open("w", encoding="utf-8") as f:
             json.dump(merged, f, indent=2)
 
@@ -219,14 +252,57 @@ def run_schedulerlens(
         trace_path,
         metrics=metrics,
         perplexity=ppl,
-        correlations=correlations,
+        prefix_pearson=prefix_pearson,
         meta=meta,
         completion=completion,
     )
     row = join_rows_with_strace([row], strace_path=strace_metrics_path)[0]
-    csv_path = write_metrics_csv(output_dir / "metrics.csv", [row])
+    rows = expand_prefix_metric_rows(row, metrics, prefix_pearson)
+    csv_path = write_metrics_csv(_placed_csv(output_dir, csv_name, "metrics.csv"), rows)
     result["csv_path"] = str(csv_path.resolve())
+    result["row"] = row
+    result["rows"] = rows
     return result
+
+
+def _placed_csv(output_dir: Union[str, Path], csv_name: Optional[str], default_name: str) -> Path:
+    """CSV path: an absolute ``--csv`` as given, otherwise ``output_dir / name``."""
+    if csv_name:
+        given = Path(csv_name)
+        if given.is_absolute():
+            given.parent.mkdir(parents=True, exist_ok=True)
+            return given
+        name = given
+    else:
+        name = Path(default_name)
+    path = Path(output_dir) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+_REPO = Path(__file__).resolve().parents[1]
+COMPARE_DEFAULT = _REPO / "outputs/schedulerlens/compare"
+SWEEP_DEFAULT = _REPO / "outputs/schedulerlens/prefix_sweep/prefix_sweep.csv"
+SWEEP_PCFG_DEFAULT = _REPO / "outputs/schedulerlens/prefix_sweep_pcfg/prefix_sweep_pcfg.csv"
+
+
+def _sweep_csv(args: argparse.Namespace, default: Path) -> Path:
+    directory = args.output_dir if args.output_dir is not None else default.parent
+    return _placed_csv(directory, args.csv, default.name)
+
+
+def _selection_csv(args: argparse.Namespace) -> Path:
+    runs = Path(args.runs) if args.runs is not None else SWEEP_DEFAULT
+    directory = args.output_dir if args.output_dir is not None else runs.parent
+    return _placed_csv(directory, args.csv, f"prefix_selection_tau_{args.tau}.csv")
+
+
+def _add_csv_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--csv",
+        default=None,
+        help="Output CSV filename or absolute path (default depends on the command)",
+    )
 
 
 def _add_repo_args(p: argparse.ArgumentParser) -> None:
@@ -240,12 +316,50 @@ def _add_repo_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--revision", default=None)
 
 
+def _add_exclude_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--exclude-scheduler",
+        default=None,
+        help="Comma-separated schedulers to skip (e.g. fhs,fdm)",
+    )
+    p.add_argument(
+        "--exclude-task",
+        default=None,
+        help="Comma-separated tasks to skip (e.g. arc_challenge_chat)",
+    )
+
+
 def _add_filter_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--pattern", default="*.npz")
     p.add_argument("--model", dest="model_filter", default=None)
     p.add_argument("--scheduler", dest="scheduler_filter", default=None)
     p.add_argument("--steps", dest="steps_filter", type=int, default=None)
     p.add_argument("--pcfg-only", action="store_true")
+    _add_exclude_args(p)
+
+
+def _add_prefix_steps_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--prefix-steps",
+        default=None,
+        metavar="Ks",
+        help=(
+            "Comma-separated step budgets (e.g. 8,16,32,64). Emits extra CSV rows "
+            "with cumulative M_hat/J_hat/G_hat over step < K (prefix_steps column)."
+        ),
+    )
+
+
+def _add_fast_metrics_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--metrics-only",
+        action="store_true",
+        help=(
+            "Fast path: proxy caps (+ prefix rows) and strace join only. "
+            "Skips completion diagnostics and the cheap non-oracle PPL re-stream. "
+            "--oracle / --replay-oracle still run when set."
+        ),
+    )
 
 
 def _add_oracle_args(p: argparse.ArgumentParser) -> None:
@@ -316,11 +430,6 @@ def _add_oracle_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     p.add_argument(
-        "--oracle-no-jt",
-        action="store_true",
-        help="Skip Jt entirely (Mt + commit NLL/PPL only). Much faster for EB/DUS.",
-    )
-    p.add_argument(
         "--strace-metrics",
         type=Path,
         default=None,
@@ -352,9 +461,12 @@ def build_argparser() -> argparse.ArgumentParser:
     p_file = sub.add_parser("file", help="Analyze one local NPZ")
     p_file.add_argument("trace_path", type=Path)
     p_file.add_argument("-o", "--output-dir", type=Path, required=True)
+    _add_csv_arg(p_file)
     p_file.add_argument("--bucket-size", type=int, default=None, metavar="N")
     p_file.add_argument("--no-perplexity", action="store_true")
     _add_oracle_args(p_file)
+    _add_prefix_steps_arg(p_file)
+    _add_fast_metrics_arg(p_file)
     p_file.add_argument("-q", "--quiet", action="store_true")
 
     # --- inventory ---
@@ -362,19 +474,9 @@ def build_argparser() -> argparse.ArgumentParser:
     _add_repo_args(p_inv)
     _add_filter_args(p_inv)
 
-    # --- analyze (one Hub/local) ---
-    p_one = sub.add_parser("analyze", help="Analyze one Hub NPZ (or --local path)")
-    p_one.add_argument("filename")
-    p_one.add_argument("-o", "--output-dir", type=Path, required=True)
-    p_one.add_argument("--local", action="store_true")
-    _add_repo_args(p_one)
-    _add_oracle_args(p_one)
-    p_one.add_argument("-q", "--quiet", action="store_true")
-
     # --- compare (batch) ---
     p_cmp = sub.add_parser(
         "compare",
-        aliases=["analyze-all"],
         help="Batch Hub/local compare → CSV",
     )
     src = p_cmp.add_mutually_exclusive_group(required=True)
@@ -387,13 +489,73 @@ def build_argparser() -> argparse.ArgumentParser:
         "({ns}/{stem_model}). Default: TRACE_HF_NAMESPACE / whoami",
     )
     p_cmp.add_argument("--revision", default=None)
-    p_cmp.add_argument("-o", "--output-dir", type=Path, required=True)
+    p_cmp.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        default=COMPARE_DEFAULT,
+        help="Output directory (default: outputs/schedulerlens/compare)",
+    )
+    _add_csv_arg(p_cmp)
     _add_filter_args(p_cmp)
     _add_oracle_args(p_cmp)
+    _add_prefix_steps_arg(p_cmp)
+    _add_fast_metrics_arg(p_cmp)
+    p_cmp.add_argument(
+        "--include-duplicate-budgets",
+        action="store_true",
+        help="Also analyze step budgets whose NFE repeats a lower budget (DUS, top-k)",
+    )
     p_cmp.add_argument("--limit", type=int, default=None)
-    p_cmp.add_argument("--resume", action="store_true")
+    p_cmp.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Skip a filename only when every requested prefix is already in the CSV (default). "
+            "A missing prefix redoes that file. --no-resume rewrites the sheet."
+        ),
+    )
     p_cmp.add_argument("--no-purge-cache", action="store_true")
     p_cmp.add_argument("-q", "--quiet", action="store_true")
+
+    p_causal = sub.add_parser(
+        "causal",
+        help="Predictor–controller causal experiments (audit, swap, adaptive)",
+    )
+    p_causal.add_argument("causal_argv", nargs=argparse.REMAINDER)
+
+    p_sweep = sub.add_parser(
+        "prefix-sweep",
+        help="Prefix M-hat, J-hat, and G-hat/f for each run",
+    )
+    _add_exclude_args(p_sweep)
+    p_sweep.add_argument("-o", "--output-dir", type=Path, default=None)
+    _add_csv_arg(p_sweep)
+    p_sweep.add_argument("-q", "--quiet", action="store_true")
+    p_sweep_pcfg = sub.add_parser(
+        "prefix-sweep-pcfg",
+        help="Same prefix sweep on PCFG traces against oracle M",
+    )
+    _add_exclude_args(p_sweep_pcfg)
+    p_sweep_pcfg.add_argument("-o", "--output-dir", type=Path, default=None)
+    _add_csv_arg(p_sweep_pcfg)
+    p_sweep_pcfg.add_argument("-q", "--quiet", action="store_true")
+    p_prefix = sub.add_parser(
+        "prefix-selection",
+        help="Accuracy of the scheduler with the lowest prefix G-hat/f",
+    )
+    _add_exclude_args(p_prefix)
+    p_prefix.add_argument("-o", "--output-dir", type=Path, default=None)
+    _add_csv_arg(p_prefix)
+    p_prefix.add_argument("-q", "--quiet", action="store_true")
+    p_prefix.add_argument(
+        "--runs",
+        type=Path,
+        default=None,
+        help="Prefix sweep CSV (default: outputs/schedulerlens/prefix_sweep/prefix_sweep.csv)",
+    )
+    p_prefix.add_argument("--tau", default="1.0", help="Entropy budget column to rank (default 1.0)")
 
     return parser
 
@@ -426,9 +588,11 @@ def _cmd_file(args: argparse.Namespace) -> int:
             jt_exact_max=args.oracle_jt_exact_max,
             jt_markov_order=args.oracle_jt_markov_order,
             jt_large_set=args.oracle_jt_large_set,
-            skip_jt=args.oracle_no_jt,
             strace_metrics_path=args.strace_metrics,
             oracle=args.oracle,
+            prefix_steps=parse_prefix_steps(args.prefix_steps) or None,
+            metrics_only=bool(args.metrics_only),
+            csv_name=args.csv,
         )
     except TraceProxyError as e:
         logger.error("Aborted (bad trace data): %s", e)
@@ -447,15 +611,12 @@ def _cmd_file(args: argparse.Namespace) -> int:
             f"oracle_ppl={ppl.oracle_ppl:.2f} "
             f"Mt={ppl.Mt_total:.4f} Jt={ppl.Jt_total:.4f}"
         )
-    if result.get("correlations") is not None:
-        c = result["correlations"]
-        print(
-            f"\nProxy fidelity: "
-            f"corr_M(full/early/mid/late)="
-            f"{c.corr_M_full:.3f}/{c.corr_M_early:.3f}/{c.corr_M_mid:.3f}/{c.corr_M_late:.3f}  "
-            f"corr_J="
-            f"{c.corr_J_full:.3f}/{c.corr_J_early:.3f}/{c.corr_J_mid:.3f}/{c.corr_J_late:.3f}"
-        )
+    if result.get("prefix_pearson"):
+        parts = [
+            f"{label} M {pair[0]:.3f} J {pair[1]:.3f} G {pair[2]:.3f}"
+            for label, pair in result["prefix_pearson"].items()
+        ]
+        print("\nSample Pearson (M̂, Mt), (Ĵ, Jt), (Ĝ, G): " + "  ".join(parts))
     print(f"\nOutput dir: {args.output_dir.resolve()}")
     print(f"  metrics.json : {result['metrics_path']}")
     print(f"  metrics.csv  : {result['csv_path']}")
@@ -476,93 +637,10 @@ def _cmd_inventory(args: argparse.Namespace) -> int:
         scheduler=args.scheduler_filter,
         steps=args.steps_filter,
         pcfg_only=args.pcfg_only,
+        exclude_scheduler=args.exclude_scheduler,
+        exclude_task=args.exclude_task,
     )
     print_inventory(inv)
-    return 0
-
-
-def _cmd_analyze(args: argparse.Namespace) -> int:
-    from schedulerlens.hub import (
-        _load_oracle_stack,
-        analyze_hub_file,
-        analyze_local_file,
-        hf_model_id_for_meta,
-    )
-    from schedulerlens.oracle import resolve_oracle_npz
-
-    out = Path(args.output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    meta = parse_run_stem(args.filename)
-    cached = resolve_oracle_npz(args.oracle, meta.stem) if args.oracle else None
-    do_replay = bool(args.replay_oracle and cached is None)
-
-    engine = vocab = model = device = None
-    if do_replay:
-        resolved = args.hf_model or (
-            None
-            if args.model_path is not None
-            else hf_model_id_for_meta(meta, namespace=args.namespace)
-        )
-        engine, vocab, model, device = _load_oracle_stack(
-            replay_oracle=True,
-            model_path=args.model_path,
-            hf_model=resolved,
-        )
-    try:
-        oracle_kw = dict(
-            oracle_workers=args.oracle_workers,
-            step_workers=args.oracle_step_workers,
-            forward_batch_size=args.oracle_forward_batch,
-            jt_exact_max=args.oracle_jt_exact_max,
-            jt_markov_order=args.oracle_jt_markov_order,
-            jt_large_set=args.oracle_jt_large_set,
-            skip_jt=args.oracle_no_jt,
-            strace_metrics_path=args.strace_metrics,
-            oracle_npz=cached,
-            require_cached_oracle=bool(args.oracle),
-        )
-        if args.local:
-            result = analyze_local_file(
-                args.filename,
-                repo=str(Path(args.filename).resolve().parent),
-                max_samples=args.max_samples,
-                replay_oracle=do_replay,
-                force_pcfg=args.pcfg,
-                model=model,
-                device=device,
-                engine=engine,
-                vocab=vocab,
-                verbose=not args.quiet,
-                **oracle_kw,
-            )
-        else:
-            result = analyze_hub_file(
-                args.filename,
-                repo_id=args.repo_id,
-                namespace=args.namespace,
-                revision=args.revision,
-                max_samples=args.max_samples,
-                replay_oracle=do_replay,
-                force_pcfg=args.pcfg,
-                model=model,
-                device=device,
-                engine=engine,
-                vocab=vocab,
-                verbose=not args.quiet,
-                **oracle_kw,
-            )
-    except TraceProxyError as e:
-        logger.error("%s", e)
-        return 1
-
-    csv_path = write_metrics_csv(out / "metrics.csv", [result["row"]])
-    with (out / "metrics.json").open("w", encoding="utf-8") as f:
-        json.dump(result["row"], f, indent=2)
-    print(f"CSV: {csv_path}")
-    print(
-        f"M_hat={result['row'].get('M_hat')}  J_hat={result['row'].get('J_hat')}  "
-        f"Mt={result['row'].get('Mt_total')}  Jt={result['row'].get('Jt_total')}"
-    )
     return 0
 
 
@@ -581,6 +659,8 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             scheduler_filter=args.scheduler_filter,
             steps_filter=args.steps_filter,
             pcfg_only=args.pcfg_only,
+            exclude_scheduler=args.exclude_scheduler,
+            exclude_task=args.exclude_task,
             force_pcfg=args.pcfg,
             replay_oracle=args.replay_oracle,
             model_path=args.model_path,
@@ -596,9 +676,12 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             jt_exact_max=args.oracle_jt_exact_max,
             jt_markov_order=args.oracle_jt_markov_order,
             jt_large_set=args.oracle_jt_large_set,
-            skip_jt=args.oracle_no_jt,
             strace_metrics_path=args.strace_metrics,
+            skip_duplicate_budgets=not args.include_duplicate_budgets,
             oracle_dir=args.oracle,
+            prefix_steps=parse_prefix_steps(args.prefix_steps) or None,
+            metrics_only=bool(args.metrics_only),
+            csv_name=args.csv,
         )
     except TraceProxyError as e:
         logger.error("%s", e)
@@ -626,10 +709,41 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_file(args)
     if cmd == "inventory":
         return _cmd_inventory(args)
-    if cmd == "analyze":
-        return _cmd_analyze(args)
-    if cmd in ("compare", "analyze-all"):
+    if cmd == "compare":
         return _cmd_compare(args)
+    if cmd == "causal":
+        from schedulerlens.causal.__main__ import main as causal_main
+
+        return causal_main(args.causal_argv)
+    if cmd == "prefix-sweep":
+        from schedulerlens.prefix_sweep import main as prefix_sweep_main
+
+        return prefix_sweep_main(
+            exclude_task=args.exclude_task,
+            exclude_scheduler=args.exclude_scheduler,
+            quiet=args.quiet,
+            output=_sweep_csv(args, SWEEP_DEFAULT),
+        )
+    if cmd == "prefix-sweep-pcfg":
+        from schedulerlens.prefix_sweep import main_pcfg as prefix_sweep_pcfg_main
+
+        return prefix_sweep_pcfg_main(
+            exclude_task=args.exclude_task,
+            exclude_scheduler=args.exclude_scheduler,
+            quiet=args.quiet,
+            output=_sweep_csv(args, SWEEP_PCFG_DEFAULT),
+        )
+    if cmd == "prefix-selection":
+        from schedulerlens.prefix_selection import main as prefix_selection_main
+
+        return prefix_selection_main(
+            args.runs,
+            args.tau,
+            exclude_task=args.exclude_task,
+            exclude_scheduler=args.exclude_scheduler,
+            quiet=args.quiet,
+            output=_selection_csv(args),
+        )
     logger.error("Unknown command: %s", cmd)
     return 1
 

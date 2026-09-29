@@ -1,6 +1,4 @@
 """Completion diagnostics + strace eval join for SchedulerLens CSV rows.
-
-Proxy caps (hard-gated M̂ / star Ĵ) live in ``proxies.py``.
 This module adds commit / EOS / mask rates, run-level conf/ent means,
 and accuracy / NFE from ``fetch_evals/strace_metrics.csv``.
 """
@@ -279,6 +277,41 @@ def load_strace_metrics(
                 "metric_key": row.get("metric_key"),
             }
     return by_name
+
+
+def duplicate_run_stems(
+    path: Optional[Union[str, Path]] = None,
+) -> set[str]:
+    """Stems that repeat another run's NFE for the same model, scheduler, and task.
+
+    A repeated NFE means the higher step budget did not change the computation
+    (DUS at 256 and 512, top-k at 512). The kept stem is the requested budget
+    closest to that NFE. Runs whose NFE actually moves stay in the set.
+    """
+    groups: Dict[tuple, list] = {}
+    for name, row in load_strace_metrics(path).items():
+        nfe = row["avg_nfe_per_sample"]
+        steps = _safe_float(row.get("steps"))
+        if nfe != nfe or steps != steps:
+            continue
+        key = (row.get("model"), row.get("mode"), row.get("task"))
+        groups.setdefault(key, []).append({"name": name, "nfe": nfe, "steps": steps})
+    dropped: set[str] = set()
+    for rows in groups.values():
+        rows.sort(key=lambda item: (item["nfe"], item["steps"]))
+        clusters = [[rows[0]]]
+        for item in rows[1:]:
+            if abs(item["nfe"] - clusters[-1][0]["nfe"]) <= 1.0:
+                clusters[-1].append(item)
+            else:
+                clusters.append([item])
+        for cluster in clusters:
+            if len(cluster) == 1:
+                continue
+            nfe = cluster[0]["nfe"]
+            keep = min(cluster, key=lambda item: (abs(item["steps"] - nfe), item["steps"]))
+            dropped.update(item["name"] for item in cluster if item["name"] != keep["name"])
+    return dropped
 
 
 def _stem_from_row(row: Mapping[str, Any]) -> str:

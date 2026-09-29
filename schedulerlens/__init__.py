@@ -1,4 +1,4 @@
-"""SchedulerLens: interpretability proxies for masked diffusion schedulers."""
+"""SchedulerLens: proxies for masked diffusion schedulers."""
 
 from .proxies import (
     PROXY_ATTRS,
@@ -10,9 +10,7 @@ from .proxies import (
 )
 from .metrics import (
     CSV_COLUMNS,
-    BlockCorrelations,
     RunMeta,
-    compute_oracle_proxy_correlations,
     parse_run_stem,
     write_metrics_csv,
 )
@@ -27,12 +25,10 @@ from .oracle import (
 __all__ = [
     "PROXY_ATTRS",
     "CSV_COLUMNS",
-    "BlockCorrelations",
     "RunMeta",
     "TraceProxyError",
     "SampleProxies",
     "StepProxies",
-    "compute_oracle_proxy_correlations",
     "compute_sample_proxies",
     "validate_trace_for_metrics",
     "parse_run_stem",
