@@ -33,6 +33,11 @@ num_fewshot: null  # null = use per-task default (humaneval 0, gsm8k 4, mbpp 3, 
 # Sampling (harness model_args). null gen_length/steps = task defaults (see sampling_defaults.py).
 gen_length: null
 steps: null
+# Predictor–controller causal runs (schedulerlens/causal). Harness `model` is the predictor.
+# mode=pc_swap | pc_adaptive, controller=llada1_5, pc_phi=eb|bd|...
+controller: null
+pc_phi: eb
+device_map: share
 # Scheduler block size; null = mode default (block_diffusion 32, fdm 64, dus 16, else gen_length). Not used for fhs.
 block_length: null
 

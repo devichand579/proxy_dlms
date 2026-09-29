@@ -60,6 +60,8 @@ MODE=""
 STRATEGY=""
 TASK_NAME=""
 MODEL=""
+CONTROLLER=""
+PC_PHI=""
 COMPILE_MODEL=""
 INTERVENTION_MODE=""
 INTERVENTION_STEPS=""
@@ -100,6 +102,14 @@ while [[ $# -gt 0 ]]; do
         # See header: must be llada | llada1_5 | dream (directory name under ./models/)
         --model)
             MODEL="$2"
+            shift 2
+            ;;
+        --controller)
+            CONTROLLER="$2"
+            shift 2
+            ;;
+        --pc_phi)
+            PC_PHI="$2"
             shift 2
             ;;
         --compile_model)
@@ -458,8 +468,18 @@ run_eval_for_task() {
         COMPILE_MODEL="False"
     fi
 
-    # Generate wandb/trace/checkpoint suffix: MODEL_TASK_MODE[_intv_…][_s{steps}]; explicit --run_id wins as-is
-    BASE_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}"
+    # Swap: {predictor}_{controller}_{scheduler}_{task}_s{steps}. The harness model is the predictor.
+    if [[ "$MODE" == "pc_swap" ]]; then
+        export PC_PHI="${PC_PHI:-eb}"
+        SWAP_CONTROLLER="${CONTROLLER:-$MODEL}"
+        if [[ -n "$CONTROLLER" ]]; then
+            export PC_CONTROLLER="$CONTROLLER"
+        fi
+        BASE_SUFFIX="${MODEL}_${SWAP_CONTROLLER}_${PC_PHI}_${TASK_NAME}"
+    else
+        # MODEL_TASK_MODE[_intv_…][_s{steps}]; explicit --run_id wins as-is
+        BASE_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}"
+    fi
     if [[ -n "$INTERVENTION_MODE" ]]; then
         INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
         INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
@@ -515,6 +535,10 @@ run_eval_for_task() {
     echo "  Mode: $MODE"
     echo "  Task Name: $TASK_NAME"
     echo "  Model: $MODEL"
+    if [[ "$MODE" == "pc_swap" ]]; then
+        echo "  Controller: ${SWAP_CONTROLLER}"
+        echo "  Scheduler: ${PC_PHI}"
+    fi
     echo "  Model Path: $MODEL_PATH"
     echo "  Gen Length: $GEN_LENGTH"
     echo "  Steps: $STEPS"

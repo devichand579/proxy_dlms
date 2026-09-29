@@ -1,4 +1,4 @@
-"""CLI: python -m schedulerlens.causal audit|swap|adaptive"""
+"""CLI: python -m schedulerlens.run causal"""
 
 from __future__ import annotations
 
@@ -170,6 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv or argv[0] not in ("audit", "swap", "adaptive"):
+        argv = ["audit", *argv]
     args = build_parser().parse_args(argv)
     if args.command == "audit":
         return _cmd_audit(args)

@@ -17,6 +17,13 @@ from load_model import (
     prepend_bos_for_dream,
 )
 from schedulers.generate import generate
+import schedulerlens.causal.generate as causal_generate
+from schedulerlens.causal.choice_log import (
+    adaptive_choice_paths,
+    append_adaptive_sample,
+    group_active_choices,
+    write_adaptive_summary,
+)
 from traces.trace_wrapper import _task_trace_list_ctx
 from traces.hf_trace_upload import maybe_upload_eval_trace_file
 
@@ -763,11 +770,28 @@ class LLaDAEvalHarness(LM):
                             if stop in gen_text:
                                 chunk_gen_texts[i] = gen_text.split(stop)[0]
 
+                    choice_groups = {}
+                    choice_jsonl = choice_csv = None
+                    if self.mode == "pc_adaptive":
+                        choice_groups = group_active_choices(causal_generate.last_step_log)
+                        choice_jsonl, choice_csv = adaptive_choice_paths(
+                            self.output_dir,
+                            self.trace_name,
+                            task=self.task_name,
+                            steps=self.steps,
+                        )
                     for j, orig_idx in enumerate(to_compute_indices):
                         all_gen_texts[orig_idx] = chunk_gen_texts[j]
+                        req = to_compute_requests[j]
+                        if choice_jsonl is not None:
+                            append_adaptive_sample(
+                                choice_jsonl,
+                                task=getattr(req, "task_name", self.task_name) or self.task_name,
+                                doc_id=getattr(req, "doc_id", orig_idx),
+                                choices=choice_groups.get(j, []),
+                            )
                         # Resumable: append newly computed sample to checkpoint
                         if checkpoint_writer is not None:
-                            req = to_compute_requests[j]
                             try:
                                 rec = {
                                     "doc_id": getattr(req, "doc_id", orig_idx),
@@ -779,6 +803,14 @@ class LLaDAEvalHarness(LM):
                                 checkpoint_writer.flush()
                             except Exception as e:
                                 self.logger.warning(f"Failed to write checkpoint sample: {e}")
+                    if choice_csv is not None and choice_jsonl is not None:
+                        try:
+                            n_choice = write_adaptive_summary(choice_jsonl, choice_csv)
+                            self.logger.info(
+                                f"Adaptive choice summary: {n_choice} sample(s) -> {choice_csv}"
+                            )
+                        except Exception as e:
+                            self.logger.warning(f"Failed to write adaptive choice summary: {e}")
 
                     n_batch = len(to_compute)
                     computed_in_chunk = n_batch

@@ -17,6 +17,7 @@ from schedulers.fhs import generate_fhs
 from schedulers.eb_sampler import generate_EB
 from schedulers.dus import generate_dus
 from schedulers.fdm import generate_fdm
+from schedulers.proxy_adaptive import generate_proxy
 
 
 @torch.no_grad()
@@ -71,7 +72,30 @@ def generate(
         confidence_eos_eot_inf=b44,
     )
 
-    if mode == "pure_diffusion":
+    if mode in ("pc_swap", "pc_adaptive"):
+        gen, steps_taken, blocks = generate_proxy(
+            model,
+            input_ids,
+            attention_mask,
+            steps=steps,
+            gen_length=gen_length,
+            block_length=block_length,
+            mode=mode,
+            top_k=top_k,
+            mask_id=mask_id,
+            eos_id=eos_id,
+            eot_id=eot_id,
+            logits_eos_inf=b44,
+            confidence_eos_eot_inf=b44,
+            use_eos_harness=use_eos_harness,
+            model_path=model_path,
+            trace_name=trace_name,
+            upload_to_wandb=upload_to_wandb,
+            intervention_mode=intervention_mode,
+            intervention_steps=intervention_steps,
+            intervention_k=intervention_k,
+        )
+    elif mode == "pure_diffusion":
         assert block_length <= gen_length, "Block length must be less than or equal to gen_length"
         assert strategy in ("confidence", "random"), "strategy must be confidence or random"
         gen, steps_taken, blocks = generate_llada(

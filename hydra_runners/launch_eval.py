@@ -17,8 +17,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from repo_env_defaults import apply_offline_env, apply_repo_env_defaults, resolve_eval_device
 from sampling_defaults import resolve_gen_length_steps
-from cst.eval_data.lmeval_task import eval_num_fewshot as get_num_fewshot
-
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
@@ -32,6 +30,8 @@ MODE_MAP = {
     "top_k_c": ("top_k", "confidence"),
     "top_k_m": ("top_k", "top_margin"),
     "dus": ("dus", "confidence"),
+    "pc_swap": ("pc_swap", "confidence"),
+    "pc_adaptive": ("pc_adaptive", "confidence"),
 }
 
 
@@ -56,6 +56,17 @@ def _intervention_suffix(intervention_mode, intervention_steps, intervention_k: 
     return f"_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}"
 
 
+def _swap_output_basename(
+    predictor: str,
+    controller: str,
+    phi: str,
+    task_name: str,
+    steps: int,
+) -> str:
+    """``{predictor}_{controller}_{scheduler}_{task}_s{steps}``."""
+    return f"{predictor}_{controller}_{phi}_{task_name}_s{int(steps)}"
+
+
 def _eval_output_basename(
     model: str,
     task_name: str,
@@ -75,6 +86,22 @@ def _eval_output_basename(
     if include_steps:
         base = f"{base}_s{int(steps)}"
     return base
+
+
+def get_num_fewshot(task_name: str) -> int:
+    if "humaneval" in task_name:
+        return 0
+    if "gsm8k" in task_name:
+        return 4
+    if "math500" in task_name or "minerva_math500" in task_name:
+        return 4
+    if "mbpp3" in task_name:
+        return 3
+    if "mbpp" in task_name:
+        return 3
+    if "arc_challenge_chat" in task_name:
+        return 5
+    return 0
 
 
 def _apply_trace_hf_env(env: dict[str, str], cfg: dict, *, offline: bool = False) -> None:
@@ -175,17 +202,28 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     run_id = cfg.get("run_id") or None
 
     run_id_explicit = bool(resumable and run_id)
-    base_suffix = _eval_output_basename(
-        model,
-        task_name,
-        mode,
-        strategy,
-        steps=steps,
-        intervention_mode=intervention_mode,
-        intervention_steps=intervention_steps,
-        intervention_k=intervention_k,
-        include_steps=True,
-    )
+    if mode == "pc_swap":
+        swap_controller = str(cfg.get("controller") or model)
+        swap_phi = str(cfg.get("pc_phi") or "eb")
+        base_suffix = _swap_output_basename(
+            model, swap_controller, swap_phi, task_name, steps
+        )
+        if intervention_mode:
+            base_suffix += _intervention_suffix(
+                intervention_mode, intervention_steps, intervention_k
+            )
+    else:
+        base_suffix = _eval_output_basename(
+            model,
+            task_name,
+            mode,
+            strategy,
+            steps=steps,
+            intervention_mode=intervention_mode,
+            intervention_steps=intervention_steps,
+            intervention_k=intervention_k,
+            include_steps=True,
+        )
     if run_id_explicit:
         output_suffix = str(run_id)
     elif resumable:
@@ -221,6 +259,12 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     env.setdefault("LMEVAL_LOG_LEVEL", "INFO")
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     env["TRACING_ENABLED"] = "TRUE" if tracing_enabled else "FALSE"
+    if cfg.get("controller"):
+        env["PC_CONTROLLER"] = str(cfg.get("controller"))
+    if cfg.get("pc_phi"):
+        env["PC_PHI"] = str(cfg.get("pc_phi"))
+    if cfg.get("device_map"):
+        env["PC_DEVICE_MAP"] = str(cfg.get("device_map"))
     if offline:
         apply_offline_env(env)
     _apply_trace_hf_env(env, cfg, offline=offline)
