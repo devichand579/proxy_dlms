@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import requests
+from azure.core.pipeline.transport import RequestsTransport
+from azure.core.pipeline.transport._bigger_block_size_http_adapters import BiggerBlockSizeHTTPAdapter
 from azure.storage.blob import BlobServiceClient
+from urllib3.util.retry import Retry
 from azure.core.exceptions import (
     ResourceNotFoundError,
     HttpResponseError,
@@ -14,7 +19,6 @@ from azure.core.exceptions import (
     ServiceResponseError,
     AzureError,
 )
-import time
 
 from cst.hf_hiddens.manifest import MANIFEST_VERSION, ChunkRecord, HiddenManifest
 from cst.azure_hiddens.naming import chunk_blob_path, chunks_dir_blob, manifest_blob_path
@@ -27,6 +31,24 @@ class HubStorageFullError(RuntimeError):
     """Parallel to HF HubStorageFullError. Azure equivalent might be OutOfRange or quota errors."""
 
 
+_POOL_SIZE = 32
+
+
+def _pooled_transport() -> RequestsTransport:
+    # azure-core hardcodes its HTTPAdapter (pool_maxsize=10) and has no kwarg to change it,
+    # so uploads/downloads with max_concurrency=16 thrash the pool ("Connection pool is
+    # full, discarding connection"). Supply our own session with a larger pool.
+    session = requests.Session()
+    adapter = BiggerBlockSizeHTTPAdapter(
+        pool_connections=_POOL_SIZE,
+        pool_maxsize=_POOL_SIZE,
+        max_retries=Retry(total=False, redirect=False, raise_on_status=False),
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return RequestsTransport(session=session)
+
+
 def _get_client(token: str, max_block_size: int = 100 * 1024 * 1024) -> BlobServiceClient:
     return BlobServiceClient.from_connection_string(
         token,
@@ -36,6 +58,7 @@ def _get_client(token: str, max_block_size: int = 100 * 1024 * 1024) -> BlobServ
         retry_read=10,
         retry_status=10,
         retry_backoff_factor=2,
+        transport=_pooled_transport(),
     )
 
 
@@ -56,7 +79,7 @@ def download_blob_file(
     local_path: str | Path,
     token: str,
     *,
-    max_concurrency: int = 4,
+    max_concurrency: int = 16,
     max_retries: int = 5,
 ) -> Path:
     local_path = Path(local_path)
@@ -87,7 +110,7 @@ def upload_file(
     blob_path: str,
     token: str,
     *,
-    max_concurrency: int = 4,
+    max_concurrency: int = 16,
     max_retries: int = 5,
 ) -> str:
     local_path = Path(local_path)

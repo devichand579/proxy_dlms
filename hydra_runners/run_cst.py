@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import sys
+import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
@@ -176,7 +177,7 @@ def _setup_cst_file_logging(cfg: DictConfig) -> Path:
     if not has_console:
         sh = logging.StreamHandler()
         sh.setLevel(logging.INFO)
-        sh.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        sh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         root.addHandler(sh)
     return log_file
 
@@ -1076,6 +1077,14 @@ def _store_hiddens(
             b_t = int(meta.get("cst_train_tokens", b_q + b_g))
             b_n = int(meta.get("batch_size", meta.get("n_samples", len(batch_rows))))
             nbytes = Path(out_path).stat().st_size
+            logger.info(
+                "batch %d / %d: generation finished (gen_time=%.2fs, %.3f GB); starting upload",
+                bi + 1,
+                nbat,
+                float(meta.get("gen_time", 0.0)),
+                nbytes / 1e9,
+            )
+            upload_start = time.monotonic()
             try:
                 rec = backend_upload_hidden_chunk(
                     repo_id,
@@ -1127,10 +1136,11 @@ def _store_hiddens(
             sampling_state["cst_train_tokens"] = int(total_cst_train_tokens)
             sampling_state["cst_train_samples"] = int(total_samples)
             logger.info(
-                "uploaded %s (%.3f GB, gen_time=%.2fs, cst_tokens=%d question=%d gen=%d, total_cst_tokens=%d)",
+                "uploaded %s (%.3f GB, gen_time=%.2fs, upload_time=%.2fs, cst_tokens=%d question=%d gen=%d, total_cst_tokens=%d)",
                 rec.filename,
                 nbytes / 1e9,
                 float(meta.get("gen_time", 0.0)),
+                time.monotonic() - upload_start,
                 b_t,
                 b_q,
                 b_g,

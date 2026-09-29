@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=cst_store
 #SBATCH --partition=dgx_all
-#SBATCH --qos=gpu4
+#SBATCH --qos=gpu2
 #SBATCH --nodes=1
-#SBATCH --ntasks=4             # Default 4 GPUs, change as needed
-#SBATCH --gres=gpu:4           # Must match ntasks
+#SBATCH --ntasks=2             # 2 GPUs
+#SBATCH --gres=gpu:2           # Must match ntasks
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=200G
-#SBATCH --time=24:00:00
+#SBATCH --mem=350G
+#SBATCH --time=3-00:00:00
 
 # This wrapper uses srun to launch multiple independent instances of cst.sh.
 # Slurm will automatically set SLURM_NTASKS and SLURM_PROCID for each child,
@@ -30,4 +30,4 @@ export NO_PROXY="$no_proxy"
 echo "Checking internet connectivity from $(hostname)..."
 curl -I -s --connect-timeout 5 https://huggingface.co > /dev/null && echo "Internet OK!" || { echo "Proxy unreachable!"; exit 1; }
 
-srun --label --gpus-per-task=1 --kill-on-bad-exit=1 ./scripts/cst.sh --mode store store.auto_batch_size=false store.inference_batch_size=64 "$@"
+srun --label --gpus-per-task=1 ./scripts/cst.sh --mode store store.auto_batch_size=false store.inference_batch_size=64 "$@"
