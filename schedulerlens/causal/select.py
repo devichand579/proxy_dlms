@@ -26,7 +26,8 @@ class SelectError(ValueError):
 
 
 def default_block_length(phi: str, gen_length: int, block_length: Optional[int]) -> int:
-    if block_length is not None and int(block_length) > 0:
+    # A block that covers the whole canvas is the launcher default, not an override.
+    if block_length is not None and 0 < int(block_length) < int(gen_length):
         return int(block_length)
     fallback = _BLOCK_DEFAULT.get(phi)
     if fallback is None or fallback > gen_length:
