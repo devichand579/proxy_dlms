@@ -244,7 +244,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Run: --slurm (srun for sbatch)  --resumable [--run_id]  (checkpoint under outputs/…)"
     echo "  Multi-GPU: --parallel_config <yaml> per-GPU settings (launch_eval parallel_runs_file=); see docs/evaluation.md"
     echo "  Offline: --offline  |  GPU: --device <0|1|cuda|cuda:0|cpu>"
-    echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm, fhs, top_k_c (top_k+confidence), top_k_m (top_k+top_margin), dus"
+    echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm, fhs, top_k_c (top_k+confidence), top_k_m (top_k+top_margin), dus, pc_adaptive, pc_swap"
     echo "  Few-shot defaults: humaneval/arc 0, gsm8k/math500 4, mbpp 3, arc_challenge_chat 5; block_length defaults: bd 32, fdm 64, dus 16, else gen_length"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True"
@@ -287,8 +287,16 @@ case "$MODE" in
         MODE="dus"
         STRATEGY="confidence"
         ;;
+    pc_adaptive)
+        MODE="pc_adaptive"
+        STRATEGY="confidence"
+        ;;
+    pc_swap)
+        MODE="pc_swap"
+        STRATEGY="confidence"
+        ;;
     *)
-        echo "Warning: Unknown mode '$MODE'. Using as-is. Valid modes: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus (and their full names)"
+        echo "Warning: Unknown mode '$MODE'. Using as-is. Valid modes: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, pc_adaptive, pc_swap (and their full names)"
         ;;
 esac
 
@@ -468,8 +476,10 @@ run_eval_for_task() {
         COMPILE_MODEL="False"
     fi
 
-    # Swap: {predictor}_{controller}_{scheduler}_{task}_s{steps}. The harness model is the predictor.
-    if [[ "$MODE" == "pc_swap" ]]; then
+    # Adaptive always uses both checkpoints, so the run name has no harness model.
+    if [[ "$MODE" == "pc_adaptive" ]]; then
+        BASE_SUFFIX="pc_adaptive_${TASK_NAME}"
+    elif [[ "$MODE" == "pc_swap" ]]; then
         export PC_PHI="${PC_PHI:-eb}"
         SWAP_CONTROLLER="${CONTROLLER:-$MODEL}"
         if [[ -n "$CONTROLLER" ]]; then

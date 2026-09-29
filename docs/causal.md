@@ -60,6 +60,6 @@ python hydra_runners/launch_eval.py \
   task_name=gsm8k steps=256 device_map=split
 ```
 
-`model` is the harness checkpoint and is reused. The other of LLaDA and LLaDA-1.5 is loaded beside it. `device_map=split` places that other checkpoint on `cuda:1` when two GPUs are visible. `share` keeps both on the harness GPU. Swap still uses `device_map=split` to place the controller on `cuda:1`.
+`model` is the harness checkpoint and is reused. The other of LLaDA and LLaDA-1.5 is loaded beside it. The W&B run and the checkpoint directory are `pc_adaptive_{task}_s{steps}`, for example `pc_adaptive_gsm8k_s128`. `device_map=split` places that other checkpoint on `cuda:1` when two GPUs are visible. `share` keeps both on the harness GPU. Swap still uses `device_map=split` to place the controller on `cuda:1`.
 
 Each finished sample appends its per-step scheduler, predictor, and controller to `{task}_s{steps}_adaptive_choices.jsonl` in the run output directory. `{task}_s{steps}_adaptive_choices.csv` is rewritten from that log: one row per step, over the samples that still had masked tokens at that step. `scheduler_1` / `scheduler_2` / `scheduler_3` are the three most common winning schedulers. `predictor` and `controller` are the most common roles. Shares are that count divided by `n_samples` at the step. A later line for the same sample replaces the earlier one, so a resumed run does not double-count.

@@ -56,6 +56,11 @@ def _intervention_suffix(intervention_mode, intervention_steps, intervention_k: 
     return f"_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}"
 
 
+def _adaptive_output_basename(task_name: str, steps: int) -> str:
+    """``pc_adaptive_{task}_s{steps}``. Both checkpoints run, so no harness model."""
+    return f"pc_adaptive_{task_name}_s{int(steps)}"
+
+
 def _swap_output_basename(
     predictor: str,
     controller: str,
@@ -202,7 +207,13 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     run_id = cfg.get("run_id") or None
 
     run_id_explicit = bool(resumable and run_id)
-    if mode == "pc_swap":
+    if mode == "pc_adaptive":
+        base_suffix = _adaptive_output_basename(task_name, steps)
+        if intervention_mode:
+            base_suffix += _intervention_suffix(
+                intervention_mode, intervention_steps, intervention_k
+            )
+    elif mode == "pc_swap":
         swap_controller = str(cfg.get("controller") or model)
         swap_phi = str(cfg.get("pc_phi") or "eb")
         base_suffix = _swap_output_basename(
