@@ -47,14 +47,16 @@ def group_active_choices(rows: list[dict[str, Any]]) -> dict[int, list[dict[str,
     for row in rows:
         if not row.get("active"):
             continue
-        grouped[int(row["batch"])].append(
-            {
-                "step": int(row["step"]),
-                "scheduler": row["rule"],
-                "predictor": row["pred_model"],
-                "controller": row["ctrl_model"],
-            }
-        )
+        choice = {
+            "step": int(row["step"]),
+            "scheduler": row["rule"],
+            "predictor": row["pred_model"],
+            "controller": row["ctrl_model"],
+        }
+        for key in ("g_hat", "m_hat", "m_hat_other", "j_hat", "j_hat_other"):
+            if key in row:
+                choice[key] = float(row[key])
+        grouped[int(row["batch"])].append(choice)
     for choices in grouped.values():
         choices.sort(key=lambda item: item["step"])
     return grouped
@@ -102,7 +104,10 @@ def write_adaptive_summary(jsonl_path: Path, csv_path: Path) -> int:
     schedulers: dict[int, Counter] = defaultdict(Counter)
     predictors: dict[int, Counter] = defaultdict(Counter)
     controllers: dict[int, Counter] = defaultdict(Counter)
+    score_sums: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    score_ns: dict[int, Counter] = defaultdict(Counter)
     n_at_step: Counter = Counter()
+    score_keys = ("g_hat", "m_hat", "m_hat_other", "j_hat", "j_hat_other")
     for record in latest.values():
         for choice in record.get("choices") or []:
             step = int(choice["step"])
@@ -110,6 +115,10 @@ def write_adaptive_summary(jsonl_path: Path, csv_path: Path) -> int:
             schedulers[step][str(choice["scheduler"])] += 1
             predictors[step][str(choice["predictor"])] += 1
             controllers[step][str(choice["controller"])] += 1
+            for key in score_keys:
+                if key in choice:
+                    score_sums[step][key] += float(choice[key])
+                    score_ns[step][key] += 1
 
     fieldnames = ["step", "n_samples"]
     for rank in (1, 2, 3):
@@ -119,6 +128,7 @@ def write_adaptive_summary(jsonl_path: Path, csv_path: Path) -> int:
     fieldnames.extend(
         ["predictor", "predictor_n", "predictor_share", "controller", "controller_n", "controller_share"]
     )
+    fieldnames.extend(["g_hat", "m_hat", "m_hat_other", "j_hat", "j_hat_other"])
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -145,5 +155,11 @@ def write_adaptive_summary(jsonl_path: Path, csv_path: Path) -> int:
             row["controller"] = ctrl_name
             row["controller_n"] = ctrl_n
             row["controller_share"] = f"{_share(ctrl_n, n_samples):.4f}"
+            for key in score_keys:
+                n_scored = int(score_ns[step][key])
+                if n_scored:
+                    row[key] = f"{score_sums[step][key] / n_scored:.6f}"
+                else:
+                    row[key] = ""
             writer.writerow(row)
     return len(latest)

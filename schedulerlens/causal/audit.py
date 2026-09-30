@@ -12,7 +12,8 @@ import numpy as np
 import torch
 
 from schedulerlens.causal.metrics import StepDelta, step_deltas
-from schedulerlens.causal.scores import bundle_for_select, bundle_from_logits
+from schedulerlens.metrics import CORR_PREFIXES as DEFAULT_PREFIX_STEPS
+from schedulerlens.causal.scores import ScoreBundle, bundle_for_select, bundle_from_logits
 from schedulerlens.causal.select import SUPPORTED_PHI, select_gen
 from schedulerlens.causal.state import reconstruct_state
 from schedulerlens.metrics import parse_run_stem
@@ -26,6 +27,7 @@ CSV_COLUMNS = [
     "scheduler",
     "task",
     "steps",
+    "prefix_steps",
     "predictor",
     "controller",
     "n_samples",
@@ -59,35 +61,61 @@ def _split_even(items: list, n: int) -> list[list]:
     return chunks
 
 
-def _forward_batch(model, states: list[np.ndarray]) -> torch.Tensor:
+def _forward_scores(
+    model,
+    states: list[np.ndarray],
+    *,
+    drop_eos: bool,
+    eos_id: int,
+    eot_id: Optional[int],
+) -> tuple[list[ScoreBundle], list[ScoreBundle]]:
+    """Forward one replica and reduce logits to scores before they pile up on CPU."""
     device = next(model.parameters()).device
     if device.type == "cuda":
         torch.cuda.set_device(device)
     stacked = torch.tensor(np.stack(states, axis=0), dtype=torch.long, device=device)
     with torch.inference_mode():
         logits = model(stacked).logits
-    return logits.detach().to("cpu")
+        raw = bundle_from_logits(logits)
+        select = (
+            bundle_for_select(logits, drop_eos=True, eos_id=eos_id, eot_id=eot_id)
+            if drop_eos
+            else raw
+        )
+    del logits, stacked
+    return raw, select
 
 
-def _parallel_logits(groups: list[tuple[Any, list[np.ndarray]]]) -> list[torch.Tensor]:
-    """Run each ``(model, states)`` forward. Distinct devices run together."""
+def _parallel_scores(
+    groups: list[tuple[Any, list[np.ndarray], bool]],
+    *,
+    eos_id: int,
+    eot_id: Optional[int],
+) -> list[tuple[list[ScoreBundle], list[ScoreBundle]]]:
+    """Run each ``(model, states, drop_eos)`` forward. Distinct devices run together."""
     if len(groups) == 1:
-        return [_forward_batch(groups[0][0], groups[0][1])]
-    devices = {str(next(model.parameters()).device) for model, _states in groups}
+        model, states, drop_eos = groups[0]
+        return [_forward_scores(model, states, drop_eos=drop_eos, eos_id=eos_id, eot_id=eot_id)]
+    devices = {str(next(model.parameters()).device) for model, _states, _drop in groups}
     if len(devices) == 1:
-        return [_forward_batch(model, states) for model, states in groups]
-    slots: list[Optional[torch.Tensor]] = [None] * len(groups)
+        return [
+            _forward_scores(model, states, drop_eos=drop_eos, eos_id=eos_id, eot_id=eot_id)
+            for model, states, drop_eos in groups
+        ]
+    slots: list[Optional[tuple[list[ScoreBundle], list[ScoreBundle]]]] = [None] * len(groups)
     errors: list[BaseException] = []
 
-    def run(index: int, model, states: list[np.ndarray]) -> None:
+    def run(index: int, model, states: list[np.ndarray], drop_eos: bool) -> None:
         try:
-            slots[index] = _forward_batch(model, states)
+            slots[index] = _forward_scores(
+                model, states, drop_eos=drop_eos, eos_id=eos_id, eot_id=eot_id
+            )
         except BaseException as exc:
             errors.append(exc)
 
     threads = [
-        threading.Thread(target=run, args=(i, model, states))
-        for i, (model, states) in enumerate(groups)
+        threading.Thread(target=run, args=(i, model, states, drop_eos))
+        for i, (model, states, drop_eos) in enumerate(groups)
     ]
     for thread in threads:
         thread.start()
@@ -98,10 +126,26 @@ def _parallel_logits(groups: list[tuple[Any, list[np.ndarray]]]) -> list[torch.T
     return [slot for slot in slots if slot is not None]
 
 
-def _role_logits(models: Sequence[Any], states: list[np.ndarray]) -> torch.Tensor:
+def _role_scores(
+    models: Sequence[Any],
+    states: list[np.ndarray],
+    *,
+    drop_eos: bool,
+    eos_id: int,
+    eot_id: Optional[int],
+) -> tuple[list[ScoreBundle], list[ScoreBundle]]:
     chunks = _split_even(states, len(models))
-    parts = _parallel_logits(list(zip(models, chunks)))
-    return torch.cat(parts, dim=0)
+    parts = _parallel_scores(
+        [(model, part, drop_eos) for model, part in zip(models, chunks)],
+        eos_id=eos_id,
+        eot_id=eot_id,
+    )
+    raw: list[ScoreBundle] = []
+    select: list[ScoreBundle] = []
+    for part_raw, part_select in parts:
+        raw.extend(part_raw)
+        select.extend(part_select)
+    return raw, select
 
 
 def _chunk_deltas(
@@ -122,23 +166,29 @@ def _chunk_deltas(
     states = [row[1] for row in chunk]
     same = controllers is predictors
     if same:
-        logits_p = _role_logits(predictors, states)
-        logits_c = logits_p
+        bundles_p, select_c = _role_scores(
+            predictors, states, drop_eos=controller_drop_eos, eos_id=eos_id, eot_id=eot_id
+        )
+        bundles_c = bundles_p
     else:
         pred_chunks = _split_even(states, len(predictors))
         ctrl_chunks = _split_even(states, len(controllers))
-        groups = [(model, part) for model, part in zip(predictors, pred_chunks)]
-        groups += [(model, part) for model, part in zip(controllers, ctrl_chunks)]
-        parts = _parallel_logits(groups)
-        logits_p = torch.cat(parts[: len(pred_chunks)], dim=0)
-        logits_c = torch.cat(parts[len(pred_chunks) :], dim=0)
-    bundles_p = bundle_from_logits(logits_p)
-    bundles_c = bundles_p if same else bundle_from_logits(logits_c)
-    select_c = bundles_c
-    if controller_drop_eos:
-        select_c = bundle_for_select(
-            logits_c, drop_eos=True, eos_id=eos_id, eot_id=eot_id
-        )
+        groups = [
+            (model, part, False) for model, part in zip(predictors, pred_chunks)
+        ]
+        groups += [
+            (model, part, controller_drop_eos)
+            for model, part in zip(controllers, ctrl_chunks)
+        ]
+        parts = _parallel_scores(groups, eos_id=eos_id, eot_id=eot_id)
+        bundles_p: list[ScoreBundle] = []
+        bundles_c: list[ScoreBundle] = []
+        select_c: list[ScoreBundle] = []
+        for part_raw, _part_select in parts[: len(pred_chunks)]:
+            bundles_p.extend(part_raw)
+        for part_raw, part_select in parts[len(pred_chunks) :]:
+            bundles_c.extend(part_raw)
+            select_c.extend(part_select)
     out: list[StepDelta] = []
     for i, (step, _state, gen_mask) in enumerate(chunk):
         bundle_pred = bundles_p[i].gen(prompt_len)
@@ -154,16 +204,16 @@ def _chunk_deltas(
             step=step, steps=steps_budget, block_length=block_length,
             top_k=top_k, gamma=gamma,
         )
-        out.append(
-            step_deltas(
-                conf_pred=bundle_pred.conf,
-                ent_pred=bundle_pred.entropy,
-                conf_ctrl=bundle_ctrl.conf,
-                ent_ctrl=bundle_ctrl.entropy,
-                s0=s0,
-                s1=s1,
-            )
+        delta = step_deltas(
+            conf_pred=bundle_pred.conf,
+            ent_pred=bundle_pred.entropy,
+            conf_ctrl=bundle_ctrl.conf,
+            ent_ctrl=bundle_ctrl.entropy,
+            s0=s0,
+            s1=s1,
         )
+        delta.step = int(step)
+        out.append(delta)
     return out
 
 
@@ -243,6 +293,31 @@ def _sample_mean(deltas: list[StepDelta]) -> dict[str, float]:
     }
 
 
+def _window_row(
+    base: dict[str, Any],
+    per_sample: list[list[StepDelta]],
+    *,
+    prefix: Optional[int],
+    n_samples: int,
+) -> dict[str, Any]:
+    """Mean of per-sample means. ``prefix`` keeps steps with ``step < prefix``."""
+    sample_means: list[dict[str, float]] = []
+    n_steps_scored = 0
+    for deltas in per_sample:
+        window = deltas if prefix is None else [d for d in deltas if d.step < int(prefix)]
+        if not window:
+            continue
+        n_steps_scored += len(window)
+        sample_means.append(_sample_mean(window))
+    row = dict(base)
+    row["prefix_steps"] = "" if prefix is None else int(prefix)
+    row["n_samples"] = n_samples
+    row["n_steps_scored"] = n_steps_scored
+    for key in _MEAN_KEYS:
+        row[key] = _finite_mean([sample[key] for sample in sample_means])
+    return row
+
+
 def audit_npz(
     path: Path,
     *,
@@ -261,7 +336,8 @@ def audit_npz(
     eot_id: Optional[int] = None,
     controller_drop_eos: bool = False,
     batch_size: int = 8,
-) -> dict[str, Any]:
+    prefix_steps: Optional[Sequence[int]] = None,
+) -> list[dict[str, Any]]:
     meta = parse_run_stem(path)
     if meta.model not in set(allowed_models):
         raise ValueError(f"{path.name}: trace model {meta.model!r} is not a llada trace")
@@ -270,8 +346,7 @@ def audit_npz(
             f"{path.name}: scheduler {meta.scheduler!r} is not in {SUPPORTED_PHI}"
         )
     steps_budget = int(meta.steps or 0) or 256
-    sample_means: list[dict[str, float]] = []
-    n_steps_scored = 0
+    per_sample: list[list[StepDelta]] = []
     n_samples = 0
     for i, trace in enumerate(iter_npz_traces(path)):
         if max_samples is not None and i >= max_samples:
@@ -296,9 +371,8 @@ def audit_npz(
         )
         if not deltas:
             continue
-        n_steps_scored += len(deltas)
-        sample_means.append(_sample_mean(deltas))
-    row: dict[str, Any] = {
+        per_sample.append(deltas)
+    base = {
         "filename": meta.filename,
         "trace_model": meta.model,
         "scheduler": meta.scheduler,
@@ -306,12 +380,14 @@ def audit_npz(
         "steps": meta.steps if meta.steps is not None else "",
         "predictor": predictor_name,
         "controller": controller_name,
-        "n_samples": n_samples,
-        "n_steps_scored": n_steps_scored,
     }
-    for key in _MEAN_KEYS:
-        row[key] = _finite_mean([sample[key] for sample in sample_means])
-    return row
+    prefixes = [int(k) for k in (prefix_steps if prefix_steps is not None else DEFAULT_PREFIX_STEPS)]
+    rows = [_window_row(base, per_sample, prefix=None, n_samples=n_samples)]
+    rows.extend(
+        _window_row(base, per_sample, prefix=k, n_samples=n_samples)
+        for k in prefixes
+    )
+    return rows
 
 
 def load_audit_csv(path: Path) -> list[dict[str, str]]:
@@ -342,7 +418,13 @@ def iter_npz_paths(
     return sorted(Path(local_dir).glob(pattern))
 
 
-def keep_stem(path: Path, *, steps: Optional[int], exclude_task: Optional[str]) -> bool:
+def keep_stem(
+    path: Path,
+    *,
+    steps: Optional[int],
+    exclude_task: Optional[str],
+    nfe_dropped: Optional[set[str]] = None,
+) -> bool:
     meta = parse_run_stem(path)
     if meta.model != "llada":
         return False
@@ -350,7 +432,10 @@ def keep_stem(path: Path, *, steps: Optional[int], exclude_task: Optional[str]) 
         return False
     if steps is not None and meta.steps != int(steps):
         return False
-    if exclude_task and meta.task == exclude_task:
+    excluded = {part.strip() for part in str(exclude_task or "").split(",") if part.strip()}
+    if meta.task in excluded:
+        return False
+    if nfe_dropped and path.stem in nfe_dropped:
         return False
     return True
 

@@ -279,17 +279,33 @@ def load_strace_metrics(
     return by_name
 
 
+def _excluded_names(spec: Optional[Union[str, Sequence[str]]]) -> set[str]:
+    if not spec:
+        return set()
+    if isinstance(spec, str):
+        parts = spec.split(",")
+    else:
+        parts = spec
+    return {str(part).strip() for part in parts if str(part).strip()}
+
+
 def duplicate_run_stems(
     path: Optional[Union[str, Path]] = None,
+    *,
+    exclude_task: Optional[Union[str, Sequence[str]]] = None,
 ) -> set[str]:
     """Stems that repeat another run's NFE for the same model, scheduler, and task.
 
     A repeated NFE means the higher step budget did not change the computation
     (DUS at 256 and 512, top-k at 512). The kept stem is the requested budget
     closest to that NFE. Runs whose NFE actually moves stay in the set.
+    Excluded tasks are removed before the clusters are formed.
     """
+    drop_task = _excluded_names(exclude_task)
     groups: Dict[tuple, list] = {}
     for name, row in load_strace_metrics(path).items():
+        if str(row.get("task") or "") in drop_task:
+            continue
         nfe = row["avg_nfe_per_sample"]
         steps = _safe_float(row.get("steps"))
         if nfe != nfe or steps != steps:

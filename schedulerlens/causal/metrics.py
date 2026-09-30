@@ -16,6 +16,7 @@ class StepDelta:
     delta_ctrl_j: float
     delta_own_j: float
     jaccard: float
+    step: int = -1
 
 
 def _on(values: np.ndarray, sel: np.ndarray) -> np.ndarray:

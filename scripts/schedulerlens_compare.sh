@@ -120,9 +120,10 @@ Oracle knobs (optional):
   --oracle-jt-markov-order M
   --oracle-jt-large-set N
 
-Prefix caps (compare):
-  --prefix-steps Ks           Extra CSV rows with cumulative M/J/G over step < K
-                              (e.g. 8,16,32,64)
+Prefix rows:
+  --prefix-steps Ks           Compare: extra rows, cumulative M/J/G over step < K.
+                              Causal audit: extra rows, mean deltas over step < K.
+                              Default for audit is 8,16,32,64 when this is omitted.
   --metrics-only              Fast path: skip completion + cheap PPL re-streams
 
 Prefix selection:
@@ -531,6 +532,7 @@ elif [[ "$COMMAND" == "causal" ]]; then
   [[ -n "$STEPS_FILTER" ]] && CMD+=(--steps "$STEPS_FILTER")
   [[ -n "$MAX_SAMPLES" ]] && CMD+=(--max-samples "$MAX_SAMPLES")
   [[ -n "$LIMIT" ]] && CMD+=(--limit "$LIMIT")
+  [[ -n "$PREFIX_STEPS" ]] && CMD+=(--prefix-steps "$PREFIX_STEPS")
   if [[ "$NO_RESUME" == "true" ]]; then
     echo "Note: causal audit always resumes from causal_audit.csv in the output directory"
   fi
@@ -558,6 +560,7 @@ elif [[ "$COMMAND" == "causal" ]]; then
   echo "  source: ${REPO_ID:-$LOCAL_DIR}"
   echo "  predictor: ${PREDICTOR:-llada}  controller: ${CONTROLLER:-llada1_5}"
   echo "  device-map: ${DEVICE_MAP:-split}  batch-size: ${BATCH_SIZE:-8}  steps: ${STEPS_FILTER:-256}"
+  echo "  prefix-steps: ${PREFIX_STEPS:-8,16,32,64}"
 fi
 echo "  slurm/srun: $SLURM_MODE  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 echo "  cmd: ${CMD[*]}"

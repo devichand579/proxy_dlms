@@ -1,6 +1,21 @@
-/scripts/schedulerlens_compare.sh --command causal  \
-  --repo schedulerlens-traces --namespace devichand \
-  --predictor llada --controller llada1_5 \
-  --steps 128 --exclude-task arc_challenge_chat \
-  --device-map split --batch-size 64 \
-  -o outputs/schedulerlens/causal_audit
+#!/bin/bash
+# Audit the three NFE step budgets into one CSV. Rows stay distinct because
+# the trace filename includes the step budget.
+#
+#   ./scripts/causal_audit_steps.sh
+#   sbatch scripts/causal_audit_steps.sh
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+for steps in 128 256 512; do
+  echo "Causal audit steps=${steps}"
+  scripts/schedulerlens_compare.sh --command causal \
+    --repo schedulerlens-traces --namespace devichand \
+    --predictor llada --controller llada1_5 \
+    --steps "$steps" --exclude-task arc_challenge_chat \
+    --device-map split --batch-size 64 \
+    -o outputs/schedulerlens/causal_audit
+done

@@ -55,9 +55,9 @@ def generate_pc(
     M̂ and Ĵ use the raw forward. When a role is LLaDA-1.5, EOS and EoT are
     removed only from the scores that choose its sets and from the token it
     writes. ``mode='swap'`` applies ``phi`` to controller scores.
-    ``mode='adaptive'`` builds six sets from LLaDA and six from LLaDA-1.5,
-    scores each set with both models (24 pairs), and unmasks the lowest
-    Ĝ = M̂ + Ĵ. The written token is that model's argmax.
+    ``mode='adaptive'`` builds six sets from LLaDA and six from LLaDA-1.5.
+    Ĵ stays with the model that built the set. Each model supplies an M̂ on
+    that set. The lowest Ĝ = M̂ + Ĵ wins. That M̂'s model writes the token.
     Returns ``(x, steps_taken, n_blocks)`` like the other schedulers.
     """
     global last_step_log
@@ -138,7 +138,7 @@ def generate_pc(
             gen_mask = mask_index[b, prompt_len:].detach().cpu().numpy()
             if mode == "adaptive":
                 (
-                    set_model, j_model, rule, chosen, j_hat, g_hat,
+                    ctrl_model, pred_model, rule, chosen, j_hat, g_hat,
                     m_llada, m_llada1_5, j_llada, j_llada1_5,
                 ) = pick_cross_j(
                     {name: raw_roles[name][b].gen(prompt_len) for name in raw_roles},
@@ -151,8 +151,6 @@ def generate_pc(
                     top_k=top_k,
                     gamma=gamma,
                 )
-                pred_model = "llada" if m_llada <= m_llada1_5 else "llada1_5"
-                ctrl_model = "llada" if j_llada <= j_llada1_5 else "llada1_5"
                 x0[b] = commits[pred_model][b]
                 pred_scores = raw_roles[pred_model][b].gen(prompt_len)
                 ctrl_scores = raw_roles[ctrl_model][b].gen(prompt_len)
@@ -162,19 +160,32 @@ def generate_pc(
                     confidences=pred_scores.conf,
                     entropies=ctrl_scores.entropy,
                 )
+                if pred_model == "llada":
+                    m_hat = m_llada
+                    m_hat_other = m_llada1_5
+                    j_hat_other = j_llada
+                else:
+                    m_hat = m_llada1_5
+                    m_hat_other = m_llada
+                    j_hat_other = j_llada1_5
                 step_log = {
                     "batch": b,
                     "step": step,
                     "rule": rule,
-                    "set_model": set_model,
-                    "j_model": j_model,
+                    "set_model": ctrl_model,
                     "pred_model": pred_model,
                     "ctrl_model": ctrl_model,
                     "reveal": int(chosen.sum()),
                     "M_hat_llada": m_llada,
                     "M_hat_llada1_5": m_llada1_5,
                     "J_hat": j_hat,
+                    "J_hat_other": j_hat_other,
                     "G_hat": g_hat,
+                    "m_hat": m_hat,
+                    "m_hat_other": m_hat_other,
+                    "j_hat": j_hat,
+                    "j_hat_other": j_hat_other,
+                    "g_hat": g_hat,
                 }
             else:
                 chosen, rule, m_hat, j_hat = _choose_row(

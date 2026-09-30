@@ -13,7 +13,8 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from schedulerlens.causal.audit import ( 
+from schedulerlens.causal.audit import (
+    DEFAULT_PREFIX_STEPS,
     audit_npz,
     iter_npz_paths,
     keep_stem,
@@ -22,7 +23,9 @@ from schedulerlens.causal.audit import (
 )
 from load_model import infer_b44_eos_unmask_safety  
 from schedulerlens.causal.models import place_fleet  
-from schedulerlens.causal.select import SUPPORTED_PHI 
+from schedulerlens.causal.select import SUPPORTED_PHI
+from schedulerlens.completion import duplicate_run_stems
+from schedulerlens.metrics import parse_prefix_steps 
 from traces.hf_trace_upload import (  
     download_file_to_temp,
     list_repo_files,
@@ -46,26 +49,55 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         paths = [
             Path(n) for n in names if fnmatch.fnmatch(Path(n).name, args.pattern)
         ]
+    nfe_dropped = duplicate_run_stems(exclude_task=args.exclude_task)
     kept = []
+    nfe_skipped = 0
     for path in paths:
         name = path.name
-        if keep_stem(Path(name), steps=args.steps, exclude_task=args.exclude_task):
+        if keep_stem(
+            Path(name),
+            steps=args.steps,
+            exclude_task=args.exclude_task,
+            nfe_dropped=nfe_dropped,
+        ):
             kept.append(path)
+            continue
+        meta_name = Path(name)
+        if (
+            nfe_dropped
+            and meta_name.stem in nfe_dropped
+            and keep_stem(
+                meta_name,
+                steps=args.steps,
+                exclude_task=args.exclude_task,
+                nfe_dropped=None,
+            )
+        ):
+            nfe_skipped += 1
+    if nfe_skipped:
+        logging.info(
+            "Skipping %d trace(s) whose NFE repeats another step budget",
+            nfe_skipped,
+        )
     if args.limit is not None:
         kept = kept[: args.limit]
     if not kept:
         logging.error("No NPZs matched filters")
         return 1
     out = Path(args.output_dir) / "causal_audit.csv"
+    prefixes = parse_prefix_steps(args.prefix_steps)
+    needed = {""} | {str(k) for k in prefixes}
     rows = load_audit_csv(out)
-    done = {
-        (row.get("filename"), row.get("predictor"), row.get("controller"))
-        for row in rows
-    }
+    have: dict[tuple[str, str, str], set[str]] = {}
+    for row in rows:
+        key = (row.get("filename") or "", row.get("predictor") or "", row.get("controller") or "")
+        raw = str(row.get("prefix_steps") or "").strip()
+        label = "" if raw == "" else str(int(float(raw)))
+        have.setdefault(key, set()).add(label)
     pending = [
         path
         for path in kept
-        if (path.name, args.predictor, args.controller) not in done
+        if not needed.issubset(have.get((path.name, args.predictor, args.controller), set()))
     ]
     logging.info(
         "Auditing %d file(s), %d already in %s",
@@ -91,7 +123,13 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                     path.name, repo_id=args.repo, namespace=args.namespace
                 )
             logging.info("Audit %s", local.name)
-            rows.append(
+            key = (path.name, args.predictor, args.controller)
+            rows = [
+                row
+                for row in rows
+                if (row.get("filename"), row.get("predictor"), row.get("controller")) != key
+            ]
+            rows.extend(
                 audit_npz(
                     local,
                     predictors=loaded["predictors"],
@@ -108,6 +146,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                     max_samples=args.max_samples,
                     max_steps=args.max_steps,
                     batch_size=args.batch_size,
+                    prefix_steps=prefixes,
                 )
             )
             write_audit_csv(out, rows)
@@ -148,6 +187,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--namespace", default="devichand")
     audit.add_argument("--pattern", default="*.npz")
     audit.add_argument("--steps", type=int, default=256)
+    audit.add_argument(
+        "--prefix-steps",
+        default=",".join(str(k) for k in DEFAULT_PREFIX_STEPS),
+        metavar="Ks",
+        help="Comma-separated step prefixes. Each K adds a row averaged over step < K. Default 8,16,32,64.",
+    )
     audit.add_argument("--exclude-task", default="arc_challenge_chat")
     audit.add_argument("--max-samples", type=int, default=None)
     audit.add_argument("--max-steps", type=int, default=None)
