@@ -543,7 +543,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p_sweep_pcfg.add_argument("-q", "--quiet", action="store_true")
     p_prefix = sub.add_parser(
         "prefix-selection",
-        help="Accuracy of the scheduler with the lowest prefix G-hat/f",
+        help="Per-sample accuracy of the scheduler with the lowest prefix G-hat/f",
     )
     _add_exclude_args(p_prefix)
     p_prefix.add_argument("-o", "--output-dir", type=Path, default=None)

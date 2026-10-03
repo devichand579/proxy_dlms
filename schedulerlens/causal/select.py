@@ -1,13 +1,15 @@
-"""Scheduler rules as pure set selectors (no token writes)."""
+"""Map one diffusion step onto the live scheduler's position set."""
 
 from __future__ import annotations
 
 from typing import Optional, Sequence
 
 import numpy as np
+import torch
 
 from schedulerlens.causal.scores import ScoreBundle
 from schedulers.dus import dilated_unmask_levels, merge_last_level
+from schedulers.utils import get_num_transfer_tokens
 
 SUPPORTED_PHI = ("pd", "bd", "top_k_c", "top_k_m", "eb", "dus")
 
@@ -23,6 +25,13 @@ _BLOCK_DEFAULT = {
 
 class SelectError(ValueError):
     """Unsupported scheduler rule or bad selection inputs."""
+
+
+def require_finite(label: str, *arrays: np.ndarray) -> None:
+    """Raise when a score that chooses positions or enters M̂ or Ĵ is not finite."""
+    for values in arrays:
+        if not np.isfinite(np.asarray(values)).all():
+            raise SelectError(f"{label} has a non-finite score")
 
 
 def default_block_length(phi: str, gen_length: int, block_length: Optional[int]) -> int:
@@ -61,39 +70,37 @@ def schedule_window(
     return block * bl, (block + 1) * bl, local, spb
 
 
-def _transfer_count(n_masked_block: int, local_step: int, steps_in_block: int) -> int:
-    if n_masked_block <= 0 or steps_in_block <= 0:
+def _llada_step_k(block_length: int, steps_in_block: int, local_step: int) -> int:
+    """Column of ``get_num_transfer_tokens`` for a block that starts fully masked."""
+    if block_length <= 0 or steps_in_block <= 0 or local_step < 0:
         return 0
-    base = n_masked_block // steps_in_block
-    rem = n_masked_block % steps_in_block
-    k = base + (1 if local_step < rem else 0)
-    return int(min(max(k, 0), n_masked_block))
+    if local_step >= steps_in_block:
+        return 0
+    mask = torch.ones(1, int(block_length), dtype=torch.bool)
+    counts = get_num_transfer_tokens(mask, int(steps_in_block))
+    return int(counts[0, int(local_step)].item())
 
 
-def _topk_masked(score: np.ndarray, eligible: np.ndarray, k: int) -> np.ndarray:
-    chosen = np.zeros(score.shape[0], dtype=bool)
-    idx = np.flatnonzero(eligible)
-    if k <= 0 or idx.size == 0:
-        return chosen
-    k = min(int(k), int(idx.size))
-    order = idx[np.argsort(-score[idx], kind="stable")]
-    chosen[order[:k]] = True
+def _confidence_row(values: np.ndarray, mask: np.ndarray, block_end: int) -> torch.Tensor:
+    """Confidence with -inf past the block end and on positions that are not masked."""
+    scores = torch.as_tensor(np.asarray(values), dtype=torch.float32).unsqueeze(0)
+    masked = torch.as_tensor(np.asarray(mask), dtype=torch.bool).unsqueeze(0)
+    scoped = scores.clone()
+    scoped[:, int(block_end) :] = -torch.inf
+    return torch.where(masked, scoped, torch.full_like(scoped, -torch.inf))[0]
+
+
+def _topk_row(confidence_row: torch.Tensor, k: int) -> torch.Tensor:
+    chosen = torch.zeros_like(confidence_row, dtype=torch.bool)
+    if int(k) > 0:
+        _, select_index = torch.topk(confidence_row, k=int(k), dim=-1)
+        chosen[select_index] = True
     return chosen
 
 
-def _dus_level(
-    block_start: int,
-    block_end: int,
-    local_step: int,
-) -> list[int]:
-    levels = merge_last_level(dilated_unmask_levels(block_start, block_end - 1))
-    if not levels:
-        return []
-    if local_step < 0:
-        return []
-    if local_step >= len(levels):
-        return list(levels[-1])
-    return list(levels[local_step])
+def _commit(chosen: torch.Tensor, mask: np.ndarray) -> np.ndarray:
+    """Keep positions that are still masked. An unmasked top-k hit is a no-op write."""
+    return chosen.detach().cpu().numpy() & np.asarray(mask, dtype=bool)
 
 
 def select_gen(
@@ -107,6 +114,7 @@ def select_gen(
     top_k: int = 2,
     gamma: float = 0.1,
     eb_rank: str = "confidence",
+    dus_confidence_threshold: float = 0.1,
 ) -> np.ndarray:
     """Boolean gen-region selection for one sequence."""
     if phi not in SUPPORTED_PHI:
@@ -119,6 +127,13 @@ def select_gen(
         raise SelectError(
             f"score length {scores.conf.shape[0]} != gen mask {n}"
         )
+    require_finite("confidence", scores.conf)
+    if phi == "top_k_m" or (phi == "eb" and eb_rank == "margin"):
+        require_finite("margin", scores.margin)
+    if phi == "eb":
+        require_finite("EB entropy", scores.eb_h)
+        if eb_rank == "entropy":
+            require_finite("rank entropy", scores.h_rank)
     b0, b1, local, spb = schedule_window(
         phi, gen_length=n, steps=steps, step=step, block_length=block_length
     )
@@ -128,17 +143,13 @@ def select_gen(
     chosen = np.zeros(n, dtype=bool)
 
     if phi in ("pd", "bd"):
-        n_block = int(eligible.sum())
-        k = _transfer_count(n_block, local, spb)
-        return _topk_masked(scores.conf, eligible, k)
+        k = _llada_step_k(b1 - b0, spb, local)
+        return _commit(_topk_row(_confidence_row(scores.conf, mask, b1), k), mask)
 
-    if phi == "top_k_c":
-        k = min(int(top_k), int(eligible.sum()))
-        return _topk_masked(scores.conf, eligible, k)
-
-    if phi == "top_k_m":
-        k = min(int(top_k), int(eligible.sum()))
-        return _topk_masked(scores.margin, eligible, k)
+    if phi in ("top_k_c", "top_k_m"):
+        rank = scores.conf if phi == "top_k_c" else scores.margin
+        k = min(int(top_k), int(mask[b0:b1].sum()))
+        return _commit(_topk_row(_confidence_row(rank, mask, b1), k), mask)
 
     if phi == "eb":
         if eb_rank == "confidence":
@@ -146,29 +157,41 @@ def select_gen(
         elif eb_rank == "margin":
             rank = scores.margin
         elif eb_rank == "entropy":
-            rank = -scores.entropy
+            rank = -scores.h_rank
         else:
             raise SelectError(f"unknown EB rank {eb_rank!r}")
-        idx = np.flatnonzero(eligible)
-        if idx.size == 0:
+        block_positions = [pos for pos in range(b0, b1) if mask[pos]]
+        if not block_positions:
             return chosen
-        order = idx[np.argsort(-rank[idx], kind="stable")]
-        acc: list[float] = []
-        for pos in order:
-            acc.append(float(scores.entropy[pos]))
-            if sum(acc) - max(acc) <= float(gamma):
+        block_positions = sorted(
+            block_positions,
+            key=lambda pos: float(rank[pos]),
+            reverse=True,
+        )
+        accumulated: list[float] = []
+        for pos in block_positions:
+            accumulated.append(float(scores.eb_h[pos]))
+            if sum(accumulated) - max(accumulated) <= float(gamma):
                 chosen[pos] = True
             else:
                 break
+        # generate_EB keeps the highest-ranked token when the constraint admits none.
         if not chosen.any():
-            chosen[order[0]] = True
+            chosen[max(block_positions, key=lambda pos: float(rank[pos]))] = True
         return chosen
 
-    # dus: schedule positions inside the block (absolute gen indices)
-    level = _dus_level(b0, b1, local)
-    for pos in level:
-        if 0 <= pos < n and eligible[pos]:
-            chosen[pos] = True
+    # Levels come from the live dilation schedule. A longer step budget repeats the last one.
+    levels = merge_last_level(dilated_unmask_levels(b0, b1 - 1))
+    if not levels or local < 0:
+        return chosen
+    index = min(local, len(levels) - 1)
+    final = local >= len(levels) - 1
+    for pos in levels[index]:
+        if not (0 <= pos < n and eligible[pos]):
+            continue
+        if not final and float(scores.conf[pos]) < float(dus_confidence_threshold):
+            continue
+        chosen[pos] = True
     return chosen
 
 
@@ -184,6 +207,7 @@ def select_set(
     top_k: int = 2,
     gamma: float = 0.1,
     eb_rank: str = "confidence",
+    dus_confidence_threshold: float = 0.1,
 ) -> np.ndarray:
     """Boolean mask over the full sequence (prompt positions stay False)."""
     full = np.asarray(mask_full, dtype=bool)
@@ -199,6 +223,7 @@ def select_set(
         top_k=top_k,
         gamma=gamma,
         eb_rank=eb_rank,
+        dus_confidence_threshold=dus_confidence_threshold,
     )
     out = np.zeros(full.shape[0], dtype=bool)
     out[prompt_len:] = gen_sel

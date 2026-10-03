@@ -49,7 +49,7 @@ All commands go through `python -m schedulerlens.run` (or `python -m schedulerle
 | `compare` | Batch Hub/local → CSV |
 | `prefix-sweep` | M̂, Ĵ, and Ĝ/f at each prefix for each run |
 | `prefix-sweep-pcfg` | Same sweep on PCFG traces; sample Pearson of M̂ with Mt, Ĵ with Jt, and Ĝ with G |
-| `prefix-selection` | Finish the scheduler with the lowest prefix Ĝ/f |
+| `prefix-selection` | Per sample, finish the scheduler with the lowest prefix Ĝ/f |
 
 `compare` writes the metrics sheet. `prefix-sweep`, `prefix-sweep-pcfg`, and `prefix-selection` read that sheet or the traces behind it. All four run from `scripts/schedulerlens_compare.sh` via `--command`. `--exclude-task` and `--exclude-scheduler` skip comma-separated names on every command (for example `--exclude-task arc_challenge_chat`). `causal` and `plots` are separate.
 
@@ -199,7 +199,7 @@ Raise `exact_max` only if you have the RAM. Concurrent exact CKY `Jt` calls are 
 | `oracle.py` | Commit NLL, PCFG Mt/Jt replay, task perplexity |
 | `hub.py` | Hub inventory and batch compare |
 | `run.py` | **Single CLI** (`file` / `inventory` / `compare` / `causal` / `prefix-sweep` / `prefix-selection`) |
-| `causal/` | Predictor–controller audit, swap, and adaptive selection |
+| `causal/` | Predictor–controller audit and swap |
 
 `compare` and `file` join accuracy and NFE from `fetch_evals/strace_metrics.csv` onto each normal metrics row (stem == strace `name`; fallback model+task+steps+mode). Override with `--strace-metrics`. PCFG rows omit those columns.
 

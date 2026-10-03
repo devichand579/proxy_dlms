@@ -29,12 +29,13 @@ trace_hf_dataset_repo: schedulerlens  # use org/schedulerlens for org-owned repo
 trace_hf_namespace: null  # if repo has no slash, prefix with this or HF whoami
 trace_hf_dataset_private: false
 num_fewshot: null  # null = use per-task default (humaneval 0, gsm8k 4, mbpp 3, arc_challenge_chat 5). Set to int to override.
+limit: null  # null = evaluate the full task; positive integer = evaluate only the first N documents.
 
 # Sampling (harness model_args). null gen_length/steps = task defaults (see sampling_defaults.py).
 gen_length: null
 steps: null
 # Predictor–controller causal runs (schedulerlens/causal). Harness `model` is the predictor.
-# mode=pc_swap | pc_adaptive, controller=llada1_5, pc_phi=eb|bd|...
+# mode=pc_swap, controller=llada1_5, pc_phi=eb|bd|...
 controller: null
 pc_phi: eb
 device_map: share

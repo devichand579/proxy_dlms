@@ -1,7 +1,6 @@
-"""Predictor–controller swap and adaptive generation."""
+"""Predictor–controller swap generation."""
 
 import os
-from pathlib import Path
 
 import torch
 
@@ -17,38 +16,6 @@ else:
 
 
 _PC_CACHE: dict = {}
-_ADAPTIVE_OTHER: dict = {}
-
-
-def _adaptive_roles(harness, model_path):
-    """Harness model plus the other of LLaDA / LLaDA-1.5.
-
-    The harness is forwarded first so a trace step records that forward.
-    ``split`` places the other checkpoint on the other GPU.
-    """
-    directory = Path(model_path).resolve()
-    name = directory.name.lower().replace("-", "_")
-    if name not in ("llada", "llada1_5"):
-        raise ValueError(
-            f"adaptive selection needs the harness to be llada or llada1_5, got {directory.name}"
-        )
-    dev = str(next(harness.parameters()).device)
-    other = "llada1_5" if name == "llada" else "llada"
-    if os.environ.get("PC_DEVICE_MAP", "share") == "split" and torch.cuda.device_count() >= 2:
-        other_dev = "cuda:0" if dev.endswith(":1") else "cuda:1"
-    else:
-        other_dev = dev
-    key = (other, other_dev)
-    if key not in _ADAPTIVE_OTHER:
-        other_model, other_dir, _mask, _eos, _eot = load_role(
-            other, other_dev, compile_model=False
-        )
-        _ADAPTIVE_OTHER[key] = (other_model, infer_b44_eos_unmask_safety(other_dir))
-    other_model, other_drop = _ADAPTIVE_OTHER[key]
-    return {
-        name: (harness, infer_b44_eos_unmask_safety(directory)),
-        other: (other_model, other_drop),
-    }
 
 
 def _pc_controller(predictor):
@@ -91,18 +58,13 @@ def generate_proxy(
     intervention_k=1,
     model_path=None,
 ):
-    """Swap uses one controller. Adaptive loads LLaDA and LLaDA-1.5."""
-    if mode == "pc_adaptive":
-        if model_path is None:
-            raise ValueError("adaptive selection needs model_path of the harness checkpoint")
-        controller, controller_drop_eos = model, False
-        roles = _adaptive_roles(model, model_path)
-    else:
-        controller, controller_drop_eos = _pc_controller(model)
-        roles = None
-        if controller_drop_eos is None:
-            controller_drop_eos = bool(logits_eos_inf or confidence_eos_eot_inf)
-    pc_mode = "adaptive" if mode == "pc_adaptive" else "swap"
+    """Swap uses one controller. The predictor writes the token."""
+    if mode != "pc_swap":
+        raise ValueError(f"mode must be pc_swap, got {mode!r}")
+    del model_path
+    controller, controller_drop_eos = _pc_controller(model)
+    if controller_drop_eos is None:
+        controller_drop_eos = bool(logits_eos_inf or confidence_eos_eot_inf)
     return generate_pc(
         model,
         controller,
@@ -112,7 +74,7 @@ def generate_proxy(
         gen_length=gen_length,
         block_length=block_length,
         phi=os.environ.get("PC_PHI", "eb"),
-        mode=pc_mode,
+        mode="swap",
         top_k=int(os.environ.get("PC_TOP_K", top_k)),
         gamma=float(os.environ.get("PC_GAMMA", "0.1")),
         mask_id=mask_id,
@@ -122,5 +84,4 @@ def generate_proxy(
         confidence_eos_eot_inf=confidence_eos_eot_inf,
         controller_drop_eos=controller_drop_eos,
         use_eos_harness=use_eos_harness,
-        roles=roles,
     )

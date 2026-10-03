@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from load_model import infer_diffusion_token_ids, is_dream_model_dir, load_tokenizer, prepend_bos_for_dream
-from cst.eval_data.lmeval_task import eval_num_fewshot
 
 logger = logging.getLogger(__name__)
 
@@ -718,3 +717,109 @@ def compare_with_metrics_row(
 
     result["metrics_flags"] = "; ".join(flags) if flags else ""
     return result
+
+
+class TraceScorer:
+    """Score one trace sample with the same prompt match as ``compute_trace_accuracy``.
+
+    ``match`` returns the lm-eval ``doc_id`` and the decoded generation.
+    ``score_text`` applies the task's primary metric to that generation.
+    """
+
+    def __init__(self, task_name: str, model_name: str, repo_root: Optional[Path] = None):
+        self.task_name = str(task_name)
+        self.model_name = str(model_name)
+        root = repo_root or Path(__file__).resolve().parent.parent
+        model_dir = model_dir_for_name(self.model_name, root)
+        if not model_dir.is_dir():
+            raise FileNotFoundError(f"model dir not found: {model_dir}")
+        if _is_code_task(self.task_name):
+            os.environ.setdefault("HF_ALLOW_CODE_EVAL", "1")
+        self.tokenizer = load_tokenizer(str(model_dir))
+        _, eos_id, _ = infer_diffusion_token_ids(model_dir)
+        self.eos_id = int(eos_id)
+        self.task = _load_scoring_task(self.task_name, 0)
+        self.stop_tokens = _task_stop_tokens(self.task)
+        self.bos_id: Optional[int] = None
+        if is_dream_model_dir(model_dir):
+            bos = getattr(self.tokenizer, "bos_token", None)
+            if bos:
+                encoded = self.tokenizer.encode(bos, add_special_tokens=False)
+                if encoded:
+                    self.bos_id = int(encoded[0])
+        self.suffix_groups: dict[int, dict[tuple[int, ...], Any]] = defaultdict(dict)
+        for inst in self.task.instances:
+            key = _instance_prompt_key(inst, self.tokenizer, model_dir)
+            inner = key[1:] if (self.bos_id is not None and key and key[0] == self.bos_id) else key
+            self.suffix_groups[len(inner)].setdefault(inner, inst)
+        self.metric_key: Optional[str] = None
+
+    def match(self, sample: dict) -> Optional[tuple[str, Any, str]]:
+        """Return ``(doc_id, instance, generation)``, or None when the prompt does not match."""
+        trace_key = _trace_prompt_key(sample, self.tokenizer)
+        if trace_key is None:
+            return None
+        inst = self._find_instance(trace_key)
+        if inst is None:
+            return None
+        text = decode_generation_from_trace(
+            sample,
+            self.tokenizer,
+            eos_id=self.eos_id,
+            stop_tokens=self.stop_tokens,
+            use_eos_harness=True,
+        )
+        if text is None:
+            return None
+        doc_id = getattr(inst, "doc_id", None)
+        if doc_id is None:
+            raise ValueError(f"{self.task_name} instance has no doc_id")
+        return str(doc_id), inst, text
+
+    def score_text(self, inst: Any, gen_text: str) -> float:
+        if _is_code_task(self.task_name):
+            metrics = _score_code_instance(gen_text, inst, self.task_name)
+        else:
+            metrics = _score_instance(self.task, inst, gen_text)
+        key = self._metric_key(metrics)
+        value = float(metrics[key])
+        if value != value or value == float("inf") or value == float("-inf"):
+            raise ValueError(f"non-finite {key} for {self.task_name} doc {getattr(inst, 'doc_id', '?')}")
+        return value
+
+    def _find_instance(self, trace_key: tuple[int, ...]) -> Optional[Any]:
+        inner = (
+            trace_key[1:]
+            if (self.bos_id is not None and trace_key and trace_key[0] == self.bos_id)
+            else trace_key
+        )
+        for key_len, group in self.suffix_groups.items():
+            if key_len <= len(inner):
+                suffix = inner[-key_len:]
+                if suffix in group:
+                    return group[suffix]
+        return None
+
+    def _metric_key(self, metrics: dict[str, float]) -> str:
+        if self.metric_key is not None:
+            if self.metric_key not in metrics:
+                raise KeyError(
+                    f"{self.task_name} sample missing {self.metric_key}; has {sorted(metrics)}"
+                )
+            return self.metric_key
+        patterns = TASK_PRIMARY_PATTERNS.get(self.task_name, ())
+        candidates: list[tuple[int, int, str]] = []
+        for key in metrics:
+            if "stderr" in key.lower():
+                continue
+            lower = key.lower()
+            for index, pattern in enumerate(patterns):
+                if pattern.lower() in lower:
+                    candidates.append((index, len(key), key))
+                    break
+        if not candidates:
+            raise KeyError(f"no primary metric for {self.task_name} in {sorted(metrics)}")
+        candidates.sort()
+        self.metric_key = candidates[0][2]
+        logger.info("%s %s primary metric %s", self.model_name, self.task_name, self.metric_key)
+        return self.metric_key

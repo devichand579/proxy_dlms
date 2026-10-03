@@ -37,7 +37,7 @@
 # Parse command-line arguments
 # Usage: ./scripts/eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [opts...]
 #   Full flags: see Error/Unknown option messages below; e.g. --resumable [--run_id] [--slurm] [--use_eos_harness / --no_eos_harness]
-# Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm, fhs, top_k_c (top_k+confidence), top_k_m (top_k+top_margin), dus
+# Mode shortcuts: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, pc_swap
 # Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, arc_challenge_chat
 # --model: basename of a folder under ./models/ (must match lm-eval registration). Examples: llada, llada1_5, dream.
 #          Weights/tokenizer load from ./models/<model>/; mask/EOS/EoT ids come from that folder's config when not overridden.
@@ -72,6 +72,7 @@ TRACE_HF_UPLOAD_ARG=""
 TRACE_HF_DATASET_REPO_ARG=""
 TRACE_HF_NAMESPACE_ARG=""
 NUM_FEWSHOT_OVERRIDE=""
+LIMIT_OVERRIDE=""
 BLOCK_LENGTH_OVERRIDE=""
 TOP_K_OVERRIDE=""
 STEPS_OVERRIDE=""
@@ -152,6 +153,10 @@ while [[ $# -gt 0 ]]; do
             NUM_FEWSHOT_OVERRIDE="$2"
             shift 2
             ;;
+        --limit|--num_samples)
+            LIMIT_OVERRIDE="$2"
+            shift 2
+            ;;
         --block_length)
             BLOCK_LENGTH_OVERRIDE="$2"
             shift 2
@@ -207,7 +212,7 @@ while [[ $# -gt 0 ]]; do
         *)
             echo "Unknown option: $1"
             echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
-            echo "  Core optional: --num_fewshot --block_length --top_k --steps --gen_length --compile_model"
+            echo "  Core optional: --num_fewshot --limit (alias: --num_samples) --block_length --top_k --steps --gen_length --compile_model"
             echo "  Harness (eval.LLaDAEvalHarness / --model_args): --intervention_mode --intervention_steps --intervention_k"
             echo "  EOS decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode)"
             echo "  Alternative multi-GPU: --parallel_config <parallel_runs.yaml> (per-GPU overrides: mode/model/task/batch — delegates to hydra_runners/launch_eval.py parallel_runs_file=)"
@@ -219,6 +224,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$LIMIT_OVERRIDE" && ! "$LIMIT_OVERRIDE" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --limit/--num_samples must be a positive integer"
+    exit 1
+fi
 
 if [[ -n "$PARALLEL_CONFIG" ]]; then
     if [[ -f "$PARALLEL_CONFIG" ]]; then
@@ -236,7 +246,7 @@ if [[ -z "$PARALLEL_CONFIG" ]]; then
 if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "Error: Missing required arguments"
     echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
-    echo "  Core optional: --num_fewshot <n> --block_length <n> --top_k <n> --steps <n> --gen_length <n> --compile_model <bool>"
+    echo "  Core optional: --num_fewshot <n> --limit <n> (alias: --num_samples) --block_length <n> --top_k <n> --steps <n> --gen_length <n> --compile_model <bool>"
     echo "  Harness (see eval.LLaDAEvalHarness): --intervention_mode drop|swap, --intervention_steps 0,128,256, --intervention_k <k>"
     echo "  --wandb <True|False>  --tracing_enabled <True|False>  (tracing: trace_outputs/ or JSONL when --resumable)"
     echo "  --trace_hf_upload <True|False>  --trace_hf_dataset_repo <id>  --trace_hf_namespace <user|org>  (Hub dataset push; default repo schedulerlens when tracing on)"
@@ -244,7 +254,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Run: --slurm (srun for sbatch)  --resumable [--run_id]  (checkpoint under outputs/…)"
     echo "  Multi-GPU: --parallel_config <yaml> per-GPU settings (launch_eval parallel_runs_file=); see docs/evaluation.md"
     echo "  Offline: --offline  |  GPU: --device <0|1|cuda|cuda:0|cpu>"
-    echo "  Mode shortcuts: pd (pure_diffusion), bd (block_diffusion), eb (eb_sampler), fdm, fhs, top_k_c (top_k+confidence), top_k_m (top_k+top_margin), dus, pc_adaptive, pc_swap"
+    echo "  Mode shortcuts: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, pc_swap"
     echo "  Few-shot defaults: humaneval/arc 0, gsm8k/math500 4, mbpp 3, arc_challenge_chat 5; block_length defaults: bd 32, fdm 64, dus 16, else gen_length"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True"
@@ -287,16 +297,12 @@ case "$MODE" in
         MODE="dus"
         STRATEGY="confidence"
         ;;
-    pc_adaptive)
-        MODE="pc_adaptive"
-        STRATEGY="confidence"
-        ;;
     pc_swap)
         MODE="pc_swap"
         STRATEGY="confidence"
         ;;
     *)
-        echo "Warning: Unknown mode '$MODE'. Using as-is. Valid modes: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, pc_adaptive, pc_swap (and their full names)"
+        echo "Warning: Unknown mode '$MODE'. Using as-is. Valid modes: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, pc_swap"
         ;;
 esac
 
@@ -419,6 +425,7 @@ if [[ -n "$PARALLEL_CONFIG" ]]; then
     [[ -n "$TOP_K_OVERRIDE" ]] && OVERRIDES+=(top_k="$TOP_K_OVERRIDE")
     [[ -n "$STEPS_OVERRIDE" ]] && OVERRIDES+=(steps="$STEPS_OVERRIDE")
     [[ -n "$GEN_LENGTH_OVERRIDE" ]] && OVERRIDES+=(gen_length="$GEN_LENGTH_OVERRIDE")
+    [[ -n "$LIMIT_OVERRIDE" ]] && OVERRIDES+=(limit="$LIMIT_OVERRIDE")
     [[ "$OFFLINE" == "true" ]] && OVERRIDES+=(offline=true)
     [[ -n "$DEVICE" ]] && OVERRIDES+=(device="$DEVICE")
     [[ -n "$LAUNCHER" ]] && OVERRIDES+=(launcher="$LAUNCHER")
@@ -476,10 +483,7 @@ run_eval_for_task() {
         COMPILE_MODEL="False"
     fi
 
-    # Adaptive always uses both checkpoints, so the run name has no harness model.
-    if [[ "$MODE" == "pc_adaptive" ]]; then
-        BASE_SUFFIX="pc_adaptive_${TASK_NAME}"
-    elif [[ "$MODE" == "pc_swap" ]]; then
+    if [[ "$MODE" == "pc_swap" ]]; then
         export PC_PHI="${PC_PHI:-eb}"
         SWAP_CONTROLLER="${CONTROLLER:-$MODEL}"
         if [[ -n "$CONTROLLER" ]]; then
@@ -559,6 +563,7 @@ run_eval_for_task() {
     echo "  Offline: ${OFFLINE}"
     echo "  use_eos_harness: $USE_EOS_HARNESS (false = full steps + full-tail decode, reference LLaDA-style)"
     echo "  Num Fewshot: $NUM_FEWSHOT"
+    echo "  Sample limit: ${LIMIT_OVERRIDE:-all}"
     if [[ -n "$INTERVENTION_MODE" ]]; then
         echo "  Intervention Mode: $INTERVENTION_MODE"
         echo "  Intervention Steps: $INTERVENTION_STEPS"
@@ -594,6 +599,9 @@ run_eval_for_task() {
         ACCEL_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path ${CHECKPOINT_DIR}/results.json --log_samples --cache_requests true"
     else
         ACCEL_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path outputs/${OUTPUT_SUFFIX}.json --log_samples --cache_requests true"
+    fi
+    if [[ -n "$LIMIT_OVERRIDE" ]]; then
+        ACCEL_CMD="${ACCEL_CMD} --limit ${LIMIT_OVERRIDE}"
     fi
     if [[ "${WANDB,,}" == "true" ]]; then
         ACCEL_CMD="${ACCEL_CMD} --wandb_args project=${WANDB_PROJECT},name=${WANDB_NAME}${WANDB_RESUME_ARGS}"

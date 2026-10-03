@@ -52,16 +52,4 @@ python hydra_runners/launch_eval.py \
   task_name=gsm8k,humaneval steps=256 --multirun
 ```
 
-## Experiment 3 — adaptive selection
-
-At each step both LLaDA and LLaDA-1.5 are forwarded. Each model, as controller, builds a set for `pd`, `bd`, `top_k_c`, `top_k_m`, `eb`, and `dus` (12 sets). Ĵ on a set is the controller that built it. Each model then supplies an M̂ on that set, giving 24 values of Ĝ = M̂ + Ĵ. The lowest Ĝ wins. The predictor is the model whose M̂ entered that Ĝ, and its argmax is written. The controller remains the model that built the set. LLaDA-1.5 drops EOS and EoT only from the scores that build its sets and from the token it writes. A set whose positions are already unmasked is skipped. M̂ and Ĵ use only the positions that are still masked.
-
-```bash
-python hydra_runners/launch_eval.py \
-  model=llada mode=pc_adaptive \
-  task_name=gsm8k steps=256 device_map=split
-```
-
-`model` is the harness checkpoint and is reused. The other of LLaDA and LLaDA-1.5 is loaded beside it. The W&B run and the checkpoint directory are `pc_adaptive_{task}_s{steps}`, for example `pc_adaptive_gsm8k_s128`. `device_map=split` places that other checkpoint on `cuda:1` when two GPUs are visible. `share` keeps both on the harness GPU. Swap still uses `device_map=split` to place the controller on `cuda:1`.
-
-Each finished sample appends its per-step scheduler, predictor, and controller to `{task}_s{steps}_adaptive_choices.jsonl` in the run output directory. `{task}_s{steps}_adaptive_choices.csv` is rewritten from that log: one row per step, over the samples that still had masked tokens at that step. `scheduler_1` / `scheduler_2` / `scheduler_3` are the three most common winning schedulers. `predictor` and `controller` are the most common roles. Shares are that count divided by `n_samples` at the step. `g_hat`, `m_hat`, `m_hat_other`, `j_hat`, and `j_hat_other` are means over those samples. `g_hat` is the winning Ĝ. `m_hat` is the winning predictor's M̂ and `m_hat_other` is the other model's M̂ on the same set. `j_hat` is the winning controller's Ĵ, the one inside Ĝ. `j_hat_other` is the winning predictor's Ĵ on that set. A later line for the same sample replaces the earlier one, so a resumed run does not double-count.
+`device_map=split` places the controller on `cuda:1`. `share` keeps both on the harness GPU.

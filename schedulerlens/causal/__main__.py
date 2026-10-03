@@ -158,7 +158,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
 
 def _cmd_roles(args: argparse.Namespace) -> int:
-    """Print the four swap cells and the adaptive arms for a Hydra sweep."""
+    """Print the four swap cells for a Hydra sweep."""
     os.environ["PC_PHI"] = args.phi
     os.environ["PC_ARM"] = args.arm
     os.environ["PC_LAMBDA"] = str(args.lam)
@@ -171,7 +171,7 @@ def _cmd_roles(args: argparse.Namespace) -> int:
     print(
         "Launch lm-eval with the harness model as the predictor and "
         "PC_CONTROLLER set to the controller. schedulers.generate routes "
-        "mode pc_swap / pc_adaptive into schedulerlens.causal.generate."
+        "mode pc_swap into schedulerlens.causal.generate."
     )
     return 0
 
@@ -203,7 +203,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, help_text in (
         ("swap", "Exp2: full predictor–controller swap (sets env for eval)"),
-        ("adaptive", "Exp3: proxy-guided adaptive selection (sets env for eval)"),
     ):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--phi", default="eb", choices=SUPPORTED_PHI)
@@ -217,12 +216,12 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     if argv is None:
         argv = sys.argv[1:]
-    if not argv or argv[0] not in ("audit", "swap", "adaptive"):
+    if not argv or argv[0] not in ("audit", "swap"):
         argv = ["audit", *argv]
     args = build_parser().parse_args(argv)
     if args.command == "audit":
         return _cmd_audit(args)
-    args.mode = "pc_swap" if args.command == "swap" else "pc_adaptive"
+    args.mode = "pc_swap"
     return _cmd_roles(args)
 
 

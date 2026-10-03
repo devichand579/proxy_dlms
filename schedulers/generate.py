@@ -72,7 +72,7 @@ def generate(
         confidence_eos_eot_inf=b44,
     )
 
-    if mode in ("pc_swap", "pc_adaptive"):
+    if mode == "pc_swap":
         gen, steps_taken, blocks = generate_proxy(
             model,
             input_ids,

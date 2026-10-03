@@ -31,7 +31,6 @@ MODE_MAP = {
     "top_k_m": ("top_k", "top_margin"),
     "dus": ("dus", "confidence"),
     "pc_swap": ("pc_swap", "confidence"),
-    "pc_adaptive": ("pc_adaptive", "confidence"),
 }
 
 
@@ -54,11 +53,6 @@ def _intervention_suffix(intervention_mode, intervention_steps, intervention_k: 
     else:
         steps_safe = re.sub(r"[,_]", "_", str(steps_raw))
     return f"_intv_{intervention_mode}_steps{steps_safe}_k{intervention_k}"
-
-
-def _adaptive_output_basename(task_name: str, steps: int) -> str:
-    """``pc_adaptive_{task}_s{steps}``. Both checkpoints run, so no harness model."""
-    return f"pc_adaptive_{task_name}_s{int(steps)}"
 
 
 def _swap_output_basename(
@@ -201,19 +195,17 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
 
     num_fewshot_cfg = cfg.get("num_fewshot")
     num_fewshot = int(num_fewshot_cfg) if num_fewshot_cfg is not None else get_num_fewshot(task_name)
+    limit_cfg = cfg.get("limit")
+    limit = int(limit_cfg) if limit_cfg is not None else None
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be a positive integer")
     model_path = f"./models/{model}"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     resumable = _to_bool(cfg.get("resumable", False))
     run_id = cfg.get("run_id") or None
 
     run_id_explicit = bool(resumable and run_id)
-    if mode == "pc_adaptive":
-        base_suffix = _adaptive_output_basename(task_name, steps)
-        if intervention_mode:
-            base_suffix += _intervention_suffix(
-                intervention_mode, intervention_steps, intervention_k
-            )
-    elif mode == "pc_swap":
+    if mode == "pc_swap":
         swap_controller = str(cfg.get("controller") or model)
         swap_phi = str(cfg.get("pc_phi") or "eb")
         base_suffix = _swap_output_basename(
@@ -301,7 +293,8 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         f"gen_length={gen_length} steps={steps} block_length={block_length} top_k={top_k}"
     )
     print(
-        f"  num_fewshot={num_fewshot} wandb={wandb} offline={offline} device={model_device} "
+        f"  num_fewshot={num_fewshot} limit={limit if limit is not None else 'all'} "
+        f"wandb={wandb} offline={offline} device={model_device} "
         f"cuda_visible={env.get('CUDA_VISIBLE_DEVICES', '(unchanged)')} "
         f"tracing_enabled={tracing_enabled} "
         f"trace_hf_upload={env.get('TRACE_HF_UPLOAD')} trace_hf_repo={env.get('TRACE_HF_DATASET_REPO', 'schedulerlens')} "
@@ -326,6 +319,8 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         cmd += ["--output_path", f"{checkpoint_dir}/results.json", "--log_samples"]
     else:
         cmd += ["--output_path", f"outputs/{output_suffix}.json", "--log_samples"]
+    if limit is not None:
+        cmd += ["--limit", str(limit)]
     if wandb:
         cmd += ["--wandb_args", f"project={env.get('WANDB_PROJECT', 'strace')},name={wandb_name}{wandb_resume_args}"]
 

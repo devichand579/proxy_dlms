@@ -281,14 +281,15 @@ def audit_trace(
     return out
 
 
-def _finite_mean(values: list[float]) -> float:
-    finite = [v for v in values if np.isfinite(v)]
-    return float(np.mean(finite)) if finite else float("nan")
+def _mean(values: list[float]) -> float:
+    if not values:
+        return float("nan")
+    return float(np.mean(np.asarray(values, dtype=np.float64)))
 
 
 def _sample_mean(deltas: list[StepDelta]) -> dict[str, float]:
     return {
-        key: _finite_mean([float(getattr(d, key)) for d in deltas])
+        key: _mean([float(getattr(d, key)) for d in deltas])
         for key in _MEAN_KEYS
     }
 
@@ -314,7 +315,7 @@ def _window_row(
     row["n_samples"] = n_samples
     row["n_steps_scored"] = n_steps_scored
     for key in _MEAN_KEYS:
-        row[key] = _finite_mean([sample[key] for sample in sample_means])
+        row[key] = _mean([sample[key] for sample in sample_means])
     return row
 
 
