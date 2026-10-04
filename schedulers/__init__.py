@@ -4,7 +4,6 @@ from schedulers.fhs import generate_fhs
 from schedulers.eb_sampler import generate_EB
 from schedulers.dus import generate_dus
 from schedulers.fdm import generate_fdm
-from schedulers.proxy_swap import generate_proxy
 
 __all__ = [
     'generate_llada',
@@ -13,5 +12,4 @@ __all__ = [
     'generate_EB',
     'generate_dus',
     'generate_fdm',
-    'generate_proxy',
 ]

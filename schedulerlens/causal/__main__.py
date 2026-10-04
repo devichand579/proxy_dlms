@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -13,6 +12,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from load_model import infer_b44_eos_unmask_safety
 from schedulerlens.causal.audit import (
     DEFAULT_PREFIX_STEPS,
     audit_npz,
@@ -21,12 +21,10 @@ from schedulerlens.causal.audit import (
     load_audit_csv,
     write_audit_csv,
 )
-from load_model import infer_b44_eos_unmask_safety  
-from schedulerlens.causal.models import place_fleet  
-from schedulerlens.causal.select import SUPPORTED_PHI
+from schedulerlens.causal.models import place_fleet
 from schedulerlens.completion import duplicate_run_stems
-from schedulerlens.metrics import parse_prefix_steps 
-from traces.hf_trace_upload import (  
+from schedulerlens.metrics import parse_prefix_steps
+from traces.hf_trace_upload import (
     download_file_to_temp,
     list_repo_files,
     remove_temp_download,
@@ -135,10 +133,14 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                     predictors=loaded["predictors"],
                     controllers=loaded["controllers"],
                     mask_id=loaded["mask_id"],
+                    pad_id=loaded["pad_id"],
                     predictor_name=args.predictor,
                     controller_name=args.controller,
                     eos_id=loaded["eos_id"],
                     eot_id=loaded["eot_id"],
+                    predictor_drop_eos=infer_b44_eos_unmask_safety(
+                        loaded["predictor_dir"]
+                    ),
                     controller_drop_eos=infer_b44_eos_unmask_safety(loaded["controller_dir"]),
                     block_length=args.block_length,
                     top_k=args.top_k,
@@ -157,27 +159,10 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_roles(args: argparse.Namespace) -> int:
-    """Print the four swap cells for a Hydra sweep."""
-    os.environ["PC_PHI"] = args.phi
-    os.environ["PC_ARM"] = args.arm
-    os.environ["PC_LAMBDA"] = str(args.lam)
-    os.environ["PC_CONTROLLER"] = args.controller
-    os.environ["PC_DEVICE_MAP"] = args.device_map
-    print(
-        f"mode={args.mode} predictor={args.predictor} controller={args.controller} "
-        f"phi={args.phi} arm={args.arm} lambda={args.lam}"
-    )
-    print(
-        "Launch lm-eval with the harness model as the predictor and "
-        "PC_CONTROLLER set to the controller. schedulers.generate routes "
-        "mode pc_swap into schedulerlens.causal.generate."
-    )
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="SchedulerLens causal predictor–controller experiments")
+    parser = argparse.ArgumentParser(
+        description="SchedulerLens fixed-history causal audit"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     audit = sub.add_parser("audit", help="Exp1: fixed-history Δ_pred / Δ_ctrl on NPZs")
@@ -201,14 +186,6 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("-o", "--output-dir", type=Path, required=True)
     _add_common(audit)
 
-    for name, help_text in (
-        ("swap", "Exp2: full predictor–controller swap (sets env for eval)"),
-    ):
-        p = sub.add_parser(name, help=help_text)
-        p.add_argument("--phi", default="eb", choices=SUPPORTED_PHI)
-        p.add_argument("--arm", default="joint", choices=("m", "j", "joint", "random"))
-        p.add_argument("--lam", type=float, default=1.0)
-        _add_common(p)
     return parser
 
 
@@ -216,13 +193,10 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     if argv is None:
         argv = sys.argv[1:]
-    if not argv or argv[0] not in ("audit", "swap"):
+    if not argv or argv[0] != "audit":
         argv = ["audit", *argv]
     args = build_parser().parse_args(argv)
-    if args.command == "audit":
-        return _cmd_audit(args)
-    args.mode = "pc_swap"
-    return _cmd_roles(args)
+    return _cmd_audit(args)
 
 
 if __name__ == "__main__":

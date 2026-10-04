@@ -24,11 +24,13 @@ def reconstruct_state(
     step: int,
     *,
     mask_id: int,
+    pad_id: int,
     trace_name: str | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``(x, gen_mask)`` just before ``step`` is applied.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return ``(x, gen_mask, attention_mask)`` just before ``step`` is applied.
 
     ``x`` is prompt ‖ generation. ``gen_mask`` is True where the gen region is still masked.
+    Stored prompts include left padding, so replay must restore its attention mask.
     """
     prompt = prompt_ids(trace)
     gen_length = int(trace.get("gen_length") or 0)
@@ -46,4 +48,6 @@ def reconstruct_state(
             continue
         x[prompt_len + int(gen_pos)] = int(token)
     gen_mask = x[prompt_len:] == int(mask_id)
-    return x, gen_mask
+    attention_mask = np.ones(x.shape[0], dtype=np.int64)
+    attention_mask[:prompt_len] = prompt != int(pad_id)
+    return x, gen_mask, attention_mask

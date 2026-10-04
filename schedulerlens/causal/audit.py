@@ -64,6 +64,7 @@ def _split_even(items: list, n: int) -> list[list]:
 def _forward_scores(
     model,
     states: list[np.ndarray],
+    attention_masks: list[np.ndarray],
     *,
     drop_eos: bool,
     eos_id: int,
@@ -74,48 +75,86 @@ def _forward_scores(
     if device.type == "cuda":
         torch.cuda.set_device(device)
     stacked = torch.tensor(np.stack(states, axis=0), dtype=torch.long, device=device)
+    stacked_attention = torch.tensor(
+        np.stack(attention_masks, axis=0),
+        dtype=torch.long,
+        device=device,
+    )
     with torch.inference_mode():
-        logits = model(stacked).logits
+        logits = model(stacked, attention_mask=stacked_attention).logits
         raw = bundle_from_logits(logits)
         select = (
             bundle_for_select(logits, drop_eos=True, eos_id=eos_id, eot_id=eot_id)
             if drop_eos
             else raw
         )
-    del logits, stacked
+    del logits, stacked, stacked_attention
     return raw, select
 
 
 def _parallel_scores(
-    groups: list[tuple[Any, list[np.ndarray], bool]],
+    groups: list[tuple[Any, list[np.ndarray], list[np.ndarray], bool]],
     *,
     eos_id: int,
     eot_id: Optional[int],
 ) -> list[tuple[list[ScoreBundle], list[ScoreBundle]]]:
     """Run each ``(model, states, drop_eos)`` forward. Distinct devices run together."""
     if len(groups) == 1:
-        model, states, drop_eos = groups[0]
-        return [_forward_scores(model, states, drop_eos=drop_eos, eos_id=eos_id, eot_id=eot_id)]
-    devices = {str(next(model.parameters()).device) for model, _states, _drop in groups}
+        model, states, attention_masks, drop_eos = groups[0]
+        return [
+            _forward_scores(
+                model,
+                states,
+                attention_masks,
+                drop_eos=drop_eos,
+                eos_id=eos_id,
+                eot_id=eot_id,
+            )
+        ]
+    devices = {
+        str(next(model.parameters()).device)
+        for model, _states, _attention, _drop in groups
+    }
     if len(devices) == 1:
         return [
-            _forward_scores(model, states, drop_eos=drop_eos, eos_id=eos_id, eot_id=eot_id)
-            for model, states, drop_eos in groups
+            _forward_scores(
+                model,
+                states,
+                attention_masks,
+                drop_eos=drop_eos,
+                eos_id=eos_id,
+                eot_id=eot_id,
+            )
+            for model, states, attention_masks, drop_eos in groups
         ]
     slots: list[Optional[tuple[list[ScoreBundle], list[ScoreBundle]]]] = [None] * len(groups)
     errors: list[BaseException] = []
 
-    def run(index: int, model, states: list[np.ndarray], drop_eos: bool) -> None:
+    def run(
+        index: int,
+        model,
+        states: list[np.ndarray],
+        attention_masks: list[np.ndarray],
+        drop_eos: bool,
+    ) -> None:
         try:
             slots[index] = _forward_scores(
-                model, states, drop_eos=drop_eos, eos_id=eos_id, eot_id=eot_id
+                model,
+                states,
+                attention_masks,
+                drop_eos=drop_eos,
+                eos_id=eos_id,
+                eot_id=eot_id,
             )
         except BaseException as exc:
             errors.append(exc)
 
     threads = [
-        threading.Thread(target=run, args=(i, model, states, drop_eos))
-        for i, (model, states, drop_eos) in enumerate(groups)
+        threading.Thread(
+            target=run,
+            args=(i, model, states, attention_masks, drop_eos),
+        )
+        for i, (model, states, attention_masks, drop_eos) in enumerate(groups)
     ]
     for thread in threads:
         thread.start()
@@ -129,14 +168,19 @@ def _parallel_scores(
 def _role_scores(
     models: Sequence[Any],
     states: list[np.ndarray],
+    attention_masks: list[np.ndarray],
     *,
     drop_eos: bool,
     eos_id: int,
     eot_id: Optional[int],
 ) -> tuple[list[ScoreBundle], list[ScoreBundle]]:
     chunks = _split_even(states, len(models))
+    attention_chunks = _split_even(attention_masks, len(models))
     parts = _parallel_scores(
-        [(model, part, drop_eos) for model, part in zip(models, chunks)],
+        [
+            (model, part, attention_part, drop_eos)
+            for model, part, attention_part in zip(models, chunks, attention_chunks)
+        ],
         eos_id=eos_id,
         eot_id=eot_id,
     )
@@ -149,7 +193,7 @@ def _role_scores(
 
 
 def _chunk_deltas(
-    chunk: list[tuple[int, np.ndarray, np.ndarray]],
+    chunk: list[tuple[int, np.ndarray, np.ndarray, np.ndarray]],
     *,
     phi: str,
     predictors: Sequence[Any],
@@ -161,41 +205,63 @@ def _chunk_deltas(
     prompt_len: int,
     eos_id: int,
     eot_id: Optional[int],
+    predictor_drop_eos: bool,
     controller_drop_eos: bool,
 ) -> list[StepDelta]:
     states = [row[1] for row in chunk]
+    attention_masks = [row[3] for row in chunk]
     same = controllers is predictors
     if same:
-        bundles_p, select_c = _role_scores(
-            predictors, states, drop_eos=controller_drop_eos, eos_id=eos_id, eot_id=eot_id
+        bundles_p, select_p = _role_scores(
+            predictors,
+            states,
+            attention_masks,
+            drop_eos=predictor_drop_eos,
+            eos_id=eos_id,
+            eot_id=eot_id,
         )
         bundles_c = bundles_p
+        select_c = select_p
     else:
         pred_chunks = _split_even(states, len(predictors))
+        pred_attention = _split_even(attention_masks, len(predictors))
         ctrl_chunks = _split_even(states, len(controllers))
+        ctrl_attention = _split_even(attention_masks, len(controllers))
         groups = [
-            (model, part, False) for model, part in zip(predictors, pred_chunks)
+            (model, part, attention_part, predictor_drop_eos)
+            for model, part, attention_part in zip(
+                predictors,
+                pred_chunks,
+                pred_attention,
+            )
         ]
         groups += [
-            (model, part, controller_drop_eos)
-            for model, part in zip(controllers, ctrl_chunks)
+            (model, part, attention_part, controller_drop_eos)
+            for model, part, attention_part in zip(
+                controllers,
+                ctrl_chunks,
+                ctrl_attention,
+            )
         ]
         parts = _parallel_scores(groups, eos_id=eos_id, eot_id=eot_id)
         bundles_p: list[ScoreBundle] = []
+        select_p: list[ScoreBundle] = []
         bundles_c: list[ScoreBundle] = []
         select_c: list[ScoreBundle] = []
-        for part_raw, _part_select in parts[: len(pred_chunks)]:
+        for part_raw, part_select in parts[: len(pred_chunks)]:
             bundles_p.extend(part_raw)
+            select_p.extend(part_select)
         for part_raw, part_select in parts[len(pred_chunks) :]:
             bundles_c.extend(part_raw)
             select_c.extend(part_select)
     out: list[StepDelta] = []
-    for i, (step, _state, gen_mask) in enumerate(chunk):
+    for i, (step, _state, gen_mask, _attention_mask) in enumerate(chunk):
         bundle_pred = bundles_p[i].gen(prompt_len)
+        select_pred = select_p[i].gen(prompt_len)
         bundle_ctrl = bundles_c[i].gen(prompt_len)
         select_ctrl = select_c[i].gen(prompt_len)
         s0 = select_gen(
-            phi, bundle_pred, gen_mask,
+            phi, select_pred, gen_mask,
             step=step, steps=steps_budget, block_length=block_length,
             top_k=top_k, gamma=gamma,
         )
@@ -224,6 +290,7 @@ def audit_trace(
     predictors: Sequence[Any],
     controllers: Sequence[Any],
     mask_id: int,
+    pad_id: int,
     steps_budget: int,
     block_length: Optional[int] = None,
     top_k: int = 2,
@@ -232,6 +299,7 @@ def audit_trace(
     trace_name: str | None = None,
     eos_id: int = 126081,
     eot_id: Optional[int] = None,
+    predictor_drop_eos: bool = False,
     controller_drop_eos: bool = False,
     batch_size: int = 8,
 ) -> list[StepDelta]:
@@ -246,17 +314,21 @@ def audit_trace(
     n_steps = len(trace.get("step_traces") or [])
     if max_steps is not None:
         n_steps = min(n_steps, int(max_steps))
-    pending: list[tuple[int, np.ndarray, np.ndarray]] = []
+    pending: list[tuple[int, np.ndarray, np.ndarray, np.ndarray]] = []
     prompt_len = None
     for t in range(n_steps):
-        x, gen_mask = reconstruct_state(
-            trace, t, mask_id=mask_id, trace_name=trace_name
+        x, gen_mask, state_attention = reconstruct_state(
+            trace,
+            t,
+            mask_id=mask_id,
+            pad_id=pad_id,
+            trace_name=trace_name,
         )
         if prompt_len is None:
             prompt_len = int(x.shape[0] - gen_mask.shape[0])
         if not gen_mask.any():
             continue
-        pending.append((t, x, gen_mask))
+        pending.append((t, x, gen_mask, state_attention))
     if prompt_len is None:
         return []
     out: list[StepDelta] = []
@@ -275,6 +347,7 @@ def audit_trace(
                 prompt_len=prompt_len,
                 eos_id=eos_id,
                 eot_id=eot_id,
+                predictor_drop_eos=predictor_drop_eos,
                 controller_drop_eos=controller_drop_eos,
             )
         )
@@ -325,6 +398,7 @@ def audit_npz(
     predictors: Sequence[Any],
     controllers: Sequence[Any],
     mask_id: int,
+    pad_id: int,
     predictor_name: str,
     controller_name: str,
     block_length: Optional[int] = None,
@@ -335,6 +409,7 @@ def audit_npz(
     allowed_models: Iterable[str] = ("llada",),
     eos_id: int = 126081,
     eot_id: Optional[int] = None,
+    predictor_drop_eos: bool = False,
     controller_drop_eos: bool = False,
     batch_size: int = 8,
     prefix_steps: Optional[Sequence[int]] = None,
@@ -359,6 +434,7 @@ def audit_npz(
             predictors=predictors,
             controllers=controllers,
             mask_id=mask_id,
+            pad_id=pad_id,
             steps_budget=steps_budget,
             block_length=block_length,
             top_k=top_k,
@@ -367,6 +443,7 @@ def audit_npz(
             trace_name=str(path),
             eos_id=eos_id,
             eot_id=eot_id,
+            predictor_drop_eos=predictor_drop_eos,
             controller_drop_eos=controller_drop_eos,
             batch_size=batch_size,
         )

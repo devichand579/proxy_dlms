@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from load_model import infer_diffusion_token_ids, load_model
+from load_model import infer_diffusion_token_ids, load_model, load_tokenizer
 
 ALLOWED_MODELS = ("llada", "llada1_5")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +38,13 @@ def load_role(name: str, device: str, *, compile_model: bool = False):
     )
     mask_id, eos_id, eot_id = infer_diffusion_token_ids(directory)
     return model, directory, int(mask_id), int(eos_id), eot_id
+
+
+def role_pad_id(directory: Path) -> int:
+    tokenizer = load_tokenizer(str(directory))
+    if tokenizer.pad_token_id is None:
+        raise ValueError(f"tokenizer has no pad token id: {directory}")
+    return int(tokenizer.pad_token_id)
 
 
 def role_devices(device_map: str) -> tuple[list[str], list[str]]:
@@ -98,10 +105,17 @@ def place_fleet(
             if (mask_ctrl, eos_ctrl) != (mask_id, eos_id):
                 raise ValueError(
                     f"token ids differ between {pred_dir.name} and {directory.name}; "
-                    "causal swap requires a shared token space"
+                    "causal audit requires a shared token space"
                 )
             ctrl_dir = directory
             controllers.append(model)
+    pad_id = role_pad_id(pred_dir)
+    controller_pad_id = role_pad_id(ctrl_dir)
+    if controller_pad_id != pad_id:
+        raise ValueError(
+            f"pad token ids differ between {pred_dir.name} and {ctrl_dir.name}: "
+            f"{pad_id} != {controller_pad_id}"
+        )
     return {
         "predictors": predictors,
         "controllers": controllers,
@@ -112,54 +126,7 @@ def place_fleet(
         "mask_id": mask_id,
         "eos_id": eos_id,
         "eot_id": eot_id,
+        "pad_id": pad_id,
         "predictor_devices": [str(next(m.parameters()).device) for m in predictors],
         "controller_devices": [str(next(m.parameters()).device) for m in controllers],
-    }
-
-
-def place_pair(
-    predictor: str,
-    controller: str,
-    *,
-    device_map: str = "split",
-    compile_model: bool = False,
-):
-    """Load the predictor and the controller.
-
-    ``split`` puts the predictor on cuda:0 and the controller on cuda:1 when
-    two GPUs are visible. ``share`` puts both on cuda:0 (or cpu).
-    """
-    if device_map not in ("split", "share"):
-        raise ValueError(f"device_map must be split or share, got {device_map!r}")
-    n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    if n_gpu == 0:
-        dev_pred = dev_ctrl = "cpu"
-    elif device_map == "split" and n_gpu >= 2:
-        dev_pred, dev_ctrl = "cuda:0", "cuda:1"
-    else:
-        dev_pred = dev_ctrl = "cuda:0"
-    pred_model, pred_dir, mask_id, eos_id, eot_id = load_role(
-        predictor, dev_pred, compile_model=compile_model
-    )
-    if resolve_model_dir(predictor) == resolve_model_dir(controller) and dev_pred == dev_ctrl:
-        ctrl_model, ctrl_dir = pred_model, pred_dir
-    else:
-        ctrl_model, ctrl_dir, mask_ctrl, eos_ctrl, _eot_ctrl = load_role(
-            controller, dev_ctrl, compile_model=compile_model
-        )
-        if (mask_ctrl, eos_ctrl) != (mask_id, eos_id):
-            raise ValueError(
-                f"token ids differ between {pred_dir.name} and {ctrl_dir.name}; "
-                "causal swap requires a shared token space"
-            )
-    return {
-        "predictor": pred_model,
-        "controller": ctrl_model,
-        "predictor_dir": pred_dir,
-        "controller_dir": ctrl_dir,
-        "mask_id": mask_id,
-        "eos_id": eos_id,
-        "eot_id": eot_id,
-        "device_predictor": dev_pred,
-        "device_controller": dev_ctrl,
     }

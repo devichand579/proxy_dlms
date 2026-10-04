@@ -29,43 +29,6 @@ _active_tracer_ctx: contextvars.ContextVar[Optional["ModelTracer"]] = contextvar
 )
 
 
-def _gen_row_tensor(values, dtype: torch.dtype) -> torch.Tensor:
-    tensor = torch.as_tensor(values, dtype=dtype).detach()
-    if tensor.dim() == 1:
-        tensor = tensor.unsqueeze(0)
-    return tensor.contiguous()
-
-
-def rewrite_open_step_row(
-    batch_index: int,
-    *,
-    predictions=None,
-    confidences=None,
-    entropies=None,
-) -> None:
-    """Overwrite gen-region fields on the open trace step. No-op when tracing is off."""
-    tracer = _active_tracer_ctx.get()
-    if tracer is None:
-        return
-    if tracer._batch_contexts is not None:
-        if batch_index < 0 or batch_index >= len(tracer._batch_contexts):
-            return
-        ctx = tracer._batch_contexts[batch_index]
-    elif batch_index == 0:
-        ctx = tracer.tracing_context
-    else:
-        return
-    if ctx is None or not ctx.trace.step_traces:
-        return
-    step = ctx.trace.step_traces[-1]
-    if predictions is not None and ctx.save_predictions:
-        step.predictions = _gen_row_tensor(predictions, torch.long)
-    if confidences is not None and ctx.save_confidences:
-        step.confidences = _gen_row_tensor(confidences, torch.float32)
-    if entropies is not None and ctx.save_entropies:
-        step.entropies = _gen_row_tensor(entropies, torch.float32)
-
-
 def note_trace_commit(tokens: torch.Tensor) -> None:
     """Selected tokens recorded on the next boolean write come from ``tokens``."""
     tracer = _active_tracer_ctx.get()

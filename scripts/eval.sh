@@ -37,7 +37,7 @@
 # Parse command-line arguments
 # Usage: ./scripts/eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [opts...]
 #   Full flags: see Error/Unknown option messages below; e.g. --resumable [--run_id] [--slurm] [--use_eos_harness / --no_eos_harness]
-# Mode shortcuts: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, pc_swap
+# Mode shortcuts: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus
 # Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, arc_challenge_chat
 # --model: basename of a folder under ./models/ (must match lm-eval registration). Examples: llada, llada1_5, dream.
 #          Weights/tokenizer load from ./models/<model>/; mask/EOS/EoT ids come from that folder's config when not overridden.
@@ -60,8 +60,6 @@ MODE=""
 STRATEGY=""
 TASK_NAME=""
 MODEL=""
-CONTROLLER=""
-PC_PHI=""
 COMPILE_MODEL=""
 INTERVENTION_MODE=""
 INTERVENTION_STEPS=""
@@ -103,14 +101,6 @@ while [[ $# -gt 0 ]]; do
         # See header: must be llada | llada1_5 | dream (directory name under ./models/)
         --model)
             MODEL="$2"
-            shift 2
-            ;;
-        --controller)
-            CONTROLLER="$2"
-            shift 2
-            ;;
-        --pc_phi)
-            PC_PHI="$2"
             shift 2
             ;;
         --compile_model)
@@ -254,7 +244,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Run: --slurm (srun for sbatch)  --resumable [--run_id]  (checkpoint under outputs/…)"
     echo "  Multi-GPU: --parallel_config <yaml> per-GPU settings (launch_eval parallel_runs_file=); see docs/evaluation.md"
     echo "  Offline: --offline  |  GPU: --device <0|1|cuda|cuda:0|cpu>"
-    echo "  Mode shortcuts: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, pc_swap"
+    echo "  Mode shortcuts: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus"
     echo "  Few-shot defaults: humaneval/arc 0, gsm8k/math500 4, mbpp 3, arc_challenge_chat 5; block_length defaults: bd 32, fdm 64, dus 16, else gen_length"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True"
@@ -297,12 +287,8 @@ case "$MODE" in
         MODE="dus"
         STRATEGY="confidence"
         ;;
-    pc_swap)
-        MODE="pc_swap"
-        STRATEGY="confidence"
-        ;;
     *)
-        echo "Warning: Unknown mode '$MODE'. Using as-is. Valid modes: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, pc_swap"
+        echo "Warning: Unknown mode '$MODE'. Using as-is. Valid modes: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus"
         ;;
 esac
 
@@ -483,17 +469,8 @@ run_eval_for_task() {
         COMPILE_MODEL="False"
     fi
 
-    if [[ "$MODE" == "pc_swap" ]]; then
-        export PC_PHI="${PC_PHI:-eb}"
-        SWAP_CONTROLLER="${CONTROLLER:-$MODEL}"
-        if [[ -n "$CONTROLLER" ]]; then
-            export PC_CONTROLLER="$CONTROLLER"
-        fi
-        BASE_SUFFIX="${MODEL}_${SWAP_CONTROLLER}_${PC_PHI}_${TASK_NAME}"
-    else
-        # MODEL_TASK_MODE[_intv_…][_s{steps}]; explicit --run_id wins as-is
-        BASE_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}"
-    fi
+    # MODEL_TASK_MODE[_intv_…][_s{steps}]; explicit --run_id wins as-is
+    BASE_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}"
     if [[ -n "$INTERVENTION_MODE" ]]; then
         INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
         INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
@@ -549,10 +526,6 @@ run_eval_for_task() {
     echo "  Mode: $MODE"
     echo "  Task Name: $TASK_NAME"
     echo "  Model: $MODEL"
-    if [[ "$MODE" == "pc_swap" ]]; then
-        echo "  Controller: ${SWAP_CONTROLLER}"
-        echo "  Scheduler: ${PC_PHI}"
-    fi
     echo "  Model Path: $MODEL_PATH"
     echo "  Gen Length: $GEN_LENGTH"
     echo "  Steps: $STEPS"
