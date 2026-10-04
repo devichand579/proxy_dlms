@@ -34,6 +34,12 @@ limit: null  # null = evaluate the full task; positive integer = evaluate only t
 # Sampling (harness model_args). null gen_length/steps = task defaults (see sampling_defaults.py).
 gen_length: null
 steps: null
+temperature: null
+# Best-of-K stochastic reranking by SchedulerLens G-cap.
+gcap_scheduler: pd
+gcap_k: 8
+gcap_score_mode: per_commit  # raw | per_commit
+gcap_selection_seed: 0
 # Scheduler block size; null = mode default (block_diffusion 32, fdm 64, dus 16, else gen_length). Not used for fhs.
 block_length: null
 

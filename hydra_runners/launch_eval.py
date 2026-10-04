@@ -30,6 +30,17 @@ MODE_MAP = {
     "top_k_c": ("top_k", "confidence"),
     "top_k_m": ("top_k", "top_margin"),
     "dus": ("dus", "confidence"),
+    "gcap": ("gcap_rerank", "confidence"),
+    "gcap_rerank": ("gcap_rerank", "confidence"),
+}
+
+GCAP_SCHEDULER_MAP = {
+    "pd": ("pure_diffusion", "confidence"),
+    "bd": ("block_diffusion", "confidence"),
+    "eb": ("eb_sampler", "confidence"),
+    "top_k_c": ("top_k", "confidence"),
+    "top_k_m": ("top_k", "top_margin"),
+    "dus": ("dus", "confidence"),
 }
 
 
@@ -171,12 +182,35 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         mode = mode_input
         strategy = cfg.get("strategy")
 
+    gcap_scheduler = str(cfg.get("gcap_scheduler", "pd"))
+    if gcap_scheduler not in GCAP_SCHEDULER_MAP:
+        raise ValueError(
+            f"unsupported gcap_scheduler {gcap_scheduler!r}; "
+            f"expected one of {tuple(GCAP_SCHEDULER_MAP)}"
+        )
+    gcap_base_mode, gcap_strategy = GCAP_SCHEDULER_MAP[gcap_scheduler]
+    if mode == "gcap_rerank":
+        strategy = gcap_strategy
+    gcap_k = int(cfg.get("gcap_k", 8))
+    gcap_score_mode = str(cfg.get("gcap_score_mode", "per_commit"))
+    gcap_selection_seed = int(cfg.get("gcap_selection_seed", 0))
+    temperature_cfg = cfg.get("temperature")
+    temperature = (
+        0.7 if mode == "gcap_rerank" and temperature_cfg is None
+        else (None if temperature_cfg is None else float(temperature_cfg))
+    )
+    if mode == "gcap_rerank" and gcap_k < 2:
+        raise ValueError("gcap_k must be >= 2")
+    if gcap_score_mode not in ("raw", "per_commit"):
+        raise ValueError("gcap_score_mode must be raw or per_commit")
+
     gen_length, steps = resolve_gen_length_steps(cfg, task_name)
     block_length_cfg = cfg.get("block_length")
     if block_length_cfg is not None:
         block_length = int(block_length_cfg)
     else:
-        block_length = 32 if mode == "block_diffusion" else (64 if mode == "fdm" else (16 if mode == "dus" else gen_length))
+        block_mode = gcap_base_mode if mode == "gcap_rerank" else mode
+        block_length = 32 if block_mode == "block_diffusion" else (64 if block_mode == "fdm" else (16 if block_mode == "dus" else gen_length))
 
     top_k_cfg = cfg.get("top_k")
     top_k = int(top_k_cfg) if top_k_cfg is not None else 1
@@ -189,7 +223,7 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         raise ValueError("limit must be a positive integer")
     model_path = f"./models/{model}"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    resumable = _to_bool(cfg.get("resumable", False))
+    resumable = mode == "gcap_rerank" or _to_bool(cfg.get("resumable", False))
     run_id = cfg.get("run_id") or None
 
     run_id_explicit = bool(resumable and run_id)
@@ -204,6 +238,12 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         intervention_k=intervention_k,
         include_steps=True,
     )
+    if mode == "gcap_rerank":
+        temperature_tag = f"{float(temperature):g}".replace(".", "p")
+        base_suffix = (
+            f"{model}_{task_name}_gcap_{gcap_scheduler}_"
+            f"{gcap_score_mode}_k{gcap_k}_t{temperature_tag}_s{int(steps)}"
+        )
     if run_id_explicit:
         output_suffix = str(run_id)
     elif resumable:
@@ -225,6 +265,14 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         f"task_name={task_name},trace_name={output_suffix},use_eos_harness={str(use_eos_harness).lower()},"
         f"device={model_device}"
     )
+    if temperature is not None:
+        model_args += f",temperature={temperature}"
+    if mode == "gcap_rerank":
+        model_args += (
+            f",gcap_base_mode={gcap_base_mode},gcap_k={gcap_k},"
+            f"gcap_score_mode={gcap_score_mode},"
+            f"gcap_selection_seed={gcap_selection_seed}"
+        )
     if resumable and checkpoint_dir:
         model_args += f",resumable=true,output_dir={checkpoint_dir}"
     if intervention_mode:
@@ -238,10 +286,14 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     env.setdefault("HF_DATASETS_TRUST_REMOTE_CODE", "true")
     env.setdefault("LMEVAL_LOG_LEVEL", "INFO")
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
+    if mode == "gcap_rerank":
+        tracing_enabled = False
     env["TRACING_ENABLED"] = "TRUE" if tracing_enabled else "FALSE"
     if offline:
         apply_offline_env(env)
     _apply_trace_hf_env(env, cfg, offline=offline)
+    if mode == "gcap_rerank":
+        env["TRACE_HF_UPLOAD"] = "FALSE"
     if resumable:
         env["RESUMABLE_RUN_ID"] = output_suffix
         env["CHECKPOINT_DIR"] = checkpoint_dir
@@ -263,6 +315,12 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         f"  compile_model={compile_model} use_eos_harness={use_eos_harness} "
         f"gen_length={gen_length} steps={steps} block_length={block_length} top_k={top_k}"
     )
+    if mode == "gcap_rerank":
+        print(
+            f"  gcap_scheduler={gcap_scheduler} gcap_k={gcap_k} "
+            f"gcap_selections=min_g+random gcap_score_mode={gcap_score_mode} "
+            f"temperature={temperature}"
+        )
     print(
         f"  num_fewshot={num_fewshot} limit={limit if limit is not None else 'all'} "
         f"wandb={wandb} offline={offline} device={model_device} "
@@ -295,7 +353,40 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     if wandb:
         cmd += ["--wandb_args", f"project={env.get('WANDB_PROJECT', 'strace')},name={wandb_name}{wandb_resume_args}"]
 
-    return subprocess.run(cmd, env=env, cwd=project_root).returncode
+    status = subprocess.run(cmd, env=env, cwd=project_root).returncode
+    if status or mode != "gcap_rerank":
+        return status
+
+    random_suffix = f"{output_suffix}_random"
+    random_dir = f"{checkpoint_dir}_random"
+    random_args = model_args.replace(
+        f"trace_name={output_suffix}", f"trace_name={random_suffix}"
+    ).replace(f"output_dir={checkpoint_dir}", f"output_dir={random_dir}")
+    random_args += ",gcap_score_only=true"
+    random_cmd = [
+        *cmd[: cmd.index("--model_args") + 1],
+        random_args,
+        "--write_out",
+        "--cache_requests",
+        "true",
+        "--output_path",
+        f"{random_dir}/results.json",
+        "--log_samples",
+    ]
+    if limit is not None:
+        random_cmd += ["--limit", str(limit)]
+    if wandb:
+        random_cmd += [
+            "--wandb_args",
+            f"project={env.get('WANDB_PROJECT', 'strace')},name={random_suffix}",
+        ]
+    random_env = {
+        **env,
+        "RESUMABLE_RUN_ID": random_suffix,
+        "CHECKPOINT_DIR": random_dir,
+    }
+    print("Scoring random control from the shared candidate pool...")
+    return subprocess.run(random_cmd, env=random_env, cwd=project_root).returncode
 
 
 def _normalize_parallel_slots_payload(data: Any) -> list[Any]:

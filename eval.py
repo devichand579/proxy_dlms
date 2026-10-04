@@ -16,6 +16,7 @@ from load_model import (
     is_dream_model_dir,
     prepend_bos_for_dream,
 )
+import schedulers.gcap_rerank as gcap_rerank
 from schedulers.generate import generate
 from traces.trace_wrapper import _task_trace_list_ctx
 from traces.hf_trace_upload import maybe_upload_eval_trace_file
@@ -265,6 +266,12 @@ class LLaDAEvalHarness(LM):
         resumable=False,
         output_dir=None,
         use_eos_harness: bool = True,
+        temperature=None,
+        gcap_base_mode="pure_diffusion",
+        gcap_k=8,
+        gcap_score_mode="per_commit",
+        gcap_selection_seed=0,
+        gcap_score_only=False,
     ):
         '''
         Args:
@@ -319,6 +326,15 @@ class LLaDAEvalHarness(LM):
         self.mode = str(mode)
         self.strategy = str(strategy)
         self.top_k = int(top_k)
+        self.temperature = (
+            0.7 if self.mode == "gcap_rerank" and temperature is None
+            else (None if temperature is None else float(temperature))
+        )
+        self.gcap_base_mode = str(gcap_base_mode)
+        self.gcap_k = int(gcap_k)
+        self.gcap_score_mode = str(gcap_score_mode)
+        self.gcap_selection_seed = int(gcap_selection_seed)
+        self.gcap_score_only = str(gcap_score_only).lower() in ("true", "1", "yes")
         self.intervention_mode = str(intervention_mode) if intervention_mode is not None else None  # keep None when not set
         if intervention_steps is None:
             self.intervention_steps = None
@@ -627,7 +643,8 @@ class LLaDAEvalHarness(LM):
         # When tracing is enabled, stream each sample's trace to disk (avoids holding all in memory)
         trace_writer = None
         checkpoint_writer = None
-        if self.trace_name is not None:
+        random_checkpoint_writer = None
+        if self.trace_name is not None and self.mode != "gcap_rerank":
             trace_base_dir = "trace_outputs"
             os.makedirs(trace_base_dir, exist_ok=True)
             trace_name_safe = re.sub(r'[^a-zA-Z0-9_.-]', '_', str(self.trace_name))
@@ -647,6 +664,12 @@ class LLaDAEvalHarness(LM):
             if completed_from_checkpoint:
                 self.logger.info(f"Resuming: loaded {len(completed_from_checkpoint)} completed samples from checkpoint")
             checkpoint_writer = open(checkpoint_path, "a")
+            if self.mode == "gcap_rerank" and not self.gcap_score_only:
+                random_dir = f"{self.output_dir}_random"
+                os.makedirs(random_dir, exist_ok=True)
+                random_checkpoint_writer = open(
+                    os.path.join(random_dir, "checkpoint.jsonl"), "a"
+                )
         # W&B inits after model construction; persist run id for next resume once the run is active
         self._maybe_persist_wandb_run_id()
 
@@ -703,6 +726,10 @@ class LLaDAEvalHarness(LM):
                         to_compute.append((orig_idx, req))
 
                 # Run model only for to_compute
+                if self.gcap_score_only and to_compute:
+                    raise RuntimeError(
+                        "paired G-cap control checkpoint is incomplete; rerun the main output"
+                    )
                 if to_compute:
                     to_compute_indices, to_compute_requests = zip(*to_compute)
                     chunk_question_texts = self._maybe_bos_prompts(
@@ -739,29 +766,44 @@ class LLaDAEvalHarness(LM):
                         use_eos_harness=self.use_eos_harness,
                         model_path=self._model_path,
                         invalid_token_ids=self._invalid_token_ids,
+                        temperature=self.temperature,
+                        gcap_base_mode=self.gcap_base_mode,
+                        gcap_k=self.gcap_k,
+                        gcap_score_mode=self.gcap_score_mode,
+                        gcap_selection_seed=self.gcap_selection_seed,
                     )
+                    chunk_gcap_metrics = (
+                        list(gcap_rerank.last_rerank_metrics)
+                        if self.mode == "gcap_rerank"
+                        else []
+                    )
+                    if self.mode == "gcap_rerank" and len(chunk_gcap_metrics) != len(to_compute):
+                        raise RuntimeError(
+                            "G-cap metric count does not match generated batch: "
+                            f"{len(chunk_gcap_metrics)} != {len(to_compute)}"
+                        )
 
                     prompt_len = int(input_ids.shape[1])
-                    generated = self._clamp_generated_for_decode(generated, prompt_len)
-                    if not self.use_eos_harness:
-                        chunk_gen_texts = self.tokenizer.batch_decode(
-                            generated[:, prompt_len:], skip_special_tokens=True
-                        )
-                    else:
-                        gen_tails = []
-                        for b in range(generated.shape[0]):
-                            tail = generated[b, prompt_len:]
-                            eos_positions = (tail == self.eos_id).nonzero(as_tuple=False)
-                            if eos_positions.numel() > 0:
-                                tail = tail[: int(eos_positions[0].item())]
-                            gen_tails.append(tail)
-                        chunk_gen_texts = self.tokenizer.batch_decode(
-                            gen_tails, skip_special_tokens=True
-                        )
-                    for i, gen_text in enumerate(chunk_gen_texts):
-                        for stop in stop_tokens:
-                            if stop in gen_text:
-                                chunk_gen_texts[i] = gen_text.split(stop)[0]
+                    def decode(output):
+                        output = self._clamp_generated_for_decode(output, prompt_len)
+                        tails = output[:, prompt_len:]
+                        if self.use_eos_harness:
+                            tails = [
+                                tail[: int(pos[0].item())] if (pos := (tail == self.eos_id).nonzero(as_tuple=False)).numel() else tail
+                                for tail in tails
+                            ]
+                        texts = self.tokenizer.batch_decode(tails, skip_special_tokens=True)
+                        return [
+                            next((text.split(stop)[0] for stop in stop_tokens if stop in text), text)
+                            for text in texts
+                        ]
+
+                    chunk_gen_texts = decode(generated)
+                    random_gen_texts = (
+                        decode(gcap_rerank.last_random_output)
+                        if self.mode == "gcap_rerank"
+                        else []
+                    )
 
                     for j, orig_idx in enumerate(to_compute_indices):
                         all_gen_texts[orig_idx] = chunk_gen_texts[j]
@@ -775,6 +817,25 @@ class LLaDAEvalHarness(LM):
                                     "prompt": req.args[0],
                                     "resps": [chunk_gen_texts[j]],
                                 }
+                                if self.mode == "gcap_rerank":
+                                    rec["gcap_rerank"] = {
+                                        "base_mode": self.gcap_base_mode,
+                                        "k": self.gcap_k,
+                                        "temperature": self.temperature,
+                                        "selection_seed": self.gcap_selection_seed,
+                                        **chunk_gcap_metrics[j],
+                                    }
+                                    if random_checkpoint_writer is not None:
+                                        random_rec = {
+                                            **rec,
+                                            "resps": [random_gen_texts[j]],
+                                            "gcap_selection": "random",
+                                        }
+                                        random_checkpoint_writer.write(
+                                            json.dumps(random_rec, ensure_ascii=False) + "\n"
+                                        )
+                                        random_checkpoint_writer.flush()
+                                    rec["gcap_selection"] = "min_g"
                                 checkpoint_writer.write(json.dumps(rec, ensure_ascii=False) + "\n")
                                 checkpoint_writer.flush()
                             except Exception as e:
@@ -863,6 +924,8 @@ class LLaDAEvalHarness(LM):
                     checkpoint_writer.close()
                 except Exception as e:
                     self.logger.warning(f"Failed to close checkpoint: {e}")
+            if random_checkpoint_writer is not None:
+                random_checkpoint_writer.close()
 
         if total_requests > 0:
             nfe_avg_call = (

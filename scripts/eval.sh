@@ -37,7 +37,7 @@
 # Parse command-line arguments
 # Usage: ./scripts/eval.sh --batch_size 2 --mode pd --task_name gsm8k --model llada [opts...]
 #   Full flags: see Error/Unknown option messages below; e.g. --resumable [--run_id] [--slurm] [--use_eos_harness / --no_eos_harness]
-# Mode shortcuts: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus
+# Mode shortcuts: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, gcap
 # Intervention and wandb are optional. Datasets: gsm8k, minerva_math500, humaneval, mbpp, arc_challenge_chat
 # --model: basename of a folder under ./models/ (must match lm-eval registration). Examples: llada, llada1_5, dream.
 #          Weights/tokenizer load from ./models/<model>/; mask/EOS/EoT ids come from that folder's config when not overridden.
@@ -75,6 +75,11 @@ BLOCK_LENGTH_OVERRIDE=""
 TOP_K_OVERRIDE=""
 STEPS_OVERRIDE=""
 GEN_LENGTH_OVERRIDE=""
+TEMPERATURE_OVERRIDE=""
+GCAP_SCHEDULER="pd"
+GCAP_K=8
+GCAP_SCORE_MODE="per_commit"
+GCAP_SELECTION_SEED=0
 SLURM_MODE=false
 RESUMABLE=false
 RUN_ID=""
@@ -163,6 +168,26 @@ while [[ $# -gt 0 ]]; do
             GEN_LENGTH_OVERRIDE="$2"
             shift 2
             ;;
+        --temperature)
+            TEMPERATURE_OVERRIDE="$2"
+            shift 2
+            ;;
+        --gcap_scheduler)
+            GCAP_SCHEDULER="$2"
+            shift 2
+            ;;
+        --gcap_k)
+            GCAP_K="$2"
+            shift 2
+            ;;
+        --gcap_score_mode)
+            GCAP_SCORE_MODE="$2"
+            shift 2
+            ;;
+        --gcap_selection_seed)
+            GCAP_SELECTION_SEED="$2"
+            shift 2
+            ;;
         --parallel_config|--parallel_runs_file)
             PARALLEL_CONFIG="$2"
             shift 2
@@ -202,7 +227,8 @@ while [[ $# -gt 0 ]]; do
         *)
             echo "Unknown option: $1"
             echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
-            echo "  Core optional: --num_fewshot --limit (alias: --num_samples) --block_length --top_k --steps --gen_length --compile_model"
+            echo "  Core optional: --num_fewshot --limit (alias: --num_samples) --block_length --top_k --steps --gen_length --temperature --compile_model"
+            echo "  G-cap reranking: --mode gcap --gcap_scheduler pd|bd|eb|top_k_c|top_k_m|dus --gcap_k <K> --gcap_score_mode raw|per_commit"
             echo "  Harness (eval.LLaDAEvalHarness / --model_args): --intervention_mode --intervention_steps --intervention_k"
             echo "  EOS decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode)"
             echo "  Alternative multi-GPU: --parallel_config <parallel_runs.yaml> (per-GPU overrides: mode/model/task/batch — delegates to hydra_runners/launch_eval.py parallel_runs_file=)"
@@ -217,6 +243,14 @@ done
 
 if [[ -n "$LIMIT_OVERRIDE" && ! "$LIMIT_OVERRIDE" =~ ^[1-9][0-9]*$ ]]; then
     echo "Error: --limit/--num_samples must be a positive integer"
+    exit 1
+fi
+if [[ ! "$GCAP_K" =~ ^[0-9]+$ ]] || (( 10#$GCAP_K < 2 )); then
+    echo "Error: --gcap_k must be an integer >= 2"
+    exit 1
+fi
+if [[ "$GCAP_SCORE_MODE" != "raw" && "$GCAP_SCORE_MODE" != "per_commit" ]]; then
+    echo "Error: --gcap_score_mode must be raw or per_commit"
     exit 1
 fi
 
@@ -236,7 +270,8 @@ if [[ -z "$PARALLEL_CONFIG" ]]; then
 if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "Error: Missing required arguments"
     echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
-    echo "  Core optional: --num_fewshot <n> --limit <n> (alias: --num_samples) --block_length <n> --top_k <n> --steps <n> --gen_length <n> --compile_model <bool>"
+    echo "  Core optional: --num_fewshot <n> --limit <n> (alias: --num_samples) --block_length <n> --top_k <n> --steps <n> --gen_length <n> --temperature <float> --compile_model <bool>"
+    echo "  G-cap reranking: --mode gcap --gcap_scheduler pd|bd|eb|top_k_c|top_k_m|dus --gcap_k <K> --gcap_score_mode raw|per_commit"
     echo "  Harness (see eval.LLaDAEvalHarness): --intervention_mode drop|swap, --intervention_steps 0,128,256, --intervention_k <k>"
     echo "  --wandb <True|False>  --tracing_enabled <True|False>  (tracing: trace_outputs/ or JSONL when --resumable)"
     echo "  --trace_hf_upload <True|False>  --trace_hf_dataset_repo <id>  --trace_hf_namespace <user|org>  (Hub dataset push; default repo schedulerlens when tracing on)"
@@ -244,7 +279,7 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "  Run: --slurm (srun for sbatch)  --resumable [--run_id]  (checkpoint under outputs/…)"
     echo "  Multi-GPU: --parallel_config <yaml> per-GPU settings (launch_eval parallel_runs_file=); see docs/evaluation.md"
     echo "  Offline: --offline  |  GPU: --device <0|1|cuda|cuda:0|cpu>"
-    echo "  Mode shortcuts: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus"
+    echo "  Mode shortcuts: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, gcap"
     echo "  Few-shot defaults: humaneval/arc 0, gsm8k/math500 4, mbpp 3, arc_challenge_chat 5; block_length defaults: bd 32, fdm 64, dus 16, else gen_length"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gpqa_main_zeroshot --model llada --compile_model False"
     echo "Example: $0 --batch_size 2 --mode pd --task_name gsm8k --model llada --intervention_mode drop --intervention_steps 0,128,256 --intervention_k 1 --wandb True"
@@ -287,8 +322,24 @@ case "$MODE" in
         MODE="dus"
         STRATEGY="confidence"
         ;;
+    gcap|gcap_rerank)
+        MODE="gcap_rerank"
+        RESUMABLE=true
+        case "$GCAP_SCHEDULER" in
+            pd) GCAP_BASE_MODE="pure_diffusion"; STRATEGY="confidence" ;;
+            bd) GCAP_BASE_MODE="block_diffusion"; STRATEGY="confidence" ;;
+            eb) GCAP_BASE_MODE="eb_sampler"; STRATEGY="confidence" ;;
+            top_k_c) GCAP_BASE_MODE="top_k"; STRATEGY="confidence" ;;
+            top_k_m) GCAP_BASE_MODE="top_k"; STRATEGY="top_margin" ;;
+            dus) GCAP_BASE_MODE="dus"; STRATEGY="confidence" ;;
+            *)
+                echo "Error: unsupported --gcap_scheduler '$GCAP_SCHEDULER'"
+                exit 1
+                ;;
+        esac
+        ;;
     *)
-        echo "Warning: Unknown mode '$MODE'. Using as-is. Valid modes: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus"
+        echo "Warning: Unknown mode '$MODE'. Using as-is. Valid modes: pd, bd, eb, fdm, fhs, top_k_c, top_k_m, dus, gcap"
         ;;
 esac
 
@@ -363,7 +414,6 @@ if [[ "${TRACING_ENABLED_ARG,,}" == "true" ]]; then
 else
     export TRACING_ENABLED=FALSE
 fi
-
 # HF dataset upload for final trace file (default: on when tracing is on -> repo schedulerlens)
 if [[ -n "$TRACE_HF_UPLOAD_ARG" ]]; then
     if [[ "${TRACE_HF_UPLOAD_ARG,,}" == "true" ]]; then
@@ -374,6 +424,10 @@ if [[ -n "$TRACE_HF_UPLOAD_ARG" ]]; then
 elif [[ "${TRACING_ENABLED_ARG,,}" == "true" ]]; then
     export TRACE_HF_UPLOAD=TRUE
 else
+    export TRACE_HF_UPLOAD=FALSE
+fi
+if [[ "$MODE" == "gcap_rerank" ]]; then
+    export TRACING_ENABLED=FALSE
     export TRACE_HF_UPLOAD=FALSE
 fi
 export TRACE_HF_DATASET_REPO="${TRACE_HF_DATASET_REPO_ARG:-schedulerlens}"
@@ -444,11 +498,11 @@ run_eval_for_task() {
     # block_diffusion: 32, fdm: 64, dus: 16, Otherwise: gen_length
     if [[ -n "$BLOCK_LENGTH_OVERRIDE" ]]; then
         export BLOCK_LENGTH=$BLOCK_LENGTH_OVERRIDE
-    elif [[ "$MODE" == "block_diffusion" ]]; then
+    elif [[ "$MODE" == "block_diffusion" || ( "$MODE" == "gcap_rerank" && "$GCAP_BASE_MODE" == "block_diffusion" ) ]]; then
         export BLOCK_LENGTH=32
     elif [[ "$MODE" == "fdm" ]]; then
         export BLOCK_LENGTH=64
-    elif [[ "$MODE" == "dus" ]]; then
+    elif [[ "$MODE" == "dus" || ( "$MODE" == "gcap_rerank" && "$GCAP_BASE_MODE" == "dus" ) ]]; then
         export BLOCK_LENGTH=16
     else
         export BLOCK_LENGTH=$GEN_LENGTH
@@ -471,6 +525,13 @@ run_eval_for_task() {
 
     # MODEL_TASK_MODE[_intv_…][_s{steps}]; explicit --run_id wins as-is
     BASE_SUFFIX="${MODEL}_${TASK_NAME}_${MODE}${TOPK_TAG}"
+    if [[ "$MODE" == "gcap_rerank" ]]; then
+        if [[ -z "$TEMPERATURE_OVERRIDE" ]]; then
+            TEMPERATURE_OVERRIDE="0.7"
+        fi
+        TEMP_TAG="${TEMPERATURE_OVERRIDE//./p}"
+        BASE_SUFFIX="${MODEL}_${TASK_NAME}_gcap_${GCAP_SCHEDULER}_${GCAP_SCORE_MODE}_k${GCAP_K}_t${TEMP_TAG}"
+    fi
     if [[ -n "$INTERVENTION_MODE" ]]; then
         INTERVENTION_STEPS="${INTERVENTION_STEPS:-0}"
         INTERVENTION_STEPS_SAFE="${INTERVENTION_STEPS//,/_}"
@@ -513,6 +574,12 @@ run_eval_for_task() {
 
     # Build model_args (base args + optional intervention params + checkpoint paths when resumable)
     MODEL_ARGS="model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},strategy=${STRATEGY},top_k=${TOP_K},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME},trace_name=${OUTPUT_SUFFIX},use_eos_harness=${USE_EOS_HARNESS},device=${MODEL_DEVICE}"
+    if [[ -n "$TEMPERATURE_OVERRIDE" ]]; then
+        MODEL_ARGS="${MODEL_ARGS},temperature=${TEMPERATURE_OVERRIDE}"
+    fi
+    if [[ "$MODE" == "gcap_rerank" ]]; then
+        MODEL_ARGS="${MODEL_ARGS},gcap_base_mode=${GCAP_BASE_MODE},gcap_k=${GCAP_K},gcap_score_mode=${GCAP_SCORE_MODE},gcap_selection_seed=${GCAP_SELECTION_SEED}"
+    fi
     if [[ "$RESUMABLE" == "true" ]]; then
         MODEL_ARGS="${MODEL_ARGS},resumable=true,output_dir=${CHECKPOINT_DIR}"
     fi
@@ -537,13 +604,19 @@ run_eval_for_task() {
     echo "  use_eos_harness: $USE_EOS_HARNESS (false = full steps + full-tail decode, reference LLaDA-style)"
     echo "  Num Fewshot: $NUM_FEWSHOT"
     echo "  Sample limit: ${LIMIT_OVERRIDE:-all}"
+    if [[ "$MODE" == "gcap_rerank" ]]; then
+        echo "  G-cap base scheduler: $GCAP_SCHEDULER ($GCAP_BASE_MODE)"
+        echo "  G-cap candidates: $GCAP_K"
+        echo "  G-cap selections: min_g + random ($GCAP_SCORE_MODE)"
+        echo "  Sampling temperature: $TEMPERATURE_OVERRIDE"
+    fi
     if [[ -n "$INTERVENTION_MODE" ]]; then
         echo "  Intervention Mode: $INTERVENTION_MODE"
         echo "  Intervention Steps: $INTERVENTION_STEPS"
         echo "  Intervention K: ${INTERVENTION_K:-1}"
     fi
     echo "  Wandb: ${WANDB:-False}"
-    echo "  Tracing enabled: ${TRACING_ENABLED_ARG:-False}"
+    echo "  Tracing enabled: $([[ "$MODE" == "gcap_rerank" ]] && echo False || echo "${TRACING_ENABLED_ARG:-False}")"
     echo "  Trace HF upload: ${TRACE_HF_UPLOAD:-False} (repo: ${TRACE_HF_DATASET_REPO:-schedulerlens})"
     echo "  SLURM mode (srun outer): ${SLURM_MODE}"
     if [[ -n "$WANDB_NAME" ]]; then
@@ -587,6 +660,26 @@ run_eval_for_task() {
         srun bash -c "$ACCEL_CMD"
     else
         eval $ACCEL_CMD
+    fi
+    STATUS=$?
+    if [[ "$STATUS" -ne 0 || "$MODE" != "gcap_rerank" ]]; then
+        return "$STATUS"
+    fi
+
+    RANDOM_SUFFIX="${OUTPUT_SUFFIX}_random"
+    RANDOM_DIR="${CHECKPOINT_DIR}_random"
+    RANDOM_MODEL_ARGS="${MODEL_ARGS/trace_name=${OUTPUT_SUFFIX}/trace_name=${RANDOM_SUFFIX}}"
+    RANDOM_MODEL_ARGS="${RANDOM_MODEL_ARGS/output_dir=${CHECKPOINT_DIR}/output_dir=${RANDOM_DIR}}"
+    RANDOM_MODEL_ARGS="${RANDOM_MODEL_ARGS},gcap_score_only=true"
+    RANDOM_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${RANDOM_MODEL_ARGS} --write_out --output_path ${RANDOM_DIR}/results.json --log_samples --cache_requests true"
+    [[ -n "$LIMIT_OVERRIDE" ]] && RANDOM_CMD="${RANDOM_CMD} --limit ${LIMIT_OVERRIDE}"
+    [[ "${WANDB,,}" == "true" ]] && RANDOM_CMD="${RANDOM_CMD} --wandb_args project=${WANDB_PROJECT},name=${RANDOM_SUFFIX}"
+    RANDOM_CMD="env RESUMABLE_RUN_ID=${RANDOM_SUFFIX} CHECKPOINT_DIR=${RANDOM_DIR} ${RANDOM_CMD}"
+    echo "Scoring random control from the shared candidate pool..."
+    if [[ "$SLURM_MODE" == "true" ]]; then
+        srun bash -c "$RANDOM_CMD"
+    else
+        eval $RANDOM_CMD
     fi
 }
 

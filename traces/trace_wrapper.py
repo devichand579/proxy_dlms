@@ -329,6 +329,7 @@ class ModelTracer:
                 modified_transfer, modified_x0, intervention_applied = ctx.apply_interventions(
                     transfer_index, x0_trace, x, self.mask_id
                 )
+                ctx.record_committed_token_confidences(modified_x0)
                 ctx.record_transfer(modified_transfer, modified_x0)
                 if intervention_applied and isinstance(original_key, tuple):
                     batch_idx, _ = original_key
@@ -352,6 +353,7 @@ class ModelTracer:
                         x[b : b + 1],
                         self.mask_id,
                     )
+                    ctx.record_committed_token_confidences(mod_x0)
                     ctx.record_transfer(mod_t, mod_x0)
                     modified_list.append(mod_t)
                     modified_x0_list.append(mod_x0)
@@ -382,6 +384,7 @@ class ModelTracer:
                         transfer_index, x0_trace, x, self.mask_id
                     )
                 )
+                ctx.record_committed_token_confidences(modified_x0)
                 ctx.record_transfer(modified_transfer, modified_x0)
                 if intervention_applied:
                     modified_positions = torch.nonzero(modified_transfer[0], as_tuple=False).squeeze(-1)

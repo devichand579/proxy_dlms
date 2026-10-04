@@ -71,7 +71,9 @@ class StepTrace:
     step: int
     mask_index: torch.Tensor  # Still masked [1, gen_length]
     predictions: Optional[torch.Tensor] = None  # Argmax token id [1, gen_length]
-    confidences: Optional[torch.Tensor] = None  # Max softmax prob [1, gen_length]
+    # Max softmax probability initially; after a transfer this is the raw-model
+    # probability of the sampled proposal, so selected positions match committed tokens.
+    confidences: Optional[torch.Tensor] = None  # [1, gen_length]
     entropies: Optional[torch.Tensor] = None  # Shannon entropy [1, gen_length]
     selected_positions: Optional[torch.Tensor] = None  # Unmasked this step [1, gen_length]
     selected_tokens: Optional[torch.Tensor] = None  # Tokens unmasked this step [1, gen_length]
@@ -336,6 +338,34 @@ class TracingContext:
         if self.save_entropies:
             step_trace.entropies = ent_g
         self._current_predictions = predictions
+        self._current_confidences = conf_g
+
+    def record_committed_token_confidences(self, tokens: torch.Tensor) -> None:
+        """Replace confidence with p(committed token) for stochastic decoding."""
+        if (
+            self._current_logits is None
+            or not self.trace.step_traces
+            or self.prompt_len is None
+            or self.gen_length is None
+        ):
+            return
+        token_ids = tokens.to(
+            device=self._current_logits.device,
+            dtype=torch.long,
+        )
+        log_p = torch.log_softmax(self._current_logits.float(), dim=-1)
+        confidence = torch.gather(
+            log_p,
+            dim=-1,
+            index=token_ids.unsqueeze(-1),
+        ).squeeze(-1).exp()
+        conf_g = slice_gen_region(
+            confidence,
+            self.prompt_len,
+            self.gen_length,
+        )
+        if self.save_confidences:
+            self.trace.step_traces[-1].confidences = conf_g
         self._current_confidences = conf_g
 
     def record_timestamps(self, start_time: float, end_time: float):

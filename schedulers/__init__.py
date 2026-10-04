@@ -4,6 +4,7 @@ from schedulers.fhs import generate_fhs
 from schedulers.eb_sampler import generate_EB
 from schedulers.dus import generate_dus
 from schedulers.fdm import generate_fdm
+from schedulers.gcap_rerank import generate_gcap_rerank
 
 __all__ = [
     'generate_llada',
@@ -12,4 +13,5 @@ __all__ = [
     'generate_EB',
     'generate_dus',
     'generate_fdm',
+    'generate_gcap_rerank',
 ]
