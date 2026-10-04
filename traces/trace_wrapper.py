@@ -86,6 +86,7 @@ class ModelTracer:
         self._last_confidence = None
         self._last_x = None
         self._last_logits = None  # Store logits for FHS-style schedulers
+        self._last_token_probs = None
         self._pending_transfer_index = None
         self._in_intervention = False  # Flag to prevent recursion during intervention
         self._in_setitem = False  # Additional reentrant guard
@@ -124,21 +125,19 @@ class ModelTracer:
             if x is not None and x.dim() == 2:
                 self._last_x = x
                 batch_size = x.shape[0]
+                if hasattr(output, "logits") and output.logits is not None:
+                    self._last_logits = output.logits
+                    self._last_token_probs = None
                 if self._batch_contexts is not None and batch_size == len(self._batch_contexts):
-                    if hasattr(output, 'logits') and output.logits is not None:
-                        self._last_logits = output.logits.clone()
                     for b in range(batch_size):
                         ctx = self._batch_contexts[b]
-                        if output.logits is not None:
-                            ctx._current_logits = output.logits[b : b + 1].clone()
+                        ctx._current_logits = None
                         ctx.record_step_start(self._step_counter, x[b : b + 1], self.mask_id)
                         if output.logits is not None:
                             ctx.record_logits_metrics(output.logits[b : b + 1])
                     self._step_counter += 1
                 elif self.tracing_context is not None and batch_size == 1:
-                    if hasattr(output, 'logits') and output.logits is not None:
-                        self._last_logits = output.logits.clone()
-                        self.tracing_context._current_logits = output.logits.clone()
+                    self.tracing_context._current_logits = None
                     self.tracing_context.record_step_start(
                         self._step_counter, x, self.mask_id
                     )
@@ -151,16 +150,35 @@ class ModelTracer:
 
     def _refresh_open_step_logits(self, logits: torch.Tensor) -> None:
         """Overwrite logits metrics on the current open step (no new step)."""
-        self._last_logits = logits.clone()
+        self._last_logits = logits
+        self._last_token_probs = None
         batch_size = int(logits.shape[0]) if logits.dim() >= 1 else 1
         if self._batch_contexts is not None and batch_size == len(self._batch_contexts):
             for b in range(batch_size):
                 ctx = self._batch_contexts[b]
-                ctx._current_logits = logits[b : b + 1].clone()
+                ctx._current_logits = None
                 ctx.record_logits_metrics(logits[b : b + 1])
         elif self.tracing_context is not None:
-            self.tracing_context._current_logits = logits.clone()
+            self.tracing_context._current_logits = None
             self.tracing_context.record_logits_metrics(logits)
+
+    def _cache_sampled_token_probs(self, token_ids: torch.Tensor) -> None:
+        """Store p(sampled token) and drop the full-vocab logits copy."""
+        if self._last_logits is None or token_ids.dim() != 2:
+            return
+        logits = self._last_logits
+        tokens = token_ids.to(device=logits.device, dtype=torch.long)
+        if tokens.shape[:2] != logits.shape[:2]:
+            return
+        width = 32
+        probs = torch.empty(tokens.shape, dtype=torch.float32, device=logits.device)
+        for start in range(0, tokens.shape[1], width):
+            end = min(tokens.shape[1], start + width)
+            piece = logits[:, start:end].float()
+            chosen = piece.gather(-1, tokens[:, start:end].unsqueeze(-1)).squeeze(-1)
+            probs[:, start:end] = (chosen - torch.logsumexp(piece, dim=-1)).exp()
+        self._last_token_probs = probs
+        self._last_logits = None
     
     def _intercept_argmax(self, original_argmax):
         """Patch argmax to capture x0 for transfer detection."""
@@ -170,11 +188,8 @@ class ModelTracer:
             # If this is called on logits (or logits_with_noise), it's likely x0
             if _is_tensor_like(input) and input.dim() >= 2 and (dim == -1 or (dim is None and input.dim() == 3)):
                 self._last_x0 = result.clone() if _is_tensor_like(result) else result
-                if input.dim() == 3:
-                    with torch.no_grad():
-                        probs = torch.softmax(input, dim=-1)
-                        confidence = torch.max(probs, dim=-1)[0]
-                        self._last_confidence = confidence
+                if input.dim() == 3 and _is_tensor_like(result):
+                    self._cache_sampled_token_probs(result)
             return result
         
         return traced_argmax
@@ -329,7 +344,10 @@ class ModelTracer:
                 modified_transfer, modified_x0, intervention_applied = ctx.apply_interventions(
                     transfer_index, x0_trace, x, self.mask_id
                 )
-                ctx.record_committed_token_confidences(modified_x0)
+                ctx.record_committed_token_confidences(
+                    modified_x0,
+                    probs=None if self._last_token_probs is None else self._last_token_probs[batch_index : batch_index + 1],
+                )
                 ctx.record_transfer(modified_transfer, modified_x0)
                 if intervention_applied and isinstance(original_key, tuple):
                     batch_idx, _ = original_key
@@ -353,7 +371,10 @@ class ModelTracer:
                         x[b : b + 1],
                         self.mask_id,
                     )
-                    ctx.record_committed_token_confidences(mod_x0)
+                    ctx.record_committed_token_confidences(
+                        mod_x0,
+                        probs=None if self._last_token_probs is None else self._last_token_probs[b : b + 1],
+                    )
                     ctx.record_transfer(mod_t, mod_x0)
                     modified_list.append(mod_t)
                     modified_x0_list.append(mod_x0)
@@ -384,7 +405,10 @@ class ModelTracer:
                         transfer_index, x0_trace, x, self.mask_id
                     )
                 )
-                ctx.record_committed_token_confidences(modified_x0)
+                ctx.record_committed_token_confidences(
+                    modified_x0,
+                    probs=self._last_token_probs,
+                )
                 ctx.record_transfer(modified_transfer, modified_x0)
                 if intervention_applied:
                     modified_positions = torch.nonzero(modified_transfer[0], as_tuple=False).squeeze(-1)
@@ -482,6 +506,17 @@ class ModelTracer:
             transfer_info = self._detect_multiple_positions_transfer(x, x0_trace, pos_idx, value)
 
         if transfer_info is None:
+            # DUS remasks a token it just selected by writing mask_id back.
+            # That write is not a transfer; drop it from the open step's selection.
+            if isinstance(pos_idx, int) and get_value_item(value, self.mask_id) == self.mask_id:
+                if self._gen_pos_selected_on_open_step(int(pos_idx), batch_index=b_for_sel):
+                    ctx = None
+                    if self._batch_contexts is not None and 0 <= b_for_sel < len(self._batch_contexts):
+                        ctx = self._batch_contexts[b_for_sel]
+                    elif self.tracing_context is not None:
+                        ctx = self.tracing_context
+                    if ctx is not None:
+                        ctx.clear_recorded_position(int(pos_idx))
             return False
 
         transfer_positions, transfer_values = transfer_info

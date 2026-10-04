@@ -113,10 +113,13 @@ def generate_gcap_rerank(
             block_length=block_length,
         )
         generated, steps_taken, blocks = result
-        candidates.append(generated)
+        candidates.append(generated.detach().cpu())
         metrics_by_candidate.append(
             [_candidate_metrics(trace, score_mode) for trace in traces]
         )
+        del result, traces, generated
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         total_steps += int(steps_taken)
         total_blocks += int(blocks)
 
@@ -140,13 +143,11 @@ def generate_gcap_rerank(
         random_indices.append(int(torch.randint(int(k), (), generator=generator).item()))
 
     stacked = torch.stack(candidates, dim=0)
-    rows = torch.arange(batch, device=prompt.device)
-    min_selected = torch.tensor(min_indices, dtype=torch.long, device=prompt.device)
-    random_selected = torch.tensor(
-        random_indices, dtype=torch.long, device=prompt.device
-    )
-    output = stacked[min_selected, rows]
-    last_random_output = stacked[random_selected, rows]
+    rows = torch.arange(batch)
+    min_selected = torch.tensor(min_indices, dtype=torch.long)
+    random_selected = torch.tensor(random_indices, dtype=torch.long)
+    output = stacked[min_selected, rows].to(prompt.device)
+    last_random_output = stacked[random_selected, rows].to(prompt.device)
     last_rerank_metrics = [
         {
             "score_mode": score_mode,

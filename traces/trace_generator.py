@@ -327,9 +327,9 @@ class TracingContext:
             return
         predictions, confidences, entropies = logits_to_step_metrics(logits)
         pl, gl = self.prompt_len, self.gen_length
-        pred_g = slice_gen_region(predictions, pl, gl)
-        conf_g = slice_gen_region(confidences, pl, gl)
-        ent_g = slice_gen_region(entropies, pl, gl)
+        pred_g = slice_gen_region(predictions, pl, gl).detach().cpu()
+        conf_g = slice_gen_region(confidences, pl, gl).detach().cpu()
+        ent_g = slice_gen_region(entropies, pl, gl).detach().cpu()
         step_trace = self.trace.step_traces[-1]
         if self.save_predictions:
             step_trace.predictions = pred_g
@@ -337,36 +337,37 @@ class TracingContext:
             step_trace.confidences = conf_g
         if self.save_entropies:
             step_trace.entropies = ent_g
-        self._current_predictions = predictions
+        self._current_predictions = predictions.detach().cpu()
         self._current_confidences = conf_g
 
-    def record_committed_token_confidences(self, tokens: torch.Tensor) -> None:
+    def record_committed_token_confidences(
+        self,
+        tokens: torch.Tensor,
+        logits: Optional[torch.Tensor] = None,
+        probs: Optional[torch.Tensor] = None,
+    ) -> None:
         """Replace confidence with p(committed token) for stochastic decoding."""
-        if (
-            self._current_logits is None
-            or not self.trace.step_traces
-            or self.prompt_len is None
-            or self.gen_length is None
-        ):
+        if not self.trace.step_traces or self.prompt_len is None or self.gen_length is None:
             return
-        token_ids = tokens.to(
-            device=self._current_logits.device,
-            dtype=torch.long,
-        )
-        log_p = torch.log_softmax(self._current_logits.float(), dim=-1)
-        confidence = torch.gather(
-            log_p,
-            dim=-1,
-            index=token_ids.unsqueeze(-1),
-        ).squeeze(-1).exp()
+        if probs is not None:
+            confidence = probs
+        else:
+            src = self._current_logits if logits is None else logits
+            if src is None:
+                return
+            token_ids = tokens.to(device=src.device, dtype=torch.long)
+            chosen = src.float().gather(-1, token_ids.unsqueeze(-1)).squeeze(-1)
+            lse = torch.logsumexp(src.float(), dim=-1)
+            confidence = (chosen - lse).exp()
         conf_g = slice_gen_region(
             confidence,
             self.prompt_len,
             self.gen_length,
-        )
+        ).detach().cpu()
         if self.save_confidences:
             self.trace.step_traces[-1].confidences = conf_g
         self._current_confidences = conf_g
+        self._current_logits = None
 
     def record_timestamps(self, start_time: float, end_time: float):
         self.trace.start_time = start_time
@@ -460,7 +461,8 @@ class TracingContext:
             modified_transfer[0, added_abs] = True
 
             if self._current_predictions is not None:
-                modified_x0[0, added_abs] = self._current_predictions[0, added_abs]
+                preds = self._current_predictions.to(device=modified_x0.device)
+                modified_x0[0, added_abs] = preds[0, added_abs]
             elif self._current_logits is not None:
                 predictions = torch.argmax(self._current_logits, dim=-1)
                 modified_x0[0, added_abs] = predictions[0, added_abs]
@@ -492,8 +494,8 @@ class TracingContext:
         self._ensure_generation_bounds(x0)
         pl = int(self.prompt_len or 0)
         gl = int(self.gen_length or transfer_index.shape[1] - pl)
-        transfer_gen = transfer_index[:, gen_region_slice(pl, pl + gl)]
-        x0_gen = x0[:, gen_region_slice(pl, pl + gl)]
+        transfer_gen = transfer_index[:, gen_region_slice(pl, pl + gl)].detach().cpu()
+        x0_gen = x0[:, gen_region_slice(pl, pl + gl)].detach().cpu()
 
         step_trace = self.trace.step_traces[-1]
         # DUS (and similar) write x[b, pos] in a loop — each write hits this hook.
@@ -516,6 +518,27 @@ class TracingContext:
         for pos in positions.tolist():
             if pos not in self.trace.unmasking_order:
                 self.trace.unmasking_order[int(pos)] = self.current_step
+
+    def clear_recorded_position(self, absolute_pos: int) -> None:
+        """Drop one gen position selected earlier in the open step.
+
+        DUS writes a token and may put it back to the mask in the same step.
+        The remask must leave ``selected_positions`` equal to the tokens that
+        stay unmasked, which is what the next step's mask diff records.
+        """
+        if not self.trace.step_traces or self.prompt_len is None:
+            return
+        pl = int(self.prompt_len)
+        gen_pos = int(absolute_pos) - pl
+        step_trace = self.trace.step_traces[-1]
+        selected = step_trace.selected_positions
+        if selected is None or gen_pos < 0 or gen_pos >= selected.shape[-1]:
+            return
+        selected[0, gen_pos] = False
+        if step_trace.selected_tokens is not None and gen_pos < step_trace.selected_tokens.shape[-1]:
+            step_trace.selected_tokens[0, gen_pos] = 0
+        if self.trace.unmasking_order.get(int(gen_pos)) == self.current_step:
+            del self.trace.unmasking_order[int(gen_pos)]
     
     def save_trace(self, name: Optional[str] = None) -> str:
         """Write the in-memory trace to JSON."""

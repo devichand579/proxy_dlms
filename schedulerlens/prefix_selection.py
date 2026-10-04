@@ -9,6 +9,10 @@ The best score is the accuracy of the scheduler with the highest accuracy.
 A sample counts as right when the chosen scheduler is that highest-accuracy
 scheduler. Schedulers whose accuracies match are all counted as best.
 
+The scheduler chosen on the most samples is the majority pick. ``majority_acc``
+is that scheduler's accuracy on every sample. Ties keep the earliest scheduler
+in the scheduler list.
+
 ``compute_saved`` is full-schedule NFE divided by the NFE this rule spends.
 Every scheduler runs for ``prefix`` steps. Only the sample's pick is finished.
 """
@@ -178,6 +182,7 @@ def selection_table(
             pick_acc = sum(pick_scores) / n_samples
             mean_acc = sum(mean_scores) / n_samples
             sched_acc = {name: total / n_samples for name, total in sched_sums.items()}
+            majority_acc = sched_acc[modal]
             best_acc = max(sched_acc.values())
             best_names = [name for name in present if _same_score(sched_acc[name], best_acc)]
             n_right = sum(pick in best_names for pick in picks)
@@ -197,6 +202,7 @@ def selection_table(
                     "n_right": n_right,
                     "right_frac": n_right / n_samples,
                     "pick_acc": pick_acc,
+                    "majority_acc": majority_acc,
                     "mean_acc": mean_acc,
                     "best_acc": best_acc,
                     "lift": pick_acc - mean_acc,
@@ -425,9 +431,10 @@ def main(
     table.to_csv(out, index=False)
     for prefix, group in table.groupby("prefix"):
         logger.info(
-            "prefix %s  pick %.3f  average %.3f  best %.3f  lift %+.3f  right %d/%d  compute saved %.2fx",
+            "prefix %s  pick %.3f  majority %.3f  average %.3f  best %.3f  lift %+.3f  right %d/%d  compute saved %.2fx",
             prefix,
             group.pick_acc.mean(),
+            group.majority_acc.mean(),
             group.mean_acc.mean(),
             group.best_acc.mean(),
             group.lift.mean(),
