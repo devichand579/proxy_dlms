@@ -389,7 +389,7 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     print("Scoring random control from the shared candidate pool...")
     status = subprocess.run(random_cmd, env=random_env, cwd=project_root).returncode
     if status == 0:
-        write_gcap_summary(checkpoint_dir)
+        write_gcap_summary(project_root / checkpoint_dir)
     return status
 
 
