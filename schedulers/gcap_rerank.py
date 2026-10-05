@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Callable
 
 import torch
@@ -9,6 +11,7 @@ import torch
 from schedulerlens.proxies import compute_sample_proxies
 from traces.trace_checks import repair_drop_last_step
 from traces.trace_generator import TracingContext
+from traces.trace_metrics import _pick_primary_metric
 from traces.trace_wrapper import ModelTracer, _task_trace_list_ctx
 
 SUPPORTED_SCORES = ("raw", "per_commit")
@@ -164,3 +167,77 @@ def generate_gcap_rerank(
         for row in range(batch)
     ]
     return output, total_steps, total_blocks
+
+
+def _numeric_task_metrics(path: Path) -> tuple[str, dict[str, float]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        raise ValueError(f"{path} has no results object")
+    for task_name, row in results.items():
+        if not isinstance(row, dict):
+            continue
+        numeric: dict[str, float] = {}
+        for key, value in row.items():
+            if isinstance(value, bool) or value is None:
+                continue
+            if isinstance(value, (int, float)):
+                numeric[key] = float(value)
+            elif isinstance(value, str):
+                try:
+                    numeric[key] = float(value)
+                except ValueError:
+                    continue
+        return str(task_name), numeric
+    raise ValueError(f"{path} has no task metrics")
+
+
+def _metric_value(
+    task_name: str,
+    metrics: dict[str, float],
+    metric_key: str | None,
+) -> tuple[str, float | None]:
+    if metric_key and metric_key in metrics:
+        return metric_key, metrics[metric_key]
+    value, key = _pick_primary_metric(metrics, task_name)
+    return key, value
+
+
+def write_gcap_summary(output_dir: str | Path) -> Path:
+    """Write min-G, random, pool mean, and pool best into one JSON."""
+    main_dir = Path(output_dir)
+    pool_path = main_dir / "gcap_pool_scores.json"
+    pool: dict[str, Any] = {}
+    if pool_path.is_file():
+        loaded = json.loads(pool_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            pool = loaded
+    metric_key = pool.get("metric_key") if isinstance(pool.get("metric_key"), str) else None
+    min_task, min_metrics = _numeric_task_metrics(main_dir / "results.json")
+    random_task, random_metrics = _numeric_task_metrics(Path(f"{main_dir}_random") / "results.json")
+    min_key, min_value = _metric_value(min_task, min_metrics, metric_key)
+    random_key, random_value = _metric_value(random_task, random_metrics, min_key or metric_key)
+    summary = {
+        "task": min_task,
+        "metric_key": min_key or metric_key or random_key,
+        "min_g": min_value,
+        "random": random_value,
+        "pool_mean": pool.get("pool_mean"),
+        "pool_best": pool.get("pool_best"),
+        "n_samples": pool.get("n_samples"),
+        "n_unmatched": pool.get("n_unmatched"),
+        "k": pool.get("k"),
+    }
+    if random_key and random_key != summary["metric_key"]:
+        summary["random_metric_key"] = random_key
+    out = main_dir / "gcap_results.json"
+    out.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    if pool_path.is_file():
+        pool_path.unlink()
+    print(
+        "G-cap results  "
+        f"min_g {min_value}  random {random_value}  "
+        f"mean {summary['pool_mean']}  best {summary['pool_best']}  "
+        f"wrote {out}"
+    )
+    return out

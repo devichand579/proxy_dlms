@@ -1090,7 +1090,8 @@ class LLaDAEvalHarness(LM):
             json.dump(summary, handle, indent=2)
             handle.write("\n")
         self.logger.info(
-            "G-cap pool  samples %d  mean %.4f  best %.4f  metric %s  wrote %s",
+            "G-cap pool  samples %d  mean %.4f  best %.4f  metric %s  "
+            "held in %s until gcap_results.json",
             len(means),
             pool_mean,
             pool_best,

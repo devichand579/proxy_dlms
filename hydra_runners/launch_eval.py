@@ -17,6 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from repo_env_defaults import apply_offline_env, apply_repo_env_defaults, resolve_eval_device
 from sampling_defaults import resolve_gen_length_steps
+from schedulers.gcap_rerank import write_gcap_summary
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
@@ -386,7 +387,10 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         "CHECKPOINT_DIR": random_dir,
     }
     print("Scoring random control from the shared candidate pool...")
-    return subprocess.run(random_cmd, env=random_env, cwd=project_root).returncode
+    status = subprocess.run(random_cmd, env=random_env, cwd=project_root).returncode
+    if status == 0:
+        write_gcap_summary(checkpoint_dir)
+    return status
 
 
 def _normalize_parallel_slots_payload(data: Any) -> list[Any]:

@@ -23,14 +23,16 @@ One command generates the candidates once and runs two lm-eval scoring passes:
   --no_eos_harness --resumable --wandb True
 ```
 
-The minimum-G result is in the normal output directory; the random-control
-result is in the sibling directory ending in `_random`. Random selection uses a
-separate prompt-derived RNG and does not alter candidate generation.
-The same run also writes `gcap_pool_scores.json` beside the minimum-G
-checkpoint. `pool_mean` is the task score averaged over all \(K\) candidates,
-then over samples. `pool_best` is the best candidate on each sample, then
-averaged over samples. Both use the task's primary metric. Rows written before
-candidate texts were stored are left out of that file.
+After both scoring passes finish, the run writes one report,
+`gcap_results.json`, in the minimum-G output directory. It contains `min_g`,
+`random`, `pool_mean`, and `pool_best` for the task's primary metric.
+`pool_mean` averages all \(K\) candidates per sample, then averages over
+samples. `pool_best` takes the best candidate per sample, then averages over
+samples. The harness still writes `results.json` in that directory and in the
+`_random` sibling; those are the inputs to the combined report. Random
+selection uses a separate prompt-derived RNG and does not alter candidate
+generation. Rows written before candidate texts were stored are left out of
+the pool numbers.
 The defaults are \(K=8\), temperature \(0.7\), M-cap \(\gamma=1\), and
 `--gcap_score_mode per_commit`. Raw G-cap can otherwise favor incomplete
 outputs. Compute cost is approximately \(K\) times the base scheduler NFE.

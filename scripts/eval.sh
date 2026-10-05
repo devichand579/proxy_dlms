@@ -681,6 +681,12 @@ run_eval_for_task() {
     else
         eval $RANDOM_CMD
     fi
+    STATUS=$?
+    if [[ "$STATUS" -eq 0 ]]; then
+        python -c "from schedulers.gcap_rerank import write_gcap_summary; write_gcap_summary('${CHECKPOINT_DIR}')"
+        STATUS=$?
+    fi
+    return "$STATUS"
 }
 
 run_eval_for_task "$TASK_NAME"
