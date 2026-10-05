@@ -18,6 +18,7 @@ from load_model import (
 )
 import schedulers.gcap_rerank as gcap_rerank
 from schedulers.generate import generate
+from traces.trace_metrics import TraceScorer
 from traces.trace_wrapper import _task_trace_list_ctx
 from traces.hf_trace_upload import maybe_upload_eval_trace_file
 
@@ -804,6 +805,16 @@ class LLaDAEvalHarness(LM):
                         if self.mode == "gcap_rerank"
                         else []
                     )
+                    pool = (
+                        gcap_rerank.last_candidate_outputs
+                        if self.mode == "gcap_rerank"
+                        else None
+                    )
+                    pool_texts = (
+                        [decode(pool[k]) for k in range(int(pool.shape[0]))]
+                        if pool is not None
+                        else None
+                    )
 
                     for j, orig_idx in enumerate(to_compute_indices):
                         all_gen_texts[orig_idx] = chunk_gen_texts[j]
@@ -828,6 +839,7 @@ class LLaDAEvalHarness(LM):
                                     if random_checkpoint_writer is not None:
                                         random_rec = {
                                             **rec,
+                                            "gcap_rerank": dict(rec["gcap_rerank"]),
                                             "resps": [random_gen_texts[j]],
                                             "gcap_selection": "random",
                                         }
@@ -835,6 +847,10 @@ class LLaDAEvalHarness(LM):
                                             json.dumps(random_rec, ensure_ascii=False) + "\n"
                                         )
                                         random_checkpoint_writer.flush()
+                                    if pool_texts is not None:
+                                        rec["gcap_rerank"]["candidate_responses"] = [
+                                            pool_texts[k][j] for k in range(len(pool_texts))
+                                        ]
                                     rec["gcap_selection"] = "min_g"
                                 checkpoint_writer.write(json.dumps(rec, ensure_ascii=False) + "\n")
                                 checkpoint_writer.flush()
@@ -1006,7 +1022,86 @@ class LLaDAEvalHarness(LM):
                     self.logger.warning(f"Failed to log global metrics to wandb: {e}")
 
         torch.cuda.empty_cache()
+        self._report_gcap_pool()
         return all_gen_texts
+
+    def _report_gcap_pool(self) -> None:
+        """Mean and best task score across the saved candidate pool."""
+        if self.mode != "gcap_rerank" or self.gcap_score_only or not self.output_dir:
+            return
+        path = os.path.join(self.output_dir, "checkpoint.jsonl")
+        if not os.path.isfile(path):
+            return
+        saved: dict[tuple[str, str], list[str]] = {}
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                responses = (rec.get("gcap_rerank") or {}).get("candidate_responses")
+                doc_id = rec.get("doc_id")
+                if not responses or doc_id is None:
+                    continue
+                task = str(rec.get("task_name") or self.task_name)
+                saved[(task, str(doc_id))] = list(responses)
+        if not saved:
+            self.logger.info(
+                "G-cap pool scores skipped: checkpoint rows have no candidate texts"
+            )
+            return
+        task_names = {task for task, _doc_id in saved}
+        if len(task_names) != 1:
+            raise RuntimeError(
+                f"G-cap pool checkpoint mixes tasks: {sorted(task_names)}"
+            )
+        scorer = TraceScorer(next(iter(task_names)), Path(self._model_path).name)
+        by_doc = {
+            str(getattr(inst, "doc_id")): inst
+            for inst in scorer.task.instances
+            if getattr(inst, "doc_id", None) is not None
+        }
+        means: list[float] = []
+        bests: list[float] = []
+        n_missing = 0
+        for (_task, doc_id), responses in saved.items():
+            inst = by_doc.get(doc_id)
+            if inst is None:
+                n_missing += 1
+                continue
+            scores = [scorer.score_text(inst, text) for text in responses]
+            means.append(sum(scores) / len(scores))
+            bests.append(max(scores))
+        if not means:
+            self.logger.warning("G-cap pool report matched no checkpoint rows")
+            return
+        pool_mean = sum(means) / len(means)
+        pool_best = sum(bests) / len(bests)
+        summary = {
+            "n_samples": len(means),
+            "n_unmatched": n_missing,
+            "k": len(next(iter(saved.values()))),
+            "metric_key": scorer.metric_key,
+            "pool_mean": pool_mean,
+            "pool_best": pool_best,
+        }
+        out = os.path.join(self.output_dir, "gcap_pool_scores.json")
+        with open(out, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2)
+            handle.write("\n")
+        self.logger.info(
+            "G-cap pool  samples %d  mean %.4f  best %.4f  metric %s  wrote %s",
+            len(means),
+            pool_mean,
+            pool_best,
+            scorer.metric_key,
+            out,
+        )
+        if self.use_wandb and wandb.run is not None:
+            try:
+                wandb.log({"gcap/pool_mean": pool_mean, "gcap/pool_best": pool_best})
+            except Exception as e:
+                self.logger.warning(f"Failed to log G-cap pool scores to wandb: {e}")
 
 if __name__ == "__main__":
     _repo_root = Path(__file__).resolve().parent

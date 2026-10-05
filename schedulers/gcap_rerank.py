@@ -16,6 +16,7 @@ SUPPORTED_SCORES = ("raw", "per_commit")
 # Filled by the most recent ``generate_gcap_rerank`` call.
 last_rerank_metrics: list[dict[str, Any]] = []
 last_random_output: torch.Tensor | None = None
+last_candidate_outputs: torch.Tensor | None = None
 
 
 def _run_traced_candidate(
@@ -88,9 +89,10 @@ def generate_gcap_rerank(
     block_length: int | None,
 ):
     """Generate one pool and expose both minimum-G and random selections."""
-    global last_random_output, last_rerank_metrics
+    global last_random_output, last_rerank_metrics, last_candidate_outputs
     last_random_output = None
     last_rerank_metrics = []
+    last_candidate_outputs = None
     if int(k) < 2:
         raise ValueError(f"G-cap reranking requires k >= 2, got {k}")
     if score_mode not in SUPPORTED_SCORES:
@@ -148,6 +150,7 @@ def generate_gcap_rerank(
     random_selected = torch.tensor(random_indices, dtype=torch.long)
     output = stacked[min_selected, rows].to(prompt.device)
     last_random_output = stacked[random_selected, rows].to(prompt.device)
+    last_candidate_outputs = stacked
     last_rerank_metrics = [
         {
             "score_mode": score_mode,
