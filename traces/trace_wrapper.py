@@ -37,6 +37,16 @@ def note_trace_commit(tokens: torch.Tensor) -> None:
     tracer._last_x0 = tokens.detach()
 
 
+def note_sampled_tokens(tokens: torch.Tensor) -> None:
+    """Record a chunked sample that did not pass through ``torch.argmax``."""
+    tracer = _active_tracer_ctx.get()
+    if tracer is None:
+        return
+    tracer._last_x0 = tokens.detach().clone()
+    if tokens.dim() == 2:
+        tracer._cache_sampled_token_probs(tokens)
+
+
 class suppress_step_recording:
     """Skip traced step opens for nested model forwards (e.g. FDM hypotheses).
 
@@ -642,7 +652,7 @@ class ModelTracer:
                         save_to_disk=self.tracing_context.save_to_disk,
                         base_dir=self.tracing_context.base_dir,
                     )
-                    ctx.trace.prompt = prompt[b : b + 1].clone()
+                    ctx.trace.prompt = prompt[b : b + 1].detach().cpu()
                     if gen_length_kw is not None:
                         ctx.set_generation_bounds(prompt_len, int(gen_length_kw))
                     if block_length is not None:
@@ -650,7 +660,7 @@ class ModelTracer:
                     self._batch_contexts.append(ctx)
             else:
                 if self.tracing_context.trace.prompt is None:
-                    self.tracing_context.trace.prompt = prompt.clone()
+                    self.tracing_context.trace.prompt = prompt.detach().cpu()
                 if block_length is not None:
                     self.tracing_context._block_length = block_length
         
@@ -691,7 +701,7 @@ class ModelTracer:
 
         if self._batch_contexts is not None and final_seq is not None:
             for b, ctx in enumerate(self._batch_contexts):
-                ctx.trace.final_sequence = final_seq[b : b + 1].clone()
+                ctx.trace.final_sequence = final_seq[b : b + 1].detach().cpu()
                 ctx.record_timestamps(start_time, end_time)
                 if task_trace_list is not None:
                     try:
@@ -711,7 +721,7 @@ class ModelTracer:
                             warnings.warn(f"Failed to save batch trace {b} to disk: {e}")
         else:
             if final_seq is not None and self.tracing_context.trace.final_sequence is None:
-                self.tracing_context.trace.final_sequence = final_seq.clone()
+                self.tracing_context.trace.final_sequence = final_seq.detach().cpu()
             self.tracing_context.record_timestamps(start_time, end_time)
             if task_trace_list is not None:
                 try:

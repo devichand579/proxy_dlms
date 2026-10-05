@@ -10,7 +10,7 @@ from typing import Optional
 
 from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
 from schedulers.utils import (
-    add_gumbel_noise,
+    sample_tokens,
     get_num_transfer_tokens,
     get_mask_by_confidence,
     check_eos_stop_condition,
@@ -104,8 +104,7 @@ def generate_llada(
 
             mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
-            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-            x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
+            x0 = sample_tokens(logits, temperature)
 
             if remasking == 'confidence':
                 x0_p = get_mask_by_confidence(logits, x0)
@@ -119,7 +118,7 @@ def generate_llada(
             x0 = torch.where(mask_index, x0, x)
             confidence = torch.where(mask_index, x0_p, -np.inf)
 
-            del logits, logits_with_noise, x0_p
+            del logits, x0_p
             torch.cuda.empty_cache()
 
             transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)

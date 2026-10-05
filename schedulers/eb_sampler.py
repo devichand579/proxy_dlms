@@ -6,12 +6,12 @@ import os
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
 from schedulers.utils import (
-    add_gumbel_noise,
+    sample_tokens,
     get_mask_by_confidence,
-    get_mask_by_entropy,
+    top_two_margin,
+    token_entropy,
     check_eos_stop_condition,
     check_all_generated_unmasked,
     mask_eos_eot_logits,
@@ -105,25 +105,20 @@ def generate_EB(
 
             mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
-            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-            x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
-
-            p = F.softmax(logits.float(), dim=-1)
+            x0 = sample_tokens(logits, temperature)
 
             # Compute EB ranking score
             if E == 'confidence':
                 e = get_mask_by_confidence(logits, x0)
             elif E == 'margin':
-                top2 = torch.topk(p, 2, dim=-1).values
-                e = top2[..., 0] - top2[..., 1]
+                e = top_two_margin(logits)
             elif E == 'entropy':
-                entropy = get_mask_by_entropy(logits)
-                e = -entropy  # low entropy = high confidence
+                e = -token_entropy(logits)  # low entropy = high confidence
             else:
                 raise NotImplementedError(E)
 
             # Compute entropy for EB constraint
-            h = -(p * torch.log(p + 1e-9)).sum(-1)
+            h = token_entropy(logits, eps=1e-9)
 
             transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
 
@@ -177,7 +172,7 @@ def generate_EB(
             if check_all_generated_unmasked(x, mask_id, prompt_len):
                 return x, steps_taken, num_block + 1
 
-            del logits, logits_with_noise, p, e, h
+            del logits, e, h
             torch.cuda.empty_cache()
 
     return x, steps_taken, num_blocks

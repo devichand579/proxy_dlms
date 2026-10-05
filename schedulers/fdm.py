@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
-from schedulers.utils import add_gumbel_noise, check_eos_stop_condition, check_all_generated_unmasked, mask_eos_eot_logits
+from schedulers.utils import sample_tokens, token_log_prob, check_eos_stop_condition, check_all_generated_unmasked, mask_eos_eot_logits
 
 if os.environ.get('TRACING_ENABLED', 'false').lower() == 'true':
     from traces.trace_wrapper import suppress_step_recording, trace_scheduler
@@ -263,11 +263,9 @@ def generate_fdm(
 
             mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
-            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-            x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
+            x0 = sample_tokens(logits, temperature)
 
-            logp = F.log_softmax(logits, dim=-1)
-            x0_logp = torch.gather(logp, -1, x0.unsqueeze(-1)).squeeze(-1)
+            x0_logp = token_log_prob(logits, x0)
 
             x0_logp[:, :prompt_len] = -np.inf
             local_logconf = torch.where(mask_index, x0_logp, -np.inf)
@@ -378,7 +376,7 @@ def generate_fdm(
                 return x, steps_taken, num_block + 1
 
             # Clear intermediate tensors to free memory
-            del logits, logits_with_noise, logp, x0_logp, local_logconf, local_p
+            del logits, x0_logp, local_logconf, local_p
             torch.cuda.empty_cache()
 
     return x, steps_taken, num_blocks

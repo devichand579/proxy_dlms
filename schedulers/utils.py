@@ -1,6 +1,9 @@
 import torch
-import torch.nn.functional as F
 from typing import Optional
+
+from traces.trace_wrapper import note_sampled_tokens
+
+_SEQ_CHUNK = 32
 
 
 def mask_eos_eot_logits(
@@ -58,6 +61,29 @@ def add_gumbel_noise(logits, temperature):
     return logits.exp() / gumbel_noise
 
 
+def sample_tokens(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Token ids for one step, without a second full-vocabulary tensor.
+
+    ``temperature == 0`` is ``argmax``. Otherwise each sequence chunk uses the
+    same float64 Gumbel-max scores as ``add_gumbel_noise``.
+    """
+    if temperature == 0:
+        return torch.argmax(logits, dim=-1)
+    batch, length, _vocab = logits.shape
+    chosen = torch.empty(batch, length, dtype=torch.long, device=logits.device)
+    # One row at a time matches the random stream of a single contiguous draw.
+    for row in range(batch):
+        scores = logits[row : row + 1]
+        for start in range(0, length, _SEQ_CHUNK):
+            end = min(length, start + _SEQ_CHUNK)
+            piece = scores[:, start:end].to(torch.float64)
+            noise = torch.rand_like(piece)
+            gumbel_noise = (-torch.log(noise)) ** temperature
+            chosen[row : row + 1, start:end] = (piece.exp() / gumbel_noise).argmax(dim=-1)
+    note_sampled_tokens(chosen)
+    return chosen
+
+
 def get_num_transfer_tokens(mask_index, steps):
     """Per-step token transfer counts for a linear unmasking schedule (LLaDA)."""
     mask_num = mask_index.sum(dim=1, keepdim=True)
@@ -73,17 +99,51 @@ def get_num_transfer_tokens(mask_index, steps):
 
 
 def get_mask_by_confidence(logits: torch.Tensor, x0: torch.Tensor) -> torch.Tensor:
-    """Per-position p(argmax) from softmax(logits) at `x0`."""
-    log_p = F.log_softmax(logits.float(), dim=-1)
-    x0_log_p = torch.gather(log_p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
-    return x0_log_p.exp()
+    """Per-position p(token) from softmax(logits) at ``x0``."""
+    out = torch.empty(x0.shape, dtype=torch.float32, device=logits.device)
+    for start in range(0, logits.shape[1], _SEQ_CHUNK):
+        end = min(logits.shape[1], start + _SEQ_CHUNK)
+        piece = logits[:, start:end].float()
+        chosen = piece.gather(-1, x0[:, start:end].unsqueeze(-1)).squeeze(-1)
+        out[:, start:end] = (chosen - torch.logsumexp(piece, dim=-1)).exp()
+    return out
 
 
 def get_mask_by_entropy(logits: torch.Tensor) -> torch.Tensor:
     """Per-position entropy of softmax(logits)."""
-    p = F.softmax(logits.float(), dim=-1)
-    entropy = -torch.sum(p * torch.log(p + 1e-10), dim=-1)
-    return entropy
+    return token_entropy(logits, eps=1e-10)
+
+
+def token_entropy(logits: torch.Tensor, eps: float = 1e-10) -> torch.Tensor:
+    """Per-position ``-sum p log(p + eps)``, one sequence chunk at a time."""
+    out = torch.empty(logits.shape[:2], dtype=torch.float32, device=logits.device)
+    for start in range(0, logits.shape[1], _SEQ_CHUNK):
+        end = min(logits.shape[1], start + _SEQ_CHUNK)
+        probs = torch.softmax(logits[:, start:end].float(), dim=-1)
+        out[:, start:end] = -(probs * torch.log(probs + eps)).sum(dim=-1)
+    return out
+
+
+def top_two_margin(logits: torch.Tensor) -> torch.Tensor:
+    """Per-position gap between the two largest softmax probabilities."""
+    out = torch.empty(logits.shape[:2], dtype=torch.float32, device=logits.device)
+    for start in range(0, logits.shape[1], _SEQ_CHUNK):
+        end = min(logits.shape[1], start + _SEQ_CHUNK)
+        probs = torch.softmax(logits[:, start:end].float(), dim=-1)
+        top2 = torch.topk(probs, 2, dim=-1).values
+        out[:, start:end] = top2[..., 0] - top2[..., 1]
+    return out
+
+
+def token_log_prob(logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+    """Per-position log softmax probability of ``tokens``."""
+    out = torch.empty(tokens.shape, dtype=torch.float32, device=logits.device)
+    for start in range(0, logits.shape[1], _SEQ_CHUNK):
+        end = min(logits.shape[1], start + _SEQ_CHUNK)
+        piece = logits[:, start:end].float()
+        chosen = piece.gather(-1, tokens[:, start:end].unsqueeze(-1)).squeeze(-1)
+        out[:, start:end] = chosen - torch.logsumexp(piece, dim=-1)
+    return out
 
 
 def check_eos_stop_condition(

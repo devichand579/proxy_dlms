@@ -7,12 +7,12 @@ from typing import Optional
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
 from schedulers.utils import (
-    add_gumbel_noise,
+    sample_tokens,
     get_mask_by_confidence,
     get_mask_by_entropy,
+    top_two_margin,
     check_eos_stop_condition,
     check_all_generated_unmasked,
     mask_eos_eot_logits,
@@ -103,17 +103,13 @@ def generate_topk(
 
             mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
-            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-            x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
+            x0 = sample_tokens(logits, temperature)
 
             # Compute ranking score based on metric
             if metric == 'confidence':
                 x0_p = get_mask_by_confidence(logits, x0)
             elif metric == 'top_margin':
-                probs = F.softmax(logits.float(), dim=-1)
-                top2 = torch.topk(probs, 2, dim=-1).values
-                x0_p = top2[..., 0] - top2[..., 1]
-                del probs, top2
+                x0_p = top_two_margin(logits)
             elif metric == 'entropy':
                 entropy = get_mask_by_entropy(logits)
                 x0_p = -entropy  # low entropy = high confidence
@@ -128,7 +124,7 @@ def generate_topk(
             x0 = torch.where(mask_index, x0, x)
             confidence = torch.where(mask_index, x0_p, -np.inf)
 
-            del logits, logits_with_noise, x0_p
+            del logits, x0_p
             torch.cuda.empty_cache()
 
             # Select top-k per batch

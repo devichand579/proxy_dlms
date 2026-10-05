@@ -22,12 +22,22 @@ def slice_gen_region(
 def logits_to_step_metrics(
     logits: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Predictions, max-prob confidences, and entropy from logits."""
+    """Predictions, max-prob confidences, and entropy from logits.
+
+    Sequence chunks avoid a second full-vocabulary tensor next to ``logits``.
+    """
+    length = int(logits.shape[1])
+    predictions = torch.empty(logits.shape[:2], dtype=torch.long, device=logits.device)
+    confidences = torch.empty(logits.shape[:2], dtype=torch.float32, device=logits.device)
+    entropies = torch.empty(logits.shape[:2], dtype=torch.float32, device=logits.device)
     with torch.no_grad():
-        probs = torch.softmax(logits.float(), dim=-1)
-        confidences = probs.max(dim=-1).values
-        entropies = -(probs * torch.log(probs + 1e-10)).sum(dim=-1)
-        predictions = logits.argmax(dim=-1)
+        for start in range(0, length, 32):
+            end = min(length, start + 32)
+            piece = logits[:, start:end]
+            predictions[:, start:end] = piece.argmax(dim=-1)
+            probs = torch.softmax(piece.float(), dim=-1)
+            confidences[:, start:end] = probs.max(dim=-1).values
+            entropies[:, start:end] = -(probs * torch.log(probs + 1e-10)).sum(dim=-1)
     return predictions, confidences, entropies
 
 
@@ -314,7 +324,7 @@ class TracingContext:
 
         step_trace = StepTrace(
             step=step,
-            mask_index=mask_gen.clone(),
+            mask_index=mask_gen.detach().to(device="cpu"),
         )
         self.trace.step_traces.append(step_trace)
 
@@ -409,6 +419,9 @@ class TracingContext:
 
         if not hook.active(self.current_step):
             return modified_transfer, modified_x0, False
+
+        if mask_gen.device != transfer_gen.device:
+            mask_gen = mask_gen.to(device=transfer_gen.device)
 
         S = torch.nonzero(transfer_gen[0], as_tuple=False).squeeze(-1)
 

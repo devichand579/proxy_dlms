@@ -12,7 +12,7 @@ import torch
 from typing import List, Optional
 from load_model import LLADA_DEFAULT_EOS_ID, LLADA_DEFAULT_EOT_ID, LLADA_DEFAULT_MASK_ID
 from schedulers.utils import (
-    add_gumbel_noise,
+    sample_tokens,
     get_mask_by_confidence,
     get_mask_by_entropy,
     check_eos_stop_condition,
@@ -224,8 +224,7 @@ def generate_dus(
 
             mask_eos_eot_logits(logits, logits_eos_inf, confidence_eos_eot_inf, eos_id, eot_id)
 
-            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-            x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
+            x0 = sample_tokens(logits, temperature)
 
             # Update positions scheduled for this step
             for pos in step_indices:
@@ -260,7 +259,7 @@ def generate_dus(
             if check_all_generated_unmasked(x, mask_id, prompt_len):
                 return x, steps_taken, num_block + 1
 
-            del logits, logits_with_noise
+            del logits
             torch.cuda.empty_cache()
 
     return x, steps_taken, num_blocks
