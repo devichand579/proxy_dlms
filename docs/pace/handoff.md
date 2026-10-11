@@ -79,11 +79,11 @@ Across both models: pace wins significantly in 15 of 22 settings, ties the other
 |---|---|
 | Full experiment log (Exp 1–22, setup, theory, lessons, idea table) | `/root/aditya/experiment_log.md` |
 | Online copy of the log (Claude Doc, keep in sync with the file) | https://claude.ai/code/artifact/c590cfe8-15cb-485f-a778-2183d6037679 |
-| **Paper-style write-up** (abstract → conclusion, chart, theory §4) | https://claude.ai/code/artifact/c70cef50-c891-4060-a1ac-82517e13519f ("Pace: A Step-Budget Unmasking Schedule for LLaDA") |
+| **Paper-style write-up** (abstract → conclusion, chart, theory §4) | https://claude.ai/code/artifact/c70cef50-c891-4060-a1ac-82517e13519f ("Pace: A Step-Budget Unmasking Schedule for LLaDA"); offline copy `/root/aditya/writeup.md` (chart replaced by a text placeholder) |
 | Research plan v2 / v1 (historical) | `plan.md`, `plan_v1_2026-10-06.md` |
 | Original paper draft | `Schedule_tracing.pdf` |
 | Reference papers (EB-Sampler `2505.24857v1.pdf`, LLaDA, InfoGain, BatchBALD, …) | `papers/`, top-level PDFs |
-| Mentor's notes on his experiments | `/root/Strace/docs/latent-*.md`, `docs/conversation-experiments-01a10259.md` |
+| Mentor's notes and result summaries | `/root/aditya/mentor/` (copy of his `docs/` and the small result files from his `outputs/`; see `mentor/README.md`) |
 
 ### Code: `/root/aditya/das/` (ours)
 | File | What it does |
@@ -92,12 +92,14 @@ Across both models: pace wins significantly in 15 of 22 settings, ties the other
 | `bench.py` | HumanEval runner (`--method eb|ebf|das`, `--cfg` JSON kwargs for `generate_das`, `--tasks 0-163`, `--steps`, `--model models/llada|models/llada1_5`, `--out`). Saves `batch_XXX.json` per 20 problems; **resumes** from saved batches. |
 | `bench_gsm8k.py`, `bench_mbpp.py` | Same for GSM8K (4-shot, 256 tokens, tasks 0-399) and MBPP (3-shot, 256 tokens, tasks 0-499, 3 s test timeout). |
 | `compare.py` | Builds `SUMMARY.txt` tables (score, NFE, unfinished, W/L vs a reference). |
-| `pair.py` | Paired W/L + exact McNemar p. Run from `/root/aditya/outputs`: `python3 ../das/pair.py full/pace_s16:full/ebf_s16` |
-| `run.sh` | Runs one job: `cd /root/Strace`, sets `PYTHONPATH=/root/Strace:/root/aditya`, runs `python -m ${MODULE:-das.bench}`, logs to `outputs/logs/<name>.log` (overwrites). |
+| `pair.py` | Paired W/L + exact McNemar p (reads `results.json`, or `batch_*.json` if missing). Run from `/root/aditya/outputs`: `python3 ../das/pair.py full/pace_s16:full/ebf_s16` |
+| `run.sh` | Runs one job: `cd` to the folder above `das/`, sets `PYTHONPATH` to it, runs `python -m ${MODULE:-das.bench}`, logs to `outputs/logs/<name>.log` (overwrites). Env: `MODEL_ROOT` (default `/root/Strace`, where `models/llada` lives), `PYTHON`, `OUT_ROOT`. |
 | `queue2.sh <jobfile> <N>` | Runs a job file with N in parallel. Each line is a full command run from `das/`. |
 | `jobs_*.txt` | Every job file we ran; the exact command lines for each experiment (e.g. `jobs_gaps.txt` = Exp 22, `jobs_l15.txt` = Exp 18). |
 | `retry_gaps.sh`, `retry_after.sh`, `night.sh` | Helpers: rerun jobs whose log has no `RESULT` line, overnight chains. |
 | `tests/` | Smoke tests (20-problem quick checks). |
+| `vendor/` | Copies of the 17 Strace files das imports (`load_model.py`, parts of `schedulers/`, `schedulerlens/latent_bench.py`, `traces/`). `das/__init__.py` puts it first on `sys.path`. Identical to Strace branch `experiment-set-1`; don't edit. |
+| `README.md` | Usage summary. |
 
 Example job line:
 ```
@@ -118,12 +120,15 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh 
 
 Each run folder has `batch_XXX.json` files with a `samples` list (`task`, `passed`, completion, per-row metrics such as forward passes and unfinished tokens). Run names follow `<method>_<variant>_s<steps>`.
 
-### Dependencies on the mentor's repo (important for reproducing)
-- Our code imports from **`/root/Strace`** (`schedulers.utils`, `schedulers.latent*`, `load_model`, `schedulerlens.latent_bench`). **`/root/Strace` is the mentor's live repo with uncommitted changes and untracked `latent_*` files.**
-- **`/root/aditya/Strace/` is an older copy (commit adf822b) without the `latent_*` modules. It is NOT enough to run our code.**
-- Model weights: `/root/Strace/models/llada` (LLaDA-8B Base, 15 GB) and `/root/Strace/models/llada1_5` (15 GB).
+### Independence from the mentor's repo, and git
+- **`/root/aditya` is self-contained.** The Strace modules our code needs are copied into `das/vendor/`, and the mentor's per-task HumanEval results used by `compare.py` are in `outputs/mentor/`. Only the **model weights** come from outside: `/root/Strace/models/llada` (LLaDA-8B Base, 15 GB) and `/root/Strace/models/llada1_5` (15 GB), found via `MODEL_ROOT`. Checked on 2026-10-11: a 20-problem rerun (pace and EB+Fisher, 16 steps) through the standalone code gave identical generations and pass/fail to the original runs.
+- **GitHub repo:** `git@github.com:devichand579/Strace.git` (SSH works from this machine as `devichand579`).
+  - Branch **`experiment-set-1`**: the mentor's previously uncommitted work (latent schedulers, schedulerlens benches, tests, docs, small result files from `outputs/`), on top of `main`.
+  - Branch **`experiment-set-2`** (on top of set 1): our work. `das/` (without `vendor/`; inside the repo it uses the repo's own modules), `docs/pace/` (write-up, log, this handoff, README mapping the paths), `outputs/pace/` (`results.json` + `config.json` per run and the SUMMARY tables; raw generations not committed).
+  - `/root/Strace` itself is checked out on `experiment-set-1`.
+- **`/root/aditya/Strace/` is an old copy of the repo (commit adf822b, no `latent_*` modules).** It's not used by anything; ignore it.
 - Python: `/root/miniconda3/envs/strace/bin/python`. GPU: 1× AMD MI300X (ROCm). matplotlib isn't installed.
-- **Never edit files in `/root/Strace`.** Our code lives only in `/root/aditya/das`.
+- **Don't edit the mentor's files** (in `/root/Strace` or `das/vendor/`). Our code lives in `/root/aditya/das`; if it changes, also update branch `experiment-set-2`.
 
 ---
 
@@ -154,11 +159,12 @@ Each run folder has `batch_XXX.json` files with a `samples` list (`task`, `passe
 
 ## 6. Status and what's left
 
-**Done:** all experiments (Exp 1–22), the full log, the online log doc, and the paper-style write-up with chart and theory. No jobs are running.
+**Done:** all experiments (Exp 1–22), the full log, the online log doc, the paper-style write-up with chart and theory, the standalone code, and both GitHub branches. No jobs are running.
 
 **GPU access ends ~2026-10-12 04:00 UTC.** After that, no new runs are possible on this machine. Back up:
-- `/root/aditya/` (outputs, das, docs; ~292 MB, the old `Strace/` copy inside can be skipped)
-- the mentor's code `/root/Strace` **without** `models/` and `outputs/` (~200 MB: `rsync -avz --exclude models/ --exclude outputs/ ...`). Needed to rerun anything.
+- `/root/aditya/` (code, results, docs, mentor copies; self-contained except the model weights; the old `Strace/` copy inside can be skipped).
+- Code, docs and result summaries of both the mentor's and our work are also on GitHub (branches `experiment-set-1`, `experiment-set-2`). Raw generations are only on this machine (`/root/aditya/outputs`, `/root/Strace/outputs`).
+- Weights can be re-downloaded from Hugging Face (`GSAI-ML/LLaDA-8B-Base`, `GSAI-ML/LLaDA-1.5`).
 
 **Possible next steps** (only if the user asks):
 1. **Polish the write-up:** fresh-eyes pass, fix any wording the user/mentor comments on. Keep its numbers consistent with `experiment_log.md`.
