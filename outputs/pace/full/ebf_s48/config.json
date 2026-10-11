@@ -1,0 +1,9 @@
+{
+  "method": "ebf",
+  "cfg": {},
+  "tasks": "0-163",
+  "steps": 48,
+  "batch_size": 20,
+  "model": "models/llada",
+  "gen_length": 512
+}

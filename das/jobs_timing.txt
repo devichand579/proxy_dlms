@@ -1,0 +1,5 @@
+# clean wall-clock timing, one run at a time on an idle GPU
+./run.sh --method das --name time_pace_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/timing --cfg '{"count":"pace"}'
+./run.sh --method ebf --name time_ebf_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/timing
+./run.sh --method das --name time_pace_s64 --steps 64 --tasks 0-163 --out /root/aditya/outputs/timing --cfg '{"count":"pace"}'
+./run.sh --method ebf --name time_ebf_s64 --steps 64 --tasks 0-163 --out /root/aditya/outputs/timing

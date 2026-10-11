@@ -1,0 +1,13 @@
+{
+  "method": "das",
+  "cfg": {
+    "count": "fixed",
+    "dep": "none",
+    "k_fixed": 4
+  },
+  "tasks": "20-59",
+  "steps": 128,
+  "batch_size": 20,
+  "model": "models/llada",
+  "gen_length": 512
+}

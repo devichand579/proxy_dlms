@@ -1,0 +1,15 @@
+# Exp 2B (128 steps, ranking = EB+Fisher, count varies)
+--method das --name das_eb_s128 --cfg '{"count":"eb"}'
+--method das --name single_s128 --cfg '{"count":"singleton"}'
+--method das --name nodep_a05_s128 --cfg '{"count":"das","dep":"none","alpha":0.5}'
+--method das --name das_a05_s128 --cfg '{"count":"das","alpha":0.5}'
+--method das --name das_a025_s128 --cfg '{"count":"das","alpha":0.25}'
+--method das --name nodep_a025_s128 --cfg '{"count":"das","dep":"none","alpha":0.25}'
+# Exp 2A (fixed 4/step)
+--method das --name fix4_s128 --cfg '{"count":"fixed","dep":"none","k_fixed":4}'
+--method das --name fix4skip_s128 --cfg '{"count":"fixed","dep":"lookahead","k_fixed":4,"m":8,"skip_delta":0.1}'
+# Exp 2B at 64 steps
+--method ebf --name ebf_s64 --steps 64
+--method das --name das_a05_s64 --steps 64 --cfg '{"count":"das","alpha":0.5}'
+--method das --name nodep_a05_s64 --steps 64 --cfg '{"count":"das","dep":"none","alpha":0.5}'
+--method das --name das_a025_s64 --steps 64 --cfg '{"count":"das","alpha":0.25}'

@@ -1,0 +1,4 @@
+--method das --name das_a01_m4_s32 --steps 32 --cfg '{"count":"das","alpha":0.1,"m":4}'
+--method das --name nodep_a01_s32 --steps 32 --cfg '{"count":"das","alpha":0.1,"dep":"none"}'
+--method das --name das_a01_m4_s16 --steps 16 --cfg '{"count":"das","alpha":0.1,"m":4}'
+--method das --name nodep_a01_s16 --steps 16 --cfg '{"count":"das","alpha":0.1,"dep":"none"}'

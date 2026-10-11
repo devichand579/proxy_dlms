@@ -1,0 +1,4 @@
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --steps 16 --name s6_pace_s16 --cfg '{"count":"pace"}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --steps 16 --name s6_tau05_s16 --cfg '{"count":"pace","end_tau":0.5,"trace_end":true}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --steps 16 --name s6_tau09_s16 --cfg '{"count":"pace","end_tau":0.9,"trace_end":true}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --steps 32 --name s6_tau05_s32 --cfg '{"count":"pace","end_tau":0.5,"trace_end":true}'

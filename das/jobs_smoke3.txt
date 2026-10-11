@@ -1,0 +1,5 @@
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --steps 32 --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --name s3_lens30w05_s32 --cfg '{"count":"pace","lens":30}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --steps 32 --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --name s3_lens28w01_s32 --cfg '{"count":"pace","lens":28,"lens_w":0.1}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --steps 32 --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --name s3_div80_s32 --cfg '{"count":"pace","div":0.8}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --steps 32 --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --name s3_div70_s32 --cfg '{"count":"pace","div":0.7}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --steps 32 --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --name s3_ext05_s32 --cfg '{"count":"pace","ext":0.5}'

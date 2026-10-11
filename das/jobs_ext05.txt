@@ -1,0 +1,7 @@
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_gsm8k ./run.sh --method das --name gsm_ext05_s16 --steps 16 --tasks 0-399 --out /root/aditya/outputs/latent --cfg '{"count":"pace","ext":0.5}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_gsm8k ./run.sh --method das --name gsm_ext05_s32 --steps 32 --tasks 0-399 --out /root/aditya/outputs/latent --cfg '{"count":"pace","ext":0.5}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh --method das --name mbpp_ext05_s16 --steps 16 --tasks 0-499 --out /root/aditya/outputs/latent --cfg '{"count":"pace","ext":0.5}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh --method das --name mbpp_ext05_s32 --steps 32 --tasks 0-499 --out /root/aditya/outputs/latent --cfg '{"count":"pace","ext":0.5}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --name lat_ext05_s24 --steps 24 --tasks 0-163 --out /root/aditya/outputs/latent --cfg '{"count":"pace","ext":0.5}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --name lat_ext05_s48 --steps 48 --tasks 0-163 --out /root/aditya/outputs/latent --cfg '{"count":"pace","ext":0.5}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --name lat_ext05_s64 --steps 64 --tasks 0-163 --out /root/aditya/outputs/latent --cfg '{"count":"pace","ext":0.5}'

@@ -1,0 +1,6 @@
+--method das --name pace_s24 --steps 24 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace"}'
+--method ebf --name ebf_s24 --steps 24 --tasks 0-163 --out /root/aditya/outputs/full
+--method das --name pace_s48 --steps 48 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace"}'
+--method ebf --name ebf_s48 --steps 48 --tasks 0-163 --out /root/aditya/outputs/full
+--method das --name pace_s96 --steps 96 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace"}'
+--method ebf --name ebf_s96 --steps 96 --tasks 0-163 --out /root/aditya/outputs/full

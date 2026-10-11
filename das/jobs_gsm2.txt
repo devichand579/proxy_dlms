@@ -1,0 +1,8 @@
+--method das --name gsm_pace_b32_s32 --steps 32 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"count":"pace","block_len":32}'
+--method ebf --name gsm_ebf_b32_s32 --steps 32 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"block_length":32}'
+--method das --name gsm_pace_b32_s16 --steps 16 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"count":"pace","block_len":32}'
+--method ebf --name gsm_ebf_b32_s16 --steps 16 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"block_length":32}'
+--method das --name gsm_pace_b32_s64 --steps 64 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"count":"pace","block_len":32}'
+--method ebf --name gsm_ebf_b32_s64 --steps 64 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"block_length":32}'
+--method das --name gsm_pace_b32_s128 --steps 128 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"count":"pace","block_len":32}'
+--method ebf --name gsm_ebf_b32_s128 --steps 128 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"block_length":32}'

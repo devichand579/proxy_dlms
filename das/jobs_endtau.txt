@@ -1,0 +1,4 @@
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-163 --out /root/aditya/outputs/endtrace --steps 16 --name et_tau05_s16 --cfg '{"count":"pace","trace_end":true,"end_tau":0.5}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-163 --out /root/aditya/outputs/endtrace --steps 16 --name et_tau09_s16 --cfg '{"count":"pace","trace_end":true,"end_tau":0.9}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-163 --out /root/aditya/outputs/endtrace --steps 32 --name et_tau05_s32 --cfg '{"count":"pace","trace_end":true,"end_tau":0.5}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-163 --out /root/aditya/outputs/endtrace --steps 32 --name et_tau09_s32 --cfg '{"count":"pace","trace_end":true,"end_tau":0.9}'

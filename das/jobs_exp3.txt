@@ -1,0 +1,6 @@
+--method das --name das_a01_m4_opt_s32 --steps 32 --cfg '{"count":"das","alpha":0.1,"m":4,"fallback":"opt"}'
+--method das --name das_a01_m4_opt_s16 --steps 16 --cfg '{"count":"das","alpha":0.1,"m":4,"fallback":"opt"}'
+--method das --name nodep_a005_s32 --steps 32 --cfg '{"count":"das","alpha":0.05,"dep":"none"}'
+--method das --name nodep_a005_s16 --steps 16 --cfg '{"count":"das","alpha":0.05,"dep":"none"}'
+--method das --name nodep_a0025_s16 --steps 16 --cfg '{"count":"das","alpha":0.025,"dep":"none"}'
+--method das --name nodep_a01_s64 --steps 64 --cfg '{"count":"das","alpha":0.1,"dep":"none"}'

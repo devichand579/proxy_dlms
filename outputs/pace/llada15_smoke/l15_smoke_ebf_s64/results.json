@@ -1,0 +1,41 @@
+{
+  "summary": {
+    "name": "l15_smoke_ebf_s64",
+    "passed": 3,
+    "n": 20,
+    "nfe_mean": 64.0,
+    "nfe_max": 64,
+    "unfinished_mean": 58.55
+  },
+  "config": {
+    "method": "ebf",
+    "cfg": {},
+    "tasks": "0-19",
+    "steps": 64,
+    "batch_size": 20,
+    "model": "models/llada1_5",
+    "gen_length": 512
+  },
+  "passed": {
+    "0": false,
+    "1": false,
+    "2": false,
+    "3": true,
+    "4": false,
+    "5": false,
+    "6": false,
+    "7": true,
+    "8": false,
+    "9": false,
+    "10": false,
+    "11": false,
+    "12": false,
+    "13": false,
+    "14": false,
+    "15": true,
+    "16": false,
+    "17": false,
+    "18": false,
+    "19": false
+  }
+}

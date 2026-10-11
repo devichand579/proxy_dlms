@@ -1,0 +1,3 @@
+--method das --name nodep_a005_s64 --steps 64 --cfg '{"count":"das","alpha":0.05,"dep":"none"}'
+--method das --name nodep_a005_s128 --steps 128 --cfg '{"count":"das","alpha":0.05,"dep":"none"}'
+--method das --name nodep_a01_s128 --steps 128 --cfg '{"count":"das","alpha":0.1,"dep":"none"}'

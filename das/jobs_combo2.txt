@@ -1,0 +1,2 @@
+--method das --name allow_f_s16 --steps 16 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"eb","base":"allowance"}'
+--method das --name allow_f_s64 --steps 64 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"eb","base":"allowance"}'

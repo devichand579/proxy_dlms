@@ -1,0 +1,8 @@
+--method ebf --name ebf_s16 --steps 16 --tasks 0-163 --out /root/aditya/outputs/full
+--method das --name nodep_a005_s16 --steps 16 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"das","alpha":0.05,"dep":"none"}'
+--method ebf --name ebf_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full
+--method das --name nodep_a005_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"das","alpha":0.05,"dep":"none"}'
+--method ebf --name ebf_s64 --steps 64 --tasks 0-163 --out /root/aditya/outputs/full
+--method das --name nodep_a005_s64 --steps 64 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"das","alpha":0.05,"dep":"none"}'
+--method das --name nodep_a005_s128 --steps 128 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"das","alpha":0.05,"dep":"none"}'
+--method ebf --name ebf_s128 --steps 128 --tasks 0-163 --out /root/aditya/outputs/full

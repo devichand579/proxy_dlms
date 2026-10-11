@@ -1,0 +1,4 @@
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --steps 32 --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --name s5_sh1at0_s32 --cfg '{"count":"pace","share":1}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --steps 32 --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --name s5_sh1at25_s32 --cfg '{"count":"pace","share":1,"share_at":0.25}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --steps 32 --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --name s5_sh05at25_s32 --cfg '{"count":"pace","share":0.5,"share_at":0.25}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --steps 32 --tasks 0-19 --out /root/aditya/outputs/latent_smoke2 --name s5_sh1at50_s32 --cfg '{"count":"pace","share":1,"share_at":0.5}'

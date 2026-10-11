@@ -1,0 +1,4 @@
+--method das --name pace_s16 --steps 16 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace"}'
+--method das --name pace_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace"}'
+--method das --name pace_s64 --steps 64 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace"}'
+--method das --name pace_s128 --steps 128 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace"}'

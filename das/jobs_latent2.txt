@@ -1,0 +1,4 @@
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-163 --out /root/aditya/outputs/latent --steps 16 --name lat_extm05_s16 --cfg '{"count":"pace","ext":-0.5}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-163 --out /root/aditya/outputs/latent --steps 32 --name lat_extm05_s32 --cfg '{"count":"pace","ext":-0.5}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-163 --out /root/aditya/outputs/latent --steps 16 --name lat_ext025_s16 --cfg '{"count":"pace","ext":0.25}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --tasks 0-163 --out /root/aditya/outputs/latent --steps 32 --name lat_ext025_s32 --cfg '{"count":"pace","ext":0.25}'

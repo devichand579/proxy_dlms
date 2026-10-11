@@ -1,0 +1,13 @@
+{
+  "method": "das",
+  "cfg": {
+    "count": "eb",
+    "base": "allowance"
+  },
+  "tasks": "0-499",
+  "steps": 64,
+  "batch_size": 20,
+  "model": "models/llada",
+  "gen_length": 256,
+  "bench": "mbpp-3shot"
+}

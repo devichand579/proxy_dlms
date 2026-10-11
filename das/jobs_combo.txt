@@ -1,0 +1,7 @@
+# count x score grid (mentor's request), HumanEval-164 at 32 steps
+--method das --name pace_info_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace","score":"info"}'
+--method das --name pace_allow_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace","base":"allowance"}'
+--method das --name eb_info_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"eb","score":"info"}'
+--method das --name allow_f_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"eb","base":"allowance"}'
+--method das --name allow_conf_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"eb","base":"allowance","use_fisher":false}'
+--method das --name eb_conf_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"eb","use_fisher":false}'

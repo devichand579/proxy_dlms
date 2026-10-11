@@ -1,0 +1,13 @@
+{
+  "method": "das",
+  "cfg": {
+    "count": "pace",
+    "block_len": 32
+  },
+  "tasks": "0-399",
+  "steps": 16,
+  "batch_size": 20,
+  "model": "models/llada",
+  "gen_length": 256,
+  "bench": "gsm8k-4shot"
+}

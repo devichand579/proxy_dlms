@@ -1,0 +1,13 @@
+# rerun of crashed overnight jobs, one at a time (2026-10-10)
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh --method das --name mbpp_pace_s128 --steps 128 --tasks 0-499 --out /root/aditya/outputs/mbpp --cfg '{"count":"pace"}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_gsm8k ./run.sh --method das --name gsm_allow_f_s16 --steps 16 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"count":"eb","base":"allowance"}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_gsm8k ./run.sh --method das --name gsm_allow_f_s32 --steps 32 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"count":"eb","base":"allowance"}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_gsm8k ./run.sh --method das --name gsm_allow_f_s64 --steps 64 --tasks 0-399 --out /root/aditya/outputs/gsm8k --cfg '{"count":"eb","base":"allowance"}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method das --name pace_bs10_s32 --steps 32 --batch-size 10 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace"}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./run.sh --method ebf --name ebf_bs10_s32 --steps 32 --batch-size 10 --tasks 0-163 --out /root/aditya/outputs/full
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh --method das --name mbpp_pace_s64 --steps 64 --tasks 0-499 --out /root/aditya/outputs/mbpp --cfg '{"count":"pace"}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh --method ebf --name mbpp_ebf_s64 --steps 64 --tasks 0-499 --out /root/aditya/outputs/mbpp
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh --method das --name mbpp_pace_s32 --steps 32 --tasks 0-499 --out /root/aditya/outputs/mbpp --cfg '{"count":"pace"}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh --method ebf --name mbpp_ebf_s32 --steps 32 --tasks 0-499 --out /root/aditya/outputs/mbpp
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh --method das --name mbpp_pace_s16 --steps 16 --tasks 0-499 --out /root/aditya/outputs/mbpp --cfg '{"count":"pace"}'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh --method ebf --name mbpp_ebf_s16 --steps 16 --tasks 0-499 --out /root/aditya/outputs/mbpp

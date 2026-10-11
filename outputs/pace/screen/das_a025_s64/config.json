@@ -1,0 +1,12 @@
+{
+  "method": "das",
+  "cfg": {
+    "count": "das",
+    "alpha": 0.25
+  },
+  "tasks": "20-59",
+  "steps": 64,
+  "batch_size": 20,
+  "model": "models/llada",
+  "gen_length": 512
+}

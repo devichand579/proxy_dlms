@@ -1,0 +1,12 @@
+--method das --name single_s64 --steps 64 --cfg '{"count":"singleton"}'
+--method ebf --name ebf_s32 --steps 32
+--method das --name das_a05_s32 --steps 32 --cfg '{"count":"das","alpha":0.5}'
+--method das --name nodep_a05_s32 --steps 32 --cfg '{"count":"das","dep":"none","alpha":0.5}'
+--method das --name das_a025_s32 --steps 32 --cfg '{"count":"das","alpha":0.25}'
+--method das --name nodep_a025_s64 --steps 64 --cfg '{"count":"das","dep":"none","alpha":0.25}'
+--method eb --name eb_s64 --steps 64
+--method das --name das_a05_m4_s32 --steps 32 --cfg '{"count":"das","alpha":0.5,"m":4}'
+--method das --name nodep_a025_s32 --steps 32 --cfg '{"count":"das","dep":"none","alpha":0.25}'
+--method ebf --name ebf_s16 --steps 16
+--method das --name das_a025_m4_s16 --steps 16 --cfg '{"count":"das","alpha":0.25,"m":4}'
+--method das --name nodep_a025_s16 --steps 16 --cfg '{"count":"das","dep":"none","alpha":0.25}'

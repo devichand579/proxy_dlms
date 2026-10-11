@@ -1,0 +1,10 @@
+{
+  "method": "ebf",
+  "cfg": {},
+  "tasks": "0-399",
+  "steps": 32,
+  "batch_size": 20,
+  "model": "models/llada",
+  "gen_length": 256,
+  "bench": "gsm8k-4shot"
+}

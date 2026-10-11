@@ -1,0 +1,1 @@
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MODULE=das.bench_mbpp ./run.sh --method das --name mbpp_ext05_s32 --steps 32 --tasks 0-499 --out /root/aditya/outputs/latent --cfg '{"count":"pace","ext":0.5}'

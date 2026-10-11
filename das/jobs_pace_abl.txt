@@ -1,0 +1,6 @@
+--method das --name pace_nof_s16 --steps 16 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace","use_fisher":false}'
+--method das --name pace_run4_s16 --steps 16 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace","pad_run":4}'
+--method das --name pace_run16_s16 --steps 16 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace","pad_run":16}'
+--method das --name pace_nof_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace","use_fisher":false}'
+--method das --name pace_run4_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace","pad_run":4}'
+--method das --name pace_run16_s32 --steps 32 --tasks 0-163 --out /root/aditya/outputs/full --cfg '{"count":"pace","pad_run":16}'
