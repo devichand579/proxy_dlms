@@ -1,0 +1,47 @@
+[
+  {
+    "variant": "eb_sampler",
+    "samples": 32,
+    "steps": 12,
+    "slots_per_canvas": 12,
+    "unfinished_masks": 0,
+    "slot_accuracy": 0.7109375,
+    "exact_slot_accuracy": 0.7109375,
+    "worksheet_accuracy": 0.34375,
+    "canvas_accuracy": 0.03125,
+    "generation_seconds": 6.9486294409725815,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 17.971458911895752
+  },
+  {
+    "variant": "control_count",
+    "samples": 32,
+    "steps": 12,
+    "slots_per_canvas": 12,
+    "unfinished_masks": 0,
+    "slot_accuracy": 0.7161458333333334,
+    "exact_slot_accuracy": 0.7161458333333334,
+    "worksheet_accuracy": 0.359375,
+    "canvas_accuracy": 0.03125,
+    "generation_seconds": 4.130565284052864,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 18.196777820587158
+  },
+  {
+    "variant": "control_both",
+    "samples": 32,
+    "steps": 12,
+    "slots_per_canvas": 12,
+    "unfinished_masks": 0,
+    "slot_accuracy": 0.7395833333333334,
+    "exact_slot_accuracy": 0.7395833333333334,
+    "worksheet_accuracy": 0.390625,
+    "canvas_accuracy": 0.09375,
+    "generation_seconds": 3.524466405971907,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 18.196777820587158
+  }
+]

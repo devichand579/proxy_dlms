@@ -1,0 +1,199 @@
+{
+  "rows": [
+    {
+      "scorer": "Earlier Fisher (diagnostic)",
+      "count": "Fixed quota",
+      "passed": 3,
+      "forward": 128.0,
+      "committed": 512.0,
+      "path": "/root/Strace/outputs/latent_count_humaneval20/diagnostic_fisher_fixed/results.json",
+      "outcomes": {
+        "HumanEval/0": false,
+        "HumanEval/1": false,
+        "HumanEval/2": false,
+        "HumanEval/3": true,
+        "HumanEval/4": false,
+        "HumanEval/5": false,
+        "HumanEval/6": false,
+        "HumanEval/7": true,
+        "HumanEval/8": false,
+        "HumanEval/9": false,
+        "HumanEval/10": false,
+        "HumanEval/11": false,
+        "HumanEval/12": false,
+        "HumanEval/13": false,
+        "HumanEval/14": false,
+        "HumanEval/15": false,
+        "HumanEval/16": false,
+        "HumanEval/17": false,
+        "HumanEval/18": true,
+        "HumanEval/19": false
+      }
+    },
+    {
+      "scorer": "Earlier Fisher (diagnostic)",
+      "count": "Singleton",
+      "passed": 14,
+      "forward": 128.0,
+      "committed": 128.0,
+      "path": "/root/Strace/outputs/latent_count_singleton20/diagnostic_fisher_singleton/results.json",
+      "outcomes": {
+        "HumanEval/0": true,
+        "HumanEval/1": false,
+        "HumanEval/2": true,
+        "HumanEval/3": true,
+        "HumanEval/4": true,
+        "HumanEval/5": true,
+        "HumanEval/6": false,
+        "HumanEval/7": true,
+        "HumanEval/8": true,
+        "HumanEval/9": true,
+        "HumanEval/10": false,
+        "HumanEval/11": true,
+        "HumanEval/12": true,
+        "HumanEval/13": true,
+        "HumanEval/14": false,
+        "HumanEval/15": true,
+        "HumanEval/16": true,
+        "HumanEval/17": false,
+        "HumanEval/18": true,
+        "HumanEval/19": false
+      }
+    },
+    {
+      "scorer": "Earlier Fisher (diagnostic)",
+      "count": "Latent growth guard",
+      "passed": 14,
+      "forward": 1144.0,
+      "committed": 135.05,
+      "path": "/root/Strace/outputs/latent_count_humaneval20/diagnostic_fisher_guard/results.json",
+      "outcomes": {
+        "HumanEval/0": true,
+        "HumanEval/1": false,
+        "HumanEval/2": true,
+        "HumanEval/3": true,
+        "HumanEval/4": true,
+        "HumanEval/5": true,
+        "HumanEval/6": false,
+        "HumanEval/7": true,
+        "HumanEval/8": true,
+        "HumanEval/9": true,
+        "HumanEval/10": false,
+        "HumanEval/11": true,
+        "HumanEval/12": true,
+        "HumanEval/13": true,
+        "HumanEval/14": false,
+        "HumanEval/15": true,
+        "HumanEval/16": true,
+        "HumanEval/17": false,
+        "HumanEval/18": true,
+        "HumanEval/19": false
+      }
+    },
+    {
+      "scorer": "Activation only",
+      "count": "Fixed quota",
+      "passed": 0,
+      "forward": 128.0,
+      "committed": 512.0,
+      "path": "/root/Strace/outputs/latent_count_humaneval20/activation_fixed/results.json",
+      "outcomes": {
+        "HumanEval/0": false,
+        "HumanEval/1": false,
+        "HumanEval/2": false,
+        "HumanEval/3": false,
+        "HumanEval/4": false,
+        "HumanEval/5": false,
+        "HumanEval/6": false,
+        "HumanEval/7": false,
+        "HumanEval/8": false,
+        "HumanEval/9": false,
+        "HumanEval/10": false,
+        "HumanEval/11": false,
+        "HumanEval/12": false,
+        "HumanEval/13": false,
+        "HumanEval/14": false,
+        "HumanEval/15": false,
+        "HumanEval/16": false,
+        "HumanEval/17": false,
+        "HumanEval/18": false,
+        "HumanEval/19": false
+      }
+    },
+    {
+      "scorer": "Activation only",
+      "count": "Singleton",
+      "passed": 7,
+      "forward": 128.0,
+      "committed": 128.0,
+      "path": "/root/Strace/outputs/latent_count_singleton20/activation_singleton/results.json",
+      "outcomes": {
+        "HumanEval/0": false,
+        "HumanEval/1": false,
+        "HumanEval/2": true,
+        "HumanEval/3": false,
+        "HumanEval/4": true,
+        "HumanEval/5": false,
+        "HumanEval/6": false,
+        "HumanEval/7": true,
+        "HumanEval/8": true,
+        "HumanEval/9": false,
+        "HumanEval/10": false,
+        "HumanEval/11": true,
+        "HumanEval/12": false,
+        "HumanEval/13": false,
+        "HumanEval/14": false,
+        "HumanEval/15": true,
+        "HumanEval/16": true,
+        "HumanEval/17": false,
+        "HumanEval/18": false,
+        "HumanEval/19": false
+      }
+    },
+    {
+      "scorer": "Activation only",
+      "count": "Latent growth guard",
+      "passed": 8,
+      "forward": 1144.0,
+      "committed": 140.39999999999998,
+      "path": "/root/Strace/outputs/latent_count_humaneval20/activation_guard/results.json",
+      "outcomes": {
+        "HumanEval/0": false,
+        "HumanEval/1": false,
+        "HumanEval/2": true,
+        "HumanEval/3": false,
+        "HumanEval/4": true,
+        "HumanEval/5": false,
+        "HumanEval/6": false,
+        "HumanEval/7": true,
+        "HumanEval/8": true,
+        "HumanEval/9": true,
+        "HumanEval/10": false,
+        "HumanEval/11": true,
+        "HumanEval/12": true,
+        "HumanEval/13": false,
+        "HumanEval/14": false,
+        "HumanEval/15": false,
+        "HumanEval/16": true,
+        "HumanEval/17": false,
+        "HumanEval/18": false,
+        "HumanEval/19": false
+      }
+    }
+  ],
+  "guard_vs_singleton": {
+    "Earlier Fisher (diagnostic)": {
+      "wins": [],
+      "losses": []
+    },
+    "Activation only": {
+      "wins": [
+        "HumanEval/9",
+        "HumanEval/12"
+      ],
+      "losses": [
+        "HumanEval/15"
+      ]
+    }
+  }
+}

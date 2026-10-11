@@ -1,0 +1,30 @@
+[
+  {
+    "method": "diagnostic_fisher_fixed",
+    "passed": 3,
+    "diagnostic_only": true,
+    "steps_used": 128,
+    "forward_evaluations_per_sample": 128.0
+  },
+  {
+    "method": "diagnostic_fisher_guard",
+    "passed": 14,
+    "diagnostic_only": true,
+    "steps_used": 128,
+    "forward_evaluations_per_sample": 1144.0
+  },
+  {
+    "method": "activation_fixed",
+    "passed": 0,
+    "diagnostic_only": false,
+    "steps_used": 128,
+    "forward_evaluations_per_sample": 128.0
+  },
+  {
+    "method": "activation_guard",
+    "passed": 8,
+    "diagnostic_only": false,
+    "steps_used": 128,
+    "forward_evaluations_per_sample": 1144.0
+  }
+]

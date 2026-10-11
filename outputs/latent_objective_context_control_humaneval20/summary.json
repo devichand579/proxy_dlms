@@ -1,0 +1,53 @@
+[
+  {
+    "variant": "context_nogain",
+    "seed": 1234,
+    "samples": 20,
+    "steps": 128,
+    "forward_evaluations_per_sample": 128.0,
+    "backward_evaluations_per_sample": 0.0,
+    "generation_seconds": 101.87641543895006,
+    "peak_allocated_GiB": 19.852344512939453,
+    "unfinished_masks": 6373,
+    "passed": 3,
+    "pass_at_1": 0.15,
+    "mean_count": 1.510546875,
+    "forced_singletons": 31,
+    "sequence_evaluations": 2560,
+    "backward_sequence_evaluations": 0
+  },
+  {
+    "variant": "context_nogain_singleton",
+    "seed": 1234,
+    "samples": 20,
+    "steps": 128,
+    "forward_evaluations_per_sample": 128.0,
+    "backward_evaluations_per_sample": 0.0,
+    "generation_seconds": 98.88890953897499,
+    "peak_allocated_GiB": 19.852344512939453,
+    "unfinished_masks": 7680,
+    "passed": 0,
+    "pass_at_1": 0.0,
+    "mean_count": 1.0,
+    "forced_singletons": 43,
+    "sequence_evaluations": 2560,
+    "backward_sequence_evaluations": 0
+  },
+  {
+    "variant": "context_smallgain",
+    "seed": 1234,
+    "samples": 20,
+    "steps": 128,
+    "forward_evaluations_per_sample": 128.0,
+    "backward_evaluations_per_sample": 0.0,
+    "generation_seconds": 99.07741208793595,
+    "peak_allocated_GiB": 19.852344512939453,
+    "unfinished_masks": 5845,
+    "passed": 4,
+    "pass_at_1": 0.2,
+    "mean_count": 1.716796875,
+    "forced_singletons": 13,
+    "sequence_evaluations": 2560,
+    "backward_sequence_evaluations": 0
+  }
+]

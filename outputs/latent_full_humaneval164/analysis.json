@@ -1,0 +1,645 @@
+{
+  "rows": [
+    {
+      "split": "all_164",
+      "method": "eb_sampler",
+      "passed": 47,
+      "samples": 164,
+      "pass_at_1": 0.2865853658536585,
+      "wilson_95": [
+        0.2228893516056951,
+        0.3600504030184507
+      ],
+      "forward_evaluations_per_sample": 128.0,
+      "unfinished_masks": 32491,
+      "mean_committed_positions": 313.8841463414634,
+      "syntax_valid": 139,
+      "syntax_valid_but_failed": 92,
+      "failure_results": {
+        "failed: ": 50,
+        "failed: max() arg is an empty sequence": 1,
+        "failed: invalid syntax (<string>, line 12)": 2,
+        "failed: closing parenthesis ')' does not match opening parenthesis '[' (<string>, line 11)": 1,
+        "failed: invalid syntax (<string>, line 10)": 1,
+        "failed: invalid syntax (<string>, line 42)": 1,
+        "failed: invalid syntax (<string>, line 11)": 1,
+        "failed: name 'is_prime' is not defined": 3,
+        "failed: invalid syntax (<string>, line 80)": 1,
+        "failed: expected ':' (<string>, line 74)": 1,
+        "failed: Test 2": 3,
+        "failed: unmatched ')' (<string>, line 16)": 1,
+        "failed: Error": 4,
+        "failed: invalid syntax (<string>, line 18)": 2,
+        "failed: type complex doesn't define __round__ method": 1,
+        "failed: '[' was never closed (<string>, line 29)": 1,
+        "failed: invalid syntax (<string>, line 20)": 1,
+        "failed: Fourth test error: False": 1,
+        "failed: First test error: 0": 1,
+        "failed: aabb": 1,
+        "failed: invalid syntax (<string>, line 26)": 1,
+        "failed: invalid syntax (<string>, line 22)": 1,
+        "failed: name 'alphabet' is not defined": 1,
+        "failed: This prints if this assert fails 1 (good for debugging!)": 3,
+        "failed: This prints if this assert fails 4 (also good for debugging!)": 1,
+        "failed: Second test error: True": 1,
+        "failed: invalid syntax (<string>, line 13)": 1,
+        "failed: Test 3": 1,
+        "failed: not all arguments converted during string formatting": 1,
+        "failed: name 'factorial' is not defined": 1,
+        "failed: name 'is_palindrome' is not defined": 1,
+        "failed: invalid syntax (<string>, line 45)": 1,
+        "failed: unmatched ')' (<string>, line 19)": 2,
+        "failed: invalid syntax (<string>, line 14)": 1,
+        "failed: Second test error: ['mary', 'lamb']": 1,
+        "failed: object of type 'int' has no len()": 1,
+        "failed: invalid syntax (<string>, line 24)": 1,
+        "failed: This prints if this assert fails 5 (good for debugging!)": 1,
+        "failed: unexpected indent (<string>, line 28)": 1,
+        "failed: invalid syntax (<string>, line 34)": 1,
+        "failed: list index out of range": 2,
+        "failed: name 'ceil' is not defined": 1,
+        "failed: expected ':' (<string>, line 87)": 1,
+        "failed: maximum recursion depth exceeded in comparison": 1,
+        "failed: '(' was never closed (<string>, line 37)": 1,
+        "failed: name 'digits' is not defined": 1,
+        "failed: test1": 1,
+        "failed: invalid literal for int() with base 10: '-'": 1,
+        "failed: First test error: 6": 1,
+        "failed: object of type 'bool' has no len()": 1,
+        "failed: test #1": 1,
+        "timed out": 1,
+        "failed: t1": 1,
+        "failed: name 'hashlib' is not defined": 1,
+        "failed: Test 1": 1
+      }
+    },
+    {
+      "split": "all_164",
+      "method": "eb_target_temporal",
+      "passed": 55,
+      "samples": 164,
+      "pass_at_1": 0.3353658536585366,
+      "wilson_95": [
+        0.2676097519589755,
+        0.41065805875107986
+      ],
+      "forward_evaluations_per_sample": 128.0,
+      "unfinished_masks": 27787,
+      "mean_committed_positions": 342.5670731707317,
+      "syntax_valid": 150,
+      "syntax_valid_but_failed": 95,
+      "failure_results": {
+        "failed: ": 54,
+        "failed: invalid syntax (<string>, line 15)": 1,
+        "failed: invalid syntax (<string>, line 14)": 2,
+        "failed: unmatched ']' (<string>, line 45)": 1,
+        "failed: invalid syntax (<string>, line 11)": 1,
+        "failed: name 'is_prime' is not defined": 3,
+        "failed: expected ':' (<string>, line 74)": 1,
+        "failed: Test 2": 3,
+        "failed: invalid literal for int() with base 10: 'apples'": 1,
+        "failed: Error": 5,
+        "failed: name 'math' is not defined": 1,
+        "failed: invalid syntax (<string>, line 38)": 1,
+        "failed: First test error: 0": 1,
+        "failed: aabb": 1,
+        "failed: name 'alphabet' is not defined": 1,
+        "failed: This prints if this assert fails 1 (good for debugging!)": 3,
+        "failed: unindent does not match any outer indentation level (<string>, line 45)": 1,
+        "failed: Second test error: True": 1,
+        "failed: Test 3": 1,
+        "failed: not all arguments converted during string formatting": 1,
+        "failed: name 'factorial' is not defined": 1,
+        "failed: name 'is_palindrome' is not defined": 1,
+        "failed: unhashable type: 'list'": 1,
+        "failed: Test 1": 2,
+        "failed: Second test error: ['mary', 'lamb']": 1,
+        "failed: invalid syntax (<string>, line 42)": 1,
+        "failed: object of type 'int' has no len()": 1,
+        "failed: unmatched ')' (<string>, line 25)": 1,
+        "failed: This prints if this assert fails 5 (good for debugging!)": 1,
+        "failed: invalid syntax (<string>, line 34)": 1,
+        "failed: list index out of range": 2,
+        "failed: invalid syntax (<string>, line 26)": 1,
+        "failed: maximum recursion depth exceeded in comparison": 1,
+        "failed: This prints if this assert fails 4 (good for debugging!)": 1,
+        "failed: unterminated string literal (detected at line 25) (<string>, line 25)": 1,
+        "failed: test1": 1,
+        "failed: invalid literal for int() with base 10: '-'": 1,
+        "failed: First test error: 6": 1,
+        "failed: object of type 'bool' has no len()": 1,
+        "failed: test #1": 1,
+        "failed: invalid syntax (<string>, line 82)": 1,
+        "failed: t1": 1,
+        "failed: name 'hashlib' is not defined": 1
+      }
+    },
+    {
+      "split": "all_164",
+      "method": "response_information_readiness",
+      "passed": 56,
+      "samples": 164,
+      "pass_at_1": 0.34146341463414637,
+      "wilson_95": [
+        0.27326034779176,
+        0.41692346992903406
+      ],
+      "forward_evaluations_per_sample": 250.34146341463415,
+      "unfinished_masks": 26954,
+      "mean_committed_positions": 347.6463414634146,
+      "syntax_valid": 150,
+      "syntax_valid_but_failed": 94,
+      "failure_results": {
+        "failed: ": 52,
+        "failed: invalid syntax (<string>, line 15)": 1,
+        "failed: invalid syntax (<string>, line 14)": 2,
+        "failed: list index out of range": 3,
+        "failed: name 'is_prime' is not defined": 3,
+        "failed: expected ':' (<string>, line 74)": 1,
+        "failed: Test 2": 3,
+        "failed: invalid literal for int() with base 10: 'apples'": 1,
+        "failed: Error": 5,
+        "failed: name 'math' is not defined": 2,
+        "failed: invalid syntax (<string>, line 38)": 1,
+        "failed: First test error: 0": 1,
+        "failed: aabb": 1,
+        "failed: This prints if this assert fails 1 (good for debugging!)": 4,
+        "failed: Second test error: True": 1,
+        "failed: Test 3": 1,
+        "failed: not all arguments converted during string formatting": 1,
+        "failed: name 'factorial' is not defined": 1,
+        "failed: name 'is_palindrome' is not defined": 1,
+        "failed: invalid syntax (<string>, line 40)": 1,
+        "failed: unindent does not match any outer indentation level (<string>, line 17)": 1,
+        "failed: unhashable type: 'list'": 1,
+        "failed: Test 1": 2,
+        "failed: Second test error: ['mary', 'lamb']": 1,
+        "failed: expected ':' (<string>, line 41)": 1,
+        "failed: object of type 'int' has no len()": 1,
+        "failed: invalid syntax (<string>, line 23)": 1,
+        "failed: This prints if this assert fails 5 (good for debugging!)": 1,
+        "failed: invalid syntax (<string>, line 34)": 1,
+        "failed: invalid syntax (<string>, line 26)": 1,
+        "failed: maximum recursion depth exceeded in comparison": 1,
+        "failed: unterminated string literal (detected at line 40) (<string>, line 40)": 1,
+        "failed: '(' was never closed (<string>, line 17)": 1,
+        "failed: test2": 1,
+        "failed: invalid literal for int() with base 10: '-'": 1,
+        "failed: First test error: 6": 1,
+        "failed: object of type 'bool' has no len()": 1,
+        "failed: test #1": 1,
+        "failed: invalid syntax (<string>, line 82)": 1,
+        "failed: t1": 1,
+        "failed: name 'hashlib' is not defined": 1
+      }
+    },
+    {
+      "split": "tuned_first_20",
+      "method": "eb_sampler",
+      "passed": 13,
+      "samples": 20,
+      "pass_at_1": 0.65,
+      "wilson_95": [
+        0.43285427668523624,
+        0.818808175898918
+      ],
+      "forward_evaluations_per_sample": 128.0,
+      "unfinished_masks": 3322,
+      "mean_committed_positions": 345.9,
+      "syntax_valid": 20,
+      "syntax_valid_but_failed": 7,
+      "failure_results": {
+        "failed: ": 6,
+        "failed: max() arg is an empty sequence": 1
+      }
+    },
+    {
+      "split": "tuned_first_20",
+      "method": "eb_target_temporal",
+      "passed": 14,
+      "samples": 20,
+      "pass_at_1": 0.7,
+      "wilson_95": [
+        0.4810271816464765,
+        0.8545227551323956
+      ],
+      "forward_evaluations_per_sample": 128.0,
+      "unfinished_masks": 3238,
+      "mean_committed_positions": 350.1,
+      "syntax_valid": 20,
+      "syntax_valid_but_failed": 6,
+      "failure_results": {
+        "failed: ": 6
+      }
+    },
+    {
+      "split": "tuned_first_20",
+      "method": "response_information_readiness",
+      "passed": 14,
+      "samples": 20,
+      "pass_at_1": 0.7,
+      "wilson_95": [
+        0.4810271816464765,
+        0.8545227551323956
+      ],
+      "forward_evaluations_per_sample": 253.6,
+      "unfinished_masks": 3332,
+      "mean_committed_positions": 345.4,
+      "syntax_valid": 20,
+      "syntax_valid_but_failed": 6,
+      "failure_results": {
+        "failed: ": 6
+      }
+    },
+    {
+      "split": "remaining_144",
+      "method": "eb_sampler",
+      "passed": 34,
+      "samples": 144,
+      "pass_at_1": 0.2361111111111111,
+      "wilson_95": [
+        0.1741675163392711,
+        0.31176829215288715
+      ],
+      "forward_evaluations_per_sample": 128.0,
+      "unfinished_masks": 29169,
+      "mean_committed_positions": 309.4375,
+      "syntax_valid": 119,
+      "syntax_valid_but_failed": 85,
+      "failure_results": {
+        "failed: ": 44,
+        "failed: invalid syntax (<string>, line 12)": 2,
+        "failed: closing parenthesis ')' does not match opening parenthesis '[' (<string>, line 11)": 1,
+        "failed: invalid syntax (<string>, line 10)": 1,
+        "failed: invalid syntax (<string>, line 42)": 1,
+        "failed: invalid syntax (<string>, line 11)": 1,
+        "failed: name 'is_prime' is not defined": 3,
+        "failed: invalid syntax (<string>, line 80)": 1,
+        "failed: expected ':' (<string>, line 74)": 1,
+        "failed: Test 2": 3,
+        "failed: unmatched ')' (<string>, line 16)": 1,
+        "failed: Error": 4,
+        "failed: invalid syntax (<string>, line 18)": 2,
+        "failed: type complex doesn't define __round__ method": 1,
+        "failed: '[' was never closed (<string>, line 29)": 1,
+        "failed: invalid syntax (<string>, line 20)": 1,
+        "failed: Fourth test error: False": 1,
+        "failed: First test error: 0": 1,
+        "failed: aabb": 1,
+        "failed: invalid syntax (<string>, line 26)": 1,
+        "failed: invalid syntax (<string>, line 22)": 1,
+        "failed: name 'alphabet' is not defined": 1,
+        "failed: This prints if this assert fails 1 (good for debugging!)": 3,
+        "failed: This prints if this assert fails 4 (also good for debugging!)": 1,
+        "failed: Second test error: True": 1,
+        "failed: invalid syntax (<string>, line 13)": 1,
+        "failed: Test 3": 1,
+        "failed: not all arguments converted during string formatting": 1,
+        "failed: name 'factorial' is not defined": 1,
+        "failed: name 'is_palindrome' is not defined": 1,
+        "failed: invalid syntax (<string>, line 45)": 1,
+        "failed: unmatched ')' (<string>, line 19)": 2,
+        "failed: invalid syntax (<string>, line 14)": 1,
+        "failed: Second test error: ['mary', 'lamb']": 1,
+        "failed: object of type 'int' has no len()": 1,
+        "failed: invalid syntax (<string>, line 24)": 1,
+        "failed: This prints if this assert fails 5 (good for debugging!)": 1,
+        "failed: unexpected indent (<string>, line 28)": 1,
+        "failed: invalid syntax (<string>, line 34)": 1,
+        "failed: list index out of range": 2,
+        "failed: name 'ceil' is not defined": 1,
+        "failed: expected ':' (<string>, line 87)": 1,
+        "failed: maximum recursion depth exceeded in comparison": 1,
+        "failed: '(' was never closed (<string>, line 37)": 1,
+        "failed: name 'digits' is not defined": 1,
+        "failed: test1": 1,
+        "failed: invalid literal for int() with base 10: '-'": 1,
+        "failed: First test error: 6": 1,
+        "failed: object of type 'bool' has no len()": 1,
+        "failed: test #1": 1,
+        "timed out": 1,
+        "failed: t1": 1,
+        "failed: name 'hashlib' is not defined": 1,
+        "failed: Test 1": 1
+      }
+    },
+    {
+      "split": "remaining_144",
+      "method": "eb_target_temporal",
+      "passed": 41,
+      "samples": 144,
+      "pass_at_1": 0.2847222222222222,
+      "wilson_95": [
+        0.2173570325792294,
+        0.3632748111906892
+      ],
+      "forward_evaluations_per_sample": 128.0,
+      "unfinished_masks": 24549,
+      "mean_committed_positions": 341.52083333333337,
+      "syntax_valid": 130,
+      "syntax_valid_but_failed": 89,
+      "failure_results": {
+        "failed: invalid syntax (<string>, line 15)": 1,
+        "failed: invalid syntax (<string>, line 14)": 2,
+        "failed: ": 48,
+        "failed: unmatched ']' (<string>, line 45)": 1,
+        "failed: invalid syntax (<string>, line 11)": 1,
+        "failed: name 'is_prime' is not defined": 3,
+        "failed: expected ':' (<string>, line 74)": 1,
+        "failed: Test 2": 3,
+        "failed: invalid literal for int() with base 10: 'apples'": 1,
+        "failed: Error": 5,
+        "failed: name 'math' is not defined": 1,
+        "failed: invalid syntax (<string>, line 38)": 1,
+        "failed: First test error: 0": 1,
+        "failed: aabb": 1,
+        "failed: name 'alphabet' is not defined": 1,
+        "failed: This prints if this assert fails 1 (good for debugging!)": 3,
+        "failed: unindent does not match any outer indentation level (<string>, line 45)": 1,
+        "failed: Second test error: True": 1,
+        "failed: Test 3": 1,
+        "failed: not all arguments converted during string formatting": 1,
+        "failed: name 'factorial' is not defined": 1,
+        "failed: name 'is_palindrome' is not defined": 1,
+        "failed: unhashable type: 'list'": 1,
+        "failed: Test 1": 2,
+        "failed: Second test error: ['mary', 'lamb']": 1,
+        "failed: invalid syntax (<string>, line 42)": 1,
+        "failed: object of type 'int' has no len()": 1,
+        "failed: unmatched ')' (<string>, line 25)": 1,
+        "failed: This prints if this assert fails 5 (good for debugging!)": 1,
+        "failed: invalid syntax (<string>, line 34)": 1,
+        "failed: list index out of range": 2,
+        "failed: invalid syntax (<string>, line 26)": 1,
+        "failed: maximum recursion depth exceeded in comparison": 1,
+        "failed: This prints if this assert fails 4 (good for debugging!)": 1,
+        "failed: unterminated string literal (detected at line 25) (<string>, line 25)": 1,
+        "failed: test1": 1,
+        "failed: invalid literal for int() with base 10: '-'": 1,
+        "failed: First test error: 6": 1,
+        "failed: object of type 'bool' has no len()": 1,
+        "failed: test #1": 1,
+        "failed: invalid syntax (<string>, line 82)": 1,
+        "failed: t1": 1,
+        "failed: name 'hashlib' is not defined": 1
+      }
+    },
+    {
+      "split": "remaining_144",
+      "method": "response_information_readiness",
+      "passed": 42,
+      "samples": 144,
+      "pass_at_1": 0.2916666666666667,
+      "wilson_95": [
+        0.22361258052793798,
+        0.37054726828166074
+      ],
+      "forward_evaluations_per_sample": 249.88888888888889,
+      "unfinished_masks": 23622,
+      "mean_committed_positions": 347.95833333333337,
+      "syntax_valid": 130,
+      "syntax_valid_but_failed": 88,
+      "failure_results": {
+        "failed: invalid syntax (<string>, line 15)": 1,
+        "failed: invalid syntax (<string>, line 14)": 2,
+        "failed: ": 46,
+        "failed: list index out of range": 3,
+        "failed: name 'is_prime' is not defined": 3,
+        "failed: expected ':' (<string>, line 74)": 1,
+        "failed: Test 2": 3,
+        "failed: invalid literal for int() with base 10: 'apples'": 1,
+        "failed: Error": 5,
+        "failed: name 'math' is not defined": 2,
+        "failed: invalid syntax (<string>, line 38)": 1,
+        "failed: First test error: 0": 1,
+        "failed: aabb": 1,
+        "failed: This prints if this assert fails 1 (good for debugging!)": 4,
+        "failed: Second test error: True": 1,
+        "failed: Test 3": 1,
+        "failed: not all arguments converted during string formatting": 1,
+        "failed: name 'factorial' is not defined": 1,
+        "failed: name 'is_palindrome' is not defined": 1,
+        "failed: invalid syntax (<string>, line 40)": 1,
+        "failed: unindent does not match any outer indentation level (<string>, line 17)": 1,
+        "failed: unhashable type: 'list'": 1,
+        "failed: Test 1": 2,
+        "failed: Second test error: ['mary', 'lamb']": 1,
+        "failed: expected ':' (<string>, line 41)": 1,
+        "failed: object of type 'int' has no len()": 1,
+        "failed: invalid syntax (<string>, line 23)": 1,
+        "failed: This prints if this assert fails 5 (good for debugging!)": 1,
+        "failed: invalid syntax (<string>, line 34)": 1,
+        "failed: invalid syntax (<string>, line 26)": 1,
+        "failed: maximum recursion depth exceeded in comparison": 1,
+        "failed: unterminated string literal (detected at line 40) (<string>, line 40)": 1,
+        "failed: '(' was never closed (<string>, line 17)": 1,
+        "failed: test2": 1,
+        "failed: invalid literal for int() with base 10: '-'": 1,
+        "failed: First test error: 6": 1,
+        "failed: object of type 'bool' has no len()": 1,
+        "failed: test #1": 1,
+        "failed: invalid syntax (<string>, line 82)": 1,
+        "failed: t1": 1,
+        "failed: name 'hashlib' is not defined": 1
+      }
+    }
+  ],
+  "paired_comparisons": {
+    "all_164": {
+      "eb_target_temporal": {
+        "wins": [
+          "HumanEval/9",
+          "HumanEval/22",
+          "HumanEval/25",
+          "HumanEval/30",
+          "HumanEval/44",
+          "HumanEval/72",
+          "HumanEval/76",
+          "HumanEval/77",
+          "HumanEval/136"
+        ],
+        "losses": [
+          "HumanEval/61"
+        ],
+        "net_gain": 8,
+        "exact_mcnemar_p": 0.021484375,
+        "reference_invalid_syntax_wins": [
+          "HumanEval/22",
+          "HumanEval/30",
+          "HumanEval/72",
+          "HumanEval/76",
+          "HumanEval/136"
+        ],
+        "reference_valid_syntax_wins": [
+          "HumanEval/9",
+          "HumanEval/25",
+          "HumanEval/44",
+          "HumanEval/77"
+        ]
+      },
+      "response_information_readiness": {
+        "wins": [
+          "HumanEval/9",
+          "HumanEval/22",
+          "HumanEval/25",
+          "HumanEval/30",
+          "HumanEval/35",
+          "HumanEval/44",
+          "HumanEval/72",
+          "HumanEval/76",
+          "HumanEval/77",
+          "HumanEval/136"
+        ],
+        "losses": [
+          "HumanEval/61"
+        ],
+        "net_gain": 9,
+        "exact_mcnemar_p": 0.01171875,
+        "reference_invalid_syntax_wins": [
+          "HumanEval/22",
+          "HumanEval/30",
+          "HumanEval/35",
+          "HumanEval/72",
+          "HumanEval/76",
+          "HumanEval/136"
+        ],
+        "reference_valid_syntax_wins": [
+          "HumanEval/9",
+          "HumanEval/25",
+          "HumanEval/44",
+          "HumanEval/77"
+        ]
+      },
+      "information_vs_fisher": {
+        "wins": [
+          "HumanEval/35"
+        ],
+        "losses": [],
+        "net_gain": 1,
+        "exact_mcnemar_p": 1.0,
+        "reference_invalid_syntax_wins": [
+          "HumanEval/35"
+        ],
+        "reference_valid_syntax_wins": []
+      }
+    },
+    "tuned_first_20": {
+      "eb_target_temporal": {
+        "wins": [
+          "HumanEval/9"
+        ],
+        "losses": [],
+        "net_gain": 1,
+        "exact_mcnemar_p": 1.0,
+        "reference_invalid_syntax_wins": [],
+        "reference_valid_syntax_wins": [
+          "HumanEval/9"
+        ]
+      },
+      "response_information_readiness": {
+        "wins": [
+          "HumanEval/9"
+        ],
+        "losses": [],
+        "net_gain": 1,
+        "exact_mcnemar_p": 1.0,
+        "reference_invalid_syntax_wins": [],
+        "reference_valid_syntax_wins": [
+          "HumanEval/9"
+        ]
+      },
+      "information_vs_fisher": {
+        "wins": [],
+        "losses": [],
+        "net_gain": 0,
+        "exact_mcnemar_p": 1.0,
+        "reference_invalid_syntax_wins": [],
+        "reference_valid_syntax_wins": []
+      }
+    },
+    "remaining_144": {
+      "eb_target_temporal": {
+        "wins": [
+          "HumanEval/22",
+          "HumanEval/25",
+          "HumanEval/30",
+          "HumanEval/44",
+          "HumanEval/72",
+          "HumanEval/76",
+          "HumanEval/77",
+          "HumanEval/136"
+        ],
+        "losses": [
+          "HumanEval/61"
+        ],
+        "net_gain": 7,
+        "exact_mcnemar_p": 0.0390625,
+        "reference_invalid_syntax_wins": [
+          "HumanEval/22",
+          "HumanEval/30",
+          "HumanEval/72",
+          "HumanEval/76",
+          "HumanEval/136"
+        ],
+        "reference_valid_syntax_wins": [
+          "HumanEval/25",
+          "HumanEval/44",
+          "HumanEval/77"
+        ]
+      },
+      "response_information_readiness": {
+        "wins": [
+          "HumanEval/22",
+          "HumanEval/25",
+          "HumanEval/30",
+          "HumanEval/35",
+          "HumanEval/44",
+          "HumanEval/72",
+          "HumanEval/76",
+          "HumanEval/77",
+          "HumanEval/136"
+        ],
+        "losses": [
+          "HumanEval/61"
+        ],
+        "net_gain": 8,
+        "exact_mcnemar_p": 0.021484375,
+        "reference_invalid_syntax_wins": [
+          "HumanEval/22",
+          "HumanEval/30",
+          "HumanEval/35",
+          "HumanEval/72",
+          "HumanEval/76",
+          "HumanEval/136"
+        ],
+        "reference_valid_syntax_wins": [
+          "HumanEval/25",
+          "HumanEval/44",
+          "HumanEval/77"
+        ]
+      },
+      "information_vs_fisher": {
+        "wins": [
+          "HumanEval/35"
+        ],
+        "losses": [],
+        "net_gain": 1,
+        "exact_mcnemar_p": 1.0,
+        "reference_invalid_syntax_wins": [
+          "HumanEval/35"
+        ],
+        "reference_valid_syntax_wins": []
+      }
+    }
+  },
+  "evaluator_validation": {
+    "samples": 164,
+    "canonical_passed": 164,
+    "negative_passed": 0,
+    "elapsed_seconds": 7.933064432931133,
+    "canonical_failures": [],
+    "negative_unexpected_passes": [],
+    "controls_never_provided_to_generation": true
+  },
+  "report_source_sha256": "fd2a150a724fb3c0aee200685633606c4f8660713ad332bcb8111548568d42f2"
+}

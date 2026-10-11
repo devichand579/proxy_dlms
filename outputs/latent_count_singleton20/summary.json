@@ -1,0 +1,16 @@
+[
+  {
+    "method": "diagnostic_fisher_singleton",
+    "passed": 14,
+    "diagnostic_only": true,
+    "steps_used": 128,
+    "forward_evaluations_per_sample": 128.0
+  },
+  {
+    "method": "activation_singleton",
+    "passed": 7,
+    "diagnostic_only": false,
+    "steps_used": 128,
+    "forward_evaluations_per_sample": 128.0
+  }
+]

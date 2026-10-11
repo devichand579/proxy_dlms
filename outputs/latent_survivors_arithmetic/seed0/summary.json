@@ -1,0 +1,80 @@
+[
+  {
+    "variant": "eb_sampler",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.7109375,
+    "worksheet_accuracy": 0.34375,
+    "unfinished_masks": 0,
+    "generation_seconds": 6.9215769179863855,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 17.971458911895752
+  },
+  {
+    "variant": "eb_target_temporal",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.7395833333333334,
+    "worksheet_accuracy": 0.390625,
+    "unfinished_masks": 0,
+    "generation_seconds": 3.714176664943807,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 18.069815635681152
+  },
+  {
+    "variant": "latent_survivors_p0.25",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.6197916666666666,
+    "worksheet_accuracy": 0.21875,
+    "unfinished_masks": 0,
+    "generation_seconds": 23.604533685022034,
+    "forward_evaluations_per_canvas": 96.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 24.561145305633545
+  },
+  {
+    "variant": "latent_survivors_p0.5",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.6328125,
+    "worksheet_accuracy": 0.2890625,
+    "unfinished_masks": 0,
+    "generation_seconds": 11.340330390026793,
+    "forward_evaluations_per_canvas": 47.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 24.55580472946167
+  },
+  {
+    "variant": "latent_survivors_p0.75",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.6458333333333334,
+    "worksheet_accuracy": 0.2421875,
+    "unfinished_masks": 0,
+    "generation_seconds": 6.7809571250109,
+    "forward_evaluations_per_canvas": 28.125,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 24.553821086883545
+  },
+  {
+    "variant": "latent_survivors_p1",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.6458333333333334,
+    "worksheet_accuracy": 0.2421875,
+    "unfinished_masks": 0,
+    "generation_seconds": 6.508599205990322,
+    "forward_evaluations_per_canvas": 27.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 24.553821086883545
+  }
+]

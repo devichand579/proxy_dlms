@@ -1,0 +1,62 @@
+[
+  {
+    "variant": "eb_sampler",
+    "samples": 32,
+    "steps": 12,
+    "slots_per_canvas": 12,
+    "unfinished_masks": 0,
+    "slot_accuracy": 0.6979166666666666,
+    "exact_slot_accuracy": 0.6979166666666666,
+    "worksheet_accuracy": 0.3828125,
+    "canvas_accuracy": 0.0625,
+    "generation_seconds": 6.830717795994133,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 17.971458911895752
+  },
+  {
+    "variant": "eb_target_temporal",
+    "samples": 32,
+    "steps": 12,
+    "slots_per_canvas": 12,
+    "unfinished_masks": 0,
+    "slot_accuracy": 0.7005208333333334,
+    "exact_slot_accuracy": 0.7005208333333334,
+    "worksheet_accuracy": 0.3515625,
+    "canvas_accuracy": 0.0625,
+    "generation_seconds": 3.732377153937705,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 18.06986379623413
+  },
+  {
+    "variant": "consistency_filter",
+    "samples": 32,
+    "steps": 12,
+    "slots_per_canvas": 12,
+    "unfinished_masks": 0,
+    "slot_accuracy": 0.7005208333333334,
+    "exact_slot_accuracy": 0.7005208333333334,
+    "worksheet_accuracy": 0.3515625,
+    "canvas_accuracy": 0.0625,
+    "generation_seconds": 3.3415137269767,
+    "forward_evaluations_per_canvas": 12.375,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 18.069664478302002
+  },
+  {
+    "variant": "consistency_singleton",
+    "samples": 32,
+    "steps": 12,
+    "slots_per_canvas": 12,
+    "unfinished_masks": 0,
+    "slot_accuracy": 0.7005208333333334,
+    "exact_slot_accuracy": 0.7005208333333334,
+    "worksheet_accuracy": 0.3515625,
+    "canvas_accuracy": 0.0625,
+    "generation_seconds": 3.3378472320036963,
+    "forward_evaluations_per_canvas": 12.375,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 18.069664478302002
+  }
+]

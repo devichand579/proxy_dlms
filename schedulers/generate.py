@@ -18,6 +18,7 @@ from schedulers.eb_sampler import generate_EB
 from schedulers.dus import generate_dus
 from schedulers.fdm import generate_fdm
 from schedulers.gcap_rerank import generate_gcap_rerank
+from schedulers.latent import generate_latent, VARIANTS as LATENT_VARIANTS
 
 GCAP_BASE_MODES = (
     "pure_diffusion",
@@ -200,6 +201,14 @@ def generate(
             temperature=0.0 if temperature is None else float(temperature),
             remasking=strategy, scheduler="dilated", base=2, base_skip=1,
             confidence_threshold=0.1, **common_trace_kw,
+        )
+    elif mode.startswith("latent_") and mode[len("latent_"):] in LATENT_VARIANTS:
+        gen, steps_taken, blocks = generate_latent(
+            model, input_ids, attention_mask,
+            steps=steps, gen_length=gen_length, block_length=block_length,
+            variant=mode[len("latent_"):],
+            temperature=0.0 if temperature is None else float(temperature),
+            invalid_token_ids=invalid_token_ids, **common_trace_kw,
         )
     elif mode == "fdm":
         assert block_length <= gen_length, "Block length must be less than or equal to gen_length"

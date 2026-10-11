@@ -26,8 +26,12 @@ Run everything from the repo root, e.g. `./scripts/eval.sh …`, `python hydra_r
 |--|--|
 | [Setup (env & models)](docs/setup.md) | Conda, requirements, Hugging Face downloads |
 | [Evaluation](docs/evaluation.md) | `scripts/eval.sh`, `hydra_runners/launch_eval.py`, resumable runs, Hydra/SLURM, outputs |
+| [Small scheduler ablations](docs/infogain-lab.md) | Exact CPU checks, short LLaDA reveal probes, and cached information-gain score sweeps |
+| [Latent count/rank experiments](docs/latent-scheduler-experiments.md) | HumanEval-20 with EB baseline, count/rank factorials, and completed arithmetic trajectories |
+| [One-pass three-term objective](docs/latent-three-term-objective.md) | Activation and decoder-gradient proxies, Gaussian spectral set selection, and independent count/rank ablations |
+| [Latent error-allowance counts](docs/latent-error-allowance-experiments.md) | Fixed-ranking count isolation, cached-response feedback, attention coupling, and explicit Fisher-geometry diagnostics |
+| [Useful code-body progress](docs/latent-body-progress.md) | Local gradient scoring, independent counts, commitment timing, and earlier-step correctness replay |
 | [CST: training & eval](docs/cst.md) | **`mode=store`** (Hub hiddens) · **`mode=train`** / **`mode=eval`** (CST only) |
 | [TAG (attribution graph)](docs/tag.md) | `scripts/tag.sh`, `hydra_runners/run_tag.py`, one prompt or `.pt` chunk |
 | Parallel runs | Concurrent train/eval without clobbering paths |
 | [Scheduler smoke tests](docs/scheduler-testing.md) | `tests/test_schedulers.py` / `.sh` |
-

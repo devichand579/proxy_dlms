@@ -1,0 +1,41 @@
+{
+  "conversation_id": "01a10259-7a3b-7e00-b3cb-d7f305496a7f",
+  "source_streams": [
+    {
+      "label": "S1",
+      "path": "/root/.codex/sessions/2026/10/03/rollout-2026-10-03T15-19-40-01a10259-7a3b-7e00-b3cb-d7f305496a7f.jsonl",
+      "sha256": "e744f3d96a4c0e1ab46c30e7719f4837f3a53458c9cbe00c0cf8f0b4af987aac",
+      "records": 1932
+    },
+    {
+      "label": "S2",
+      "path": "/root/.codex/sessions/2026/10/06/rollout-2026-10-06T08-41-49-01a10259-7a3b-7e00-b3cb-d7f305496a7f_01a11060-4cec-78b2-a149-df58d845b871.jsonl",
+      "sha256": "719d504d12a8bce9071bee29d8b95821be454210fd1b9cbd4fbb29fdfa034d33",
+      "records": 9036
+    }
+  ],
+  "scored_arm_records": 573,
+  "study_directories_with_scored_arms": 87,
+  "included_textual_artifacts": 1433,
+  "public_messages": 378,
+  "tool_invocations": 846,
+  "paired_tool_responses": 846,
+  "recovered_relevant_shell_commands": 756,
+  "excluded_scored_arms": [
+    "A0156",
+    "A0185",
+    "A0186",
+    "A0187",
+    "A0188",
+    "A0189",
+    "A0190",
+    "A0193",
+    "A0194",
+    "A0195",
+    "A0196",
+    "A0197",
+    "A0198"
+  ],
+  "scored_arms_without_related_log_reference": [],
+  "scope": "Existing saved results only; repeated controls, historical failed/invalidated arms retained; no new model experiments."
+}

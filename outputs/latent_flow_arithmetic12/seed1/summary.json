@@ -1,0 +1,54 @@
+[
+  {
+    "variant": "eb_sampler",
+    "seed": 1,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.6979166666666666,
+    "worksheet_accuracy": 0.3828125,
+    "unfinished_masks": 0,
+    "generation_seconds": 4.299330032081343,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 18.096458911895752
+  },
+  {
+    "variant": "eb_target_temporal",
+    "seed": 1,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.7005208333333334,
+    "worksheet_accuracy": 0.3515625,
+    "unfinished_masks": 0,
+    "generation_seconds": 3.346253887983039,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 18.194815635681152
+  },
+  {
+    "variant": "latent_flow_defect_w0",
+    "seed": 1,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.5390625,
+    "worksheet_accuracy": 0.203125,
+    "unfinished_masks": 0,
+    "generation_seconds": 28.233544207992963,
+    "forward_evaluations_per_canvas": 122.125,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 23.201533317565918
+  },
+  {
+    "variant": "latent_flow_defect_w0.15",
+    "seed": 1,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.5442708333333334,
+    "worksheet_accuracy": 0.1953125,
+    "unfinished_masks": 0,
+    "generation_seconds": 31.029046120936982,
+    "forward_evaluations_per_canvas": 134.25,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 23.201533317565918
+  }
+]

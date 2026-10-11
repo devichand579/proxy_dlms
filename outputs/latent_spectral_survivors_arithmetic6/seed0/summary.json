@@ -1,0 +1,54 @@
+[
+  {
+    "variant": "eb_sampler",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.7109375,
+    "worksheet_accuracy": 0.34375,
+    "unfinished_masks": 0,
+    "generation_seconds": 6.841374906012788,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 17.971458911895752
+  },
+  {
+    "variant": "eb_target_temporal",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.7395833333333334,
+    "worksheet_accuracy": 0.390625,
+    "unfinished_masks": 0,
+    "generation_seconds": 3.698288336978294,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 18.069815635681152
+  },
+  {
+    "variant": "latent_spectral_survivors_p0.5",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.6380208333333334,
+    "worksheet_accuracy": 0.234375,
+    "unfinished_masks": 0,
+    "generation_seconds": 12.74910879903473,
+    "forward_evaluations_per_canvas": 50.375,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 26.85988712310791
+  },
+  {
+    "variant": "latent_spectral_survivors_p0.75",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.6354166666666666,
+    "worksheet_accuracy": 0.1875,
+    "unfinished_masks": 0,
+    "generation_seconds": 6.695713916909881,
+    "forward_evaluations_per_canvas": 27.6875,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 26.85433292388916
+  }
+]

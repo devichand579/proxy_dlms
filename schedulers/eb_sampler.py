@@ -46,6 +46,8 @@ def generate_EB(
     intervention_steps=None, 
     intervention_k=1,
     use_eos_harness: bool = True,
+    initial_canvas=None,
+    canvas_attention_mask=None,
 ):
     '''
     Args:
@@ -68,11 +70,22 @@ def generate_EB(
         intervention_k: Number of tokens to drop/swap per intervention step. Default 1.
         use_eos_harness: If False, never return early on EOS (full step budget).
     '''
-    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
-    x[:, :prompt.shape[1]] = prompt.clone()
+    if initial_canvas is None:
+        x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+        x[:, :prompt.shape[1]] = prompt.clone()
+    else:
+        if initial_canvas.shape != (prompt.shape[0], prompt.shape[1] + gen_length):
+            raise ValueError("initial canvas shape does not match the generation region")
+        if not torch.equal(initial_canvas[:, :prompt.shape[1]], prompt):
+            raise ValueError("initial canvas must preserve the prompt")
+        x = initial_canvas.clone()
 
     if attention_mask is not None:
         attention_mask = torch.cat([attention_mask, torch.ones((prompt.shape[0], gen_length), dtype=attention_mask.dtype, device=model.device)], dim=-1)
+    if canvas_attention_mask is not None:
+        if canvas_attention_mask.shape != x.shape:
+            raise ValueError("canvas attention mask must match the full canvas")
+        attention_mask = canvas_attention_mask
 
     assert gen_length % block_length == 0
     num_blocks = gen_length // block_length

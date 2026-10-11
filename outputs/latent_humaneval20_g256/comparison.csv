@@ -1,0 +1,4 @@
+run,variant,gen_length,block_length,gain_beta,diversity_beta,stability_beta,passed,samples,pass_at_1,generation_seconds,forward_evaluations_per_sample,backward_evaluations_per_sample,peak_allocated_GiB,unfinished_masks,baseline_run,wins_vs_eb,losses_vs_eb,confidence_control,wins_vs_confidence,losses_vs_confidence
+confidence_b256_d0.25_s0.15_p8_v128,confidence,256,256,0.25,0.25,0.15,10,20,0.5,54.96665742399637,128.0,0.0,17.737107276916504,0,eb_sampler_b256_d0.25_s0.15_p8_v128,0,4,confidence_b256_d0.25_s0.15_p8_v128,0,0
+eb_sampler_b256_d0.25_s0.15_p8_v128,eb_sampler,256,256,0.25,0.25,0.15,14,20,0.7,72.75366739102174,128.0,0.0,17.964313983917236,107,eb_sampler_b256_d0.25_s0.15_p8_v128,0,0,confidence_b256_d0.25_s0.15_p8_v128,4,0
+gradient_gain_b256_d0.25_s0.15_p8_v128,gradient_gain,256,256,0.25,0.25,0.15,10,20,0.5,75.8744774509687,144.0,16.0,83.06828784942627,0,eb_sampler_b256_d0.25_s0.15_p8_v128,0,4,confidence_b256_d0.25_s0.15_p8_v128,2,2

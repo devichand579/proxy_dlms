@@ -1,0 +1,3 @@
+run,variant,gen_length,block_length,gain_beta,diversity_beta,stability_beta,passed,samples,pass_at_1,generation_seconds,forward_evaluations_per_sample,backward_evaluations_per_sample,peak_allocated_GiB,unfinished_masks,baseline_run,wins_vs_eb,losses_vs_eb,confidence_control,wins_vs_confidence,losses_vs_confidence
+eb_gradient_gain_b512_d0.25_s0.15_p8_v128_g0.5_cp16_ft_mb20_risk1,eb_gradient_gain,512,512,0.5,0.25,0.15,14,20,0.7,161.65916965296492,142.9,14.9,138.5058732032776,2436,,,,,,
+eb_gradient_gain_b512_d0.25_s0.15_p8_v128_g0.5_cp16_ft_mb20_risk3,eb_gradient_gain,512,512,0.5,0.25,0.15,14,20,0.7,164.30863025703002,143.4,15.4,138.5058732032776,2856,,,,,,

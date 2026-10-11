@@ -1,0 +1,3 @@
+run,variant,gen_length,block_length,gain_beta,diversity_beta,stability_beta,passed,samples,pass_at_1,generation_seconds,forward_evaluations_per_sample,backward_evaluations_per_sample,peak_allocated_GiB,unfinished_masks,baseline_run,wins_vs_eb,losses_vs_eb,confidence_control,wins_vs_confidence,losses_vs_confidence
+eb_sampler_b512_d0.25_s0.15_p8_v128,eb_sampler,512,512,0.25,0.25,0.15,13,20,0.65,137.08249767904636,128.0,0.0,19.208783626556396,3322,eb_sampler_b512_d0.25_s0.15_p8_v128,0,0,,,
+eb_target_temporal_b512_d0.25_s0.15_p8_v128,eb_target_temporal,512,512,0.25,0.25,0.15,14,20,0.7,108.17048448696733,128.0,0.0,19.38983726501465,3238,eb_sampler_b512_d0.25_s0.15_p8_v128,1,0,,,

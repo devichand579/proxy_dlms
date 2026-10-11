@@ -1,0 +1,67 @@
+[
+  {
+    "variant": "eb_sampler",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.7109375,
+    "worksheet_accuracy": 0.34375,
+    "unfinished_masks": 0,
+    "generation_seconds": 6.691777967964299,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 17.972435474395752
+  },
+  {
+    "variant": "eb_target_temporal",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.7395833333333334,
+    "worksheet_accuracy": 0.390625,
+    "unfinished_masks": 0,
+    "generation_seconds": 3.6896987959044054,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 18.070792198181152
+  },
+  {
+    "variant": "activation_count_fixed",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.5885416666666666,
+    "worksheet_accuracy": 0.203125,
+    "unfinished_masks": 0,
+    "generation_seconds": 2.879725842969492,
+    "forward_evaluations_per_canvas": 12.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 17.066630363464355
+  },
+  {
+    "variant": "activation_count_guard025",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.5052083333333334,
+    "worksheet_accuracy": 0.109375,
+    "unfinished_masks": 0,
+    "generation_seconds": 5.987296877079643,
+    "forward_evaluations_per_canvas": 26.0,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 22.459664344787598
+  },
+  {
+    "variant": "activation_count_guard1",
+    "seed": 0,
+    "samples": 32,
+    "steps": 12,
+    "slot_accuracy": 0.5,
+    "worksheet_accuracy": 0.1015625,
+    "unfinished_masks": 0,
+    "generation_seconds": 2.6314663289813325,
+    "forward_evaluations_per_canvas": 11.3125,
+    "backward_evaluations_per_canvas": 0.0,
+    "peak_allocated_GiB": 22.459664344787598
+  }
+]

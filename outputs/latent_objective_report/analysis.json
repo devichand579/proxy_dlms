@@ -1,0 +1,977 @@
+{
+  "arithmetic": [
+    {
+      "method": "grad_curvature_g010_r005",
+      "seed0": 0.8125,
+      "seed1": 0.7916666666666666,
+      "mean_accuracy": 0.8020833333333333,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed0/grad_curvature_g010_r005/results.json",
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed1/grad_curvature_g010_r005/results.json"
+      ]
+    },
+    {
+      "method": "grad_curvature_nogain_singleton",
+      "seed0": 0.8125,
+      "seed1": 0.7890625,
+      "mean_accuracy": 0.80078125,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed0/grad_curvature_nogain_singleton/results.json",
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed1/grad_curvature_nogain_singleton/results.json"
+      ]
+    },
+    {
+      "method": "grad_curvature_noinformation",
+      "seed0": 0.8125,
+      "seed1": 0.7838541666666666,
+      "mean_accuracy": 0.7981770833333333,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed0/grad_curvature_noinformation/results.json",
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed1/grad_curvature_noinformation/results.json"
+      ]
+    },
+    {
+      "method": "grad_centered",
+      "seed0": 0.7942708333333334,
+      "seed1": 0.796875,
+      "mean_accuracy": 0.7955729166666667,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed0/grad_centered/results.json",
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed1/grad_centered/results.json"
+      ]
+    },
+    {
+      "method": "grad_curvature_noincoming",
+      "seed0": 0.8072916666666666,
+      "seed1": 0.7838541666666666,
+      "mean_accuracy": 0.7955729166666666,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed0/grad_curvature_noincoming/results.json",
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed1/grad_curvature_noincoming/results.json"
+      ]
+    },
+    {
+      "method": "grad_curvature_g0025_r005",
+      "seed0": 0.8098958333333334,
+      "seed1": 0.7786458333333334,
+      "mean_accuracy": 0.7942708333333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed0/grad_curvature_g0025_r005/results.json",
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed1/grad_curvature_g0025_r005/results.json"
+      ]
+    },
+    {
+      "method": "grad_risk_scaled",
+      "seed0": 0.7864583333333334,
+      "seed1": 0.8020833333333334,
+      "mean_accuracy": 0.7942708333333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed0/grad_risk_scaled/results.json",
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed1/grad_risk_scaled/results.json"
+      ]
+    },
+    {
+      "method": "grad_curvature_singleton",
+      "seed0": 0.765625,
+      "seed1": 0.7213541666666666,
+      "mean_accuracy": 0.7434895833333333,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed0/grad_curvature_singleton/results.json",
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed1/grad_curvature_singleton/results.json"
+      ]
+    },
+    {
+      "method": "grad_curvature_g0025_r015",
+      "seed0": 0.7369791666666666,
+      "seed1": 0.6979166666666666,
+      "mean_accuracy": 0.7174479166666666,
+      "forwards": [
+        9.0,
+        8.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed0/grad_curvature_g0025_r015/results.json",
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed1/grad_curvature_g0025_r015/results.json"
+      ]
+    },
+    {
+      "method": "grad_curvature_nogain_r015",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.6796875,
+      "mean_accuracy": 0.7096354166666667,
+      "forwards": [
+        9.0,
+        9.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed0/grad_curvature_nogain_r015/results.json",
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed1/grad_curvature_nogain_r015/results.json"
+      ]
+    },
+    {
+      "method": "eb_sampler",
+      "seed0": 0.7109375,
+      "seed1": 0.6979166666666666,
+      "mean_accuracy": 0.7044270833333333,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed0/eb_sampler/results.json",
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed1/eb_sampler/results.json"
+      ]
+    },
+    {
+      "method": "grad_curvature_r005",
+      "seed0": 0.6536458333333334,
+      "seed1": 0.6276041666666666,
+      "mean_accuracy": 0.640625,
+      "forwards": [
+        9.0,
+        9.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed0/grad_curvature_r005/results.json",
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed1/grad_curvature_r005/results.json"
+      ]
+    },
+    {
+      "method": "context_only_centered",
+      "seed0": 0.6145833333333334,
+      "seed1": 0.625,
+      "mean_accuracy": 0.6197916666666667,
+      "forwards": [
+        10.0,
+        11.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed0/context_only_centered/results.json",
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed1/context_only_centered/results.json"
+      ]
+    },
+    {
+      "method": "context_centered_r015",
+      "seed0": 0.6119791666666666,
+      "seed1": 0.5989583333333334,
+      "mean_accuracy": 0.60546875,
+      "forwards": [
+        11.0,
+        11.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed0/context_centered_r015/results.json",
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed1/context_centered_r015/results.json"
+      ]
+    },
+    {
+      "method": "context_nogain",
+      "seed0": 0.59375,
+      "seed1": 0.59375,
+      "mean_accuracy": 0.59375,
+      "forwards": [
+        11.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_context_control_arithmetic/seed0/context_nogain/results.json",
+        "/root/Strace/outputs/latent_objective_context_control_arithmetic/seed1/context_nogain/results.json"
+      ]
+    },
+    {
+      "method": "context_smallgain",
+      "seed0": 0.59375,
+      "seed1": 0.5859375,
+      "mean_accuracy": 0.58984375,
+      "forwards": [
+        11.0,
+        11.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_context_control_arithmetic/seed0/context_smallgain/results.json",
+        "/root/Strace/outputs/latent_objective_context_control_arithmetic/seed1/context_smallgain/results.json"
+      ]
+    },
+    {
+      "method": "grad_curvature_r015",
+      "seed0": 0.6302083333333334,
+      "seed1": 0.5390625,
+      "mean_accuracy": 0.5846354166666667,
+      "forwards": [
+        7.0,
+        6.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed0/grad_curvature_r015/results.json",
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed1/grad_curvature_r015/results.json"
+      ]
+    },
+    {
+      "method": "temporal_only",
+      "seed0": 0.578125,
+      "seed1": 0.5911458333333334,
+      "mean_accuracy": 0.5846354166666667,
+      "forwards": [
+        5.0,
+        6.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/temporal_only/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/temporal_only/results.json"
+      ]
+    },
+    {
+      "method": "singleton",
+      "seed0": 0.609375,
+      "seed1": 0.5520833333333334,
+      "mean_accuracy": 0.5807291666666667,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/singleton/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/singleton/results.json"
+      ]
+    },
+    {
+      "method": "grad_support_noinformation",
+      "seed0": 0.5338541666666666,
+      "seed1": 0.6119791666666666,
+      "mean_accuracy": 0.5729166666666666,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed0/grad_support_noinformation/results.json",
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed1/grad_support_noinformation/results.json"
+      ]
+    },
+    {
+      "method": "grad_support_singleton",
+      "seed0": 0.5572916666666666,
+      "seed1": 0.5885416666666666,
+      "mean_accuracy": 0.5729166666666666,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed0/grad_support_singleton/results.json",
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed1/grad_support_singleton/results.json"
+      ]
+    },
+    {
+      "method": "no_information",
+      "seed0": 0.5885416666666666,
+      "seed1": 0.5520833333333334,
+      "mean_accuracy": 0.5703125,
+      "forwards": [
+        11.0,
+        11.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/no_information/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/no_information/results.json"
+      ]
+    },
+    {
+      "method": "grad_support_r015",
+      "seed0": 0.5703125,
+      "seed1": 0.5677083333333334,
+      "mean_accuracy": 0.5690104166666667,
+      "forwards": [
+        5.0,
+        5.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed0/grad_support_r015/results.json",
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed1/grad_support_r015/results.json"
+      ]
+    },
+    {
+      "method": "context_raw",
+      "seed0": 0.5625,
+      "seed1": 0.5703125,
+      "mean_accuracy": 0.56640625,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed0/context_raw/results.json",
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed1/context_raw/results.json"
+      ]
+    },
+    {
+      "method": "no_dependence",
+      "seed0": 0.5807291666666666,
+      "seed1": 0.5494791666666666,
+      "mean_accuracy": 0.5651041666666666,
+      "forwards": [
+        5.0,
+        5.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/no_dependence/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/no_dependence/results.json"
+      ]
+    },
+    {
+      "method": "full_r035",
+      "seed0": 0.5703125,
+      "seed1": 0.5546875,
+      "mean_accuracy": 0.5625,
+      "forwards": [
+        3.0,
+        3.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/full_r035/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/full_r035/results.json"
+      ]
+    },
+    {
+      "method": "full_r005",
+      "seed0": 0.578125,
+      "seed1": 0.5442708333333334,
+      "mean_accuracy": 0.5611979166666667,
+      "forwards": [
+        9.0,
+        9.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/full_r005/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/full_r005/results.json"
+      ]
+    },
+    {
+      "method": "depth_only",
+      "seed0": 0.5729166666666666,
+      "seed1": 0.546875,
+      "mean_accuracy": 0.5598958333333333,
+      "forwards": [
+        6.0,
+        6.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/depth_only/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/depth_only/results.json"
+      ]
+    },
+    {
+      "method": "no_incoming",
+      "seed0": 0.5598958333333334,
+      "seed1": 0.5546875,
+      "mean_accuracy": 0.5572916666666667,
+      "forwards": [
+        7.0,
+        7.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/no_incoming/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/no_incoming/results.json"
+      ]
+    },
+    {
+      "method": "context_nogain_singleton",
+      "seed0": 0.5807291666666666,
+      "seed1": 0.5338541666666666,
+      "mean_accuracy": 0.5572916666666666,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_context_control_arithmetic/seed0/context_nogain_singleton/results.json",
+        "/root/Strace/outputs/latent_objective_context_control_arithmetic/seed1/context_nogain_singleton/results.json"
+      ]
+    },
+    {
+      "method": "full_r015",
+      "seed0": 0.5625,
+      "seed1": 0.546875,
+      "mean_accuracy": 0.5546875,
+      "forwards": [
+        7.0,
+        7.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/full_r015/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/full_r015/results.json"
+      ]
+    },
+    {
+      "method": "grad_curvature_g0025_r035",
+      "seed0": 0.5729166666666666,
+      "seed1": 0.5364583333333334,
+      "mean_accuracy": 0.5546875,
+      "forwards": [
+        3.0,
+        3.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed0/grad_curvature_g0025_r035/results.json",
+        "/root/Strace/outputs/latent_objective_refined_arithmetic/seed1/grad_curvature_g0025_r035/results.json"
+      ]
+    },
+    {
+      "method": "context_centered",
+      "seed0": 0.546875,
+      "seed1": 0.5546875,
+      "mean_accuracy": 0.55078125,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed0/context_centered/results.json",
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed1/context_centered/results.json"
+      ]
+    },
+    {
+      "method": "context_singleton",
+      "seed0": 0.546875,
+      "seed1": 0.5546875,
+      "mean_accuracy": 0.55078125,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed0/context_singleton/results.json",
+        "/root/Strace/outputs/latent_objective_context_arithmetic/seed1/context_singleton/results.json"
+      ]
+    },
+    {
+      "method": "temporal_scaled_singleton",
+      "seed0": 0.5208333333333334,
+      "seed1": 0.5625,
+      "mean_accuracy": 0.5416666666666667,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_temporal_arithmetic/seed0/temporal_scaled_singleton/results.json",
+        "/root/Strace/outputs/latent_objective_temporal_arithmetic/seed1/temporal_scaled_singleton/results.json"
+      ]
+    },
+    {
+      "method": "no_information_r035",
+      "seed0": 0.546875,
+      "seed1": 0.5338541666666666,
+      "mean_accuracy": 0.5403645833333333,
+      "forwards": [
+        3.0,
+        3.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/no_information_r035/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/no_information_r035/results.json"
+      ]
+    },
+    {
+      "method": "full_r075",
+      "seed0": 0.5364583333333334,
+      "seed1": 0.5390625,
+      "mean_accuracy": 0.5377604166666667,
+      "forwards": [
+        2.0,
+        2.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_arithmetic/seed0/full_r075/results.json",
+        "/root/Strace/outputs/latent_objective_arithmetic/seed1/full_r075/results.json"
+      ]
+    },
+    {
+      "method": "grad_support_r005",
+      "seed0": 0.5260416666666666,
+      "seed1": 0.5364583333333334,
+      "mean_accuracy": 0.53125,
+      "forwards": [
+        8.0,
+        9.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed0/grad_support_r005/results.json",
+        "/root/Strace/outputs/latent_objective_gradient_arithmetic/seed1/grad_support_r005/results.json"
+      ]
+    },
+    {
+      "method": "temporal_scaled_gain1",
+      "seed0": 0.5130208333333334,
+      "seed1": 0.5338541666666666,
+      "mean_accuracy": 0.5234375,
+      "forwards": [
+        7.0,
+        7.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_temporal_arithmetic/seed0/temporal_scaled_gain1/results.json",
+        "/root/Strace/outputs/latent_objective_temporal_arithmetic/seed1/temporal_scaled_gain1/results.json"
+      ]
+    },
+    {
+      "method": "temporal_risk_scaled",
+      "seed0": 0.5182291666666666,
+      "seed1": 0.5260416666666666,
+      "mean_accuracy": 0.5221354166666666,
+      "forwards": [
+        7.0,
+        8.0
+      ],
+      "artifacts": [
+        "/root/Strace/outputs/latent_objective_temporal_arithmetic/seed0/temporal_risk_scaled/results.json",
+        "/root/Strace/outputs/latent_objective_temporal_arithmetic/seed1/temporal_risk_scaled/results.json"
+      ]
+    }
+  ],
+  "humaneval": [
+    {
+      "method": "eb_sampler",
+      "passed": 13,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 139.73724221496377,
+      "mean_count": null,
+      "committed_per_sample": 345.9,
+      "forced_singletons": 0,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_humaneval20/seed1234/eb_sampler/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": []
+    },
+    {
+      "method": "context_smallgain",
+      "passed": 4,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 99.07741208793595,
+      "mean_count": 1.716796875,
+      "committed_per_sample": 219.75,
+      "forced_singletons": 13,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_context_control_humaneval20/seed1234/context_smallgain/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "context_singleton",
+      "passed": 3,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 98.94357594603207,
+      "mean_count": 1.0,
+      "committed_per_sample": 128.0,
+      "forced_singletons": 0,
+      "singleton_control": true,
+      "artifact": "/root/Strace/outputs/latent_objective_context_humaneval20/seed1234/context_singleton/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "context_nogain",
+      "passed": 3,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 101.87641543895006,
+      "mean_count": 1.510546875,
+      "committed_per_sample": 193.35000000000002,
+      "forced_singletons": 31,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_context_control_humaneval20/seed1234/context_nogain/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/2",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/7",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "grad_centered",
+      "passed": 2,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 96.34813283500262,
+      "mean_count": 1.58984375,
+      "committed_per_sample": 203.5,
+      "forced_singletons": 10,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_context_humaneval20/seed1234/grad_centered/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "grad_risk_scaled",
+      "passed": 2,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 96.61889413790777,
+      "mean_count": 1.419921875,
+      "committed_per_sample": 181.75,
+      "forced_singletons": 869,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_context_humaneval20/seed1234/grad_risk_scaled/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/2",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "context_centered_r015",
+      "passed": 2,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 101.79851957899518,
+      "mean_count": 2.7984375,
+      "committed_per_sample": 358.2,
+      "forced_singletons": 0,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_context_humaneval20/seed1234/context_centered_r015/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "grad_curvature_nogain_singleton",
+      "passed": 1,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 96.27697536593769,
+      "mean_count": 1.0,
+      "committed_per_sample": 128.0,
+      "forced_singletons": 0,
+      "singleton_control": true,
+      "artifact": "/root/Strace/outputs/latent_objective_humaneval20/seed1234/grad_curvature_nogain_singleton/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/7",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "grad_curvature_noinformation",
+      "passed": 1,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 96.62832672800869,
+      "mean_count": 1.079296875,
+      "committed_per_sample": 138.14999999999998,
+      "forced_singletons": 1058,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_humaneval20/seed1234/grad_curvature_noinformation/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/7",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "grad_curvature_r005",
+      "passed": 1,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 96.79969516699202,
+      "mean_count": 3.02890625,
+      "committed_per_sample": 387.7,
+      "forced_singletons": 12,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_humaneval20/seed1234/grad_curvature_r005/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/2",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/7",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "context_only_centered",
+      "passed": 1,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 99.10017020907253,
+      "mean_count": 3.02109375,
+      "committed_per_sample": 386.7,
+      "forced_singletons": 0,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_context_humaneval20/seed1234/context_only_centered/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/2",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "temporal_risk_scaled",
+      "passed": 0,
+      "samples": 20,
+      "forwards": 57.0,
+      "seconds": 43.177973970072344,
+      "mean_count": 8.982456140350877,
+      "committed_per_sample": 512.0,
+      "forced_singletons": 54,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_context_humaneval20/seed1234/temporal_risk_scaled/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/2",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/7",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "grad_curvature_g010_r005",
+      "passed": 0,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 96.59481627703644,
+      "mean_count": 1.14453125,
+      "committed_per_sample": 146.5,
+      "forced_singletons": 283,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_humaneval20/seed1234/grad_curvature_g010_r005/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/2",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/7",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "grad_curvature_g0025_r015",
+      "passed": 0,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 96.65832018305082,
+      "mean_count": 1.70859375,
+      "committed_per_sample": 218.7,
+      "forced_singletons": 4,
+      "singleton_control": false,
+      "artifact": "/root/Strace/outputs/latent_objective_humaneval20/seed1234/grad_curvature_g0025_r015/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/2",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/7",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    },
+    {
+      "method": "context_nogain_singleton",
+      "passed": 0,
+      "samples": 20,
+      "forwards": 128.0,
+      "seconds": 98.88890953897499,
+      "mean_count": 1.0,
+      "committed_per_sample": 128.0,
+      "forced_singletons": 43,
+      "singleton_control": true,
+      "artifact": "/root/Strace/outputs/latent_objective_context_control_humaneval20/seed1234/context_nogain_singleton/results.json",
+      "wins_vs_eb": [],
+      "losses_vs_eb": [
+        "HumanEval/0",
+        "HumanEval/2",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/7",
+        "HumanEval/8",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/16",
+        "HumanEval/18"
+      ]
+    }
+  ],
+  "best_new_adaptive_candidate": {
+    "method": "context_smallgain",
+    "passed": 4,
+    "samples": 20,
+    "forwards": 128.0,
+    "seconds": 99.07741208793595,
+    "mean_count": 1.716796875,
+    "committed_per_sample": 219.75,
+    "forced_singletons": 13,
+    "singleton_control": false,
+    "artifact": "/root/Strace/outputs/latent_objective_context_control_humaneval20/seed1234/context_smallgain/results.json",
+    "wins_vs_eb": [],
+    "losses_vs_eb": [
+      "HumanEval/3",
+      "HumanEval/4",
+      "HumanEval/5",
+      "HumanEval/8",
+      "HumanEval/11",
+      "HumanEval/12",
+      "HumanEval/13",
+      "HumanEval/16",
+      "HumanEval/18"
+    ]
+  },
+  "limitations": "Single greedy completions; reused exploratory tasks. Arithmetic slots are correlated. No fresh holdout or global-best claim."
+}

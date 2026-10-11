@@ -1,0 +1,1168 @@
+{
+  "arithmetic": [
+    {
+      "method": "fisher_dispersion05",
+      "seed0": 0.7291666666666666,
+      "seed1": 0.7135416666666666,
+      "mean_accuracy": 0.7213541666666666,
+      "forwards": [
+        11.0,
+        11.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance",
+      "metric": "fisher_dispersion",
+      "confidence_ranking": true,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_dispersion002",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance",
+      "metric": "fisher_dispersion",
+      "confidence_ranking": true,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_dispersion01",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance",
+      "metric": "fisher_dispersion",
+      "confidence_ranking": true,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_eb",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "eb",
+      "metric": "uniform",
+      "confidence_ranking": true,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": false
+    },
+    {
+      "method": "fisher_gradient_allow002",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_gradient_fb005",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_gradient_fb025",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_gradient_fb1",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_relative1",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback_relative",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_singleton",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "singleton",
+      "metric": "uniform",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": false
+    },
+    {
+      "method": "fisher_uniform_fb005",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback",
+      "metric": "uniform",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_uniform_fb025",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.7005208333333334,
+      "mean_accuracy": 0.7200520833333334,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback",
+      "metric": "uniform",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_uniform_relative4",
+      "seed0": 0.7421875,
+      "seed1": 0.6979166666666666,
+      "mean_accuracy": 0.7200520833333333,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback_relative",
+      "metric": "uniform",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_gradient_allow01",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.6979166666666666,
+      "mean_accuracy": 0.71875,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_gradient_grounded025",
+      "seed0": 0.7421875,
+      "seed1": 0.6927083333333334,
+      "mean_accuracy": 0.7174479166666667,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback_grounded",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_gradient_allow05",
+      "seed0": 0.7161458333333334,
+      "seed1": 0.7161458333333334,
+      "mean_accuracy": 0.7161458333333334,
+      "forwards": [
+        10.0,
+        10.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_uniform_fb1",
+      "seed0": 0.7291666666666666,
+      "seed1": 0.703125,
+      "mean_accuracy": 0.7161458333333333,
+      "forwards": [
+        10.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback",
+      "metric": "uniform",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_relative8",
+      "seed0": 0.734375,
+      "seed1": 0.6953125,
+      "mean_accuracy": 0.71484375,
+      "forwards": [
+        11.0,
+        11.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback_relative",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_relative4",
+      "seed0": 0.7369791666666666,
+      "seed1": 0.6927083333333334,
+      "mean_accuracy": 0.71484375,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback_relative",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_grounded_allow01",
+      "seed0": 0.734375,
+      "seed1": 0.6927083333333334,
+      "mean_accuracy": 0.7135416666666667,
+      "forwards": [
+        12.0,
+        11.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance_grounded",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_gradient_risk01",
+      "seed0": 0.703125,
+      "seed1": 0.7239583333333334,
+      "mean_accuracy": 0.7135416666666667,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "risk_only",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_subset_allow01",
+      "seed0": 0.6848958333333334,
+      "seed1": 0.7265625,
+      "mean_accuracy": 0.7057291666666667,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance_subset",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_gradient_pair01",
+      "seed0": 0.7135416666666666,
+      "seed1": 0.6979166666666666,
+      "mean_accuracy": 0.7057291666666666,
+      "forwards": [
+        12.0,
+        11.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "pair_only",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_grounded_allow05",
+      "seed0": 0.7395833333333334,
+      "seed1": 0.6692708333333334,
+      "mean_accuracy": 0.7044270833333334,
+      "forwards": [
+        7.0,
+        7.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance_grounded",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "eb_sampler",
+      "seed0": 0.7109375,
+      "seed1": 0.6979166666666666,
+      "mean_accuracy": 0.7044270833333333,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "eb_confidence",
+      "controller": "eb",
+      "metric": "entropy",
+      "confidence_ranking": true,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": false
+    },
+    {
+      "method": "fisher_relative_grounded4",
+      "seed0": 0.7161458333333334,
+      "seed1": 0.6875,
+      "mean_accuracy": 0.7018229166666667,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback_relative_grounded",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "fisher_uniform_grounded025",
+      "seed0": 0.7161458333333334,
+      "seed1": 0.6796875,
+      "mean_accuracy": 0.6979166666666667,
+      "forwards": [
+        4.0,
+        4.0
+      ],
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback_grounded",
+      "metric": "uniform",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "activation_dispersion01",
+      "seed0": 0.5911458333333334,
+      "seed1": 0.578125,
+      "mean_accuracy": 0.5846354166666667,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "activation",
+      "controller": "allowance",
+      "metric": "fisher_dispersion",
+      "confidence_ranking": false,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": true
+    },
+    {
+      "method": "activation_grounded025",
+      "seed0": 0.5859375,
+      "seed1": 0.5807291666666666,
+      "mean_accuracy": 0.5833333333333333,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "activation",
+      "controller": "feedback_grounded",
+      "metric": "gradient_union",
+      "confidence_ranking": false,
+      "count_probability_weights": false,
+      "strict_candidate": true,
+      "count_candidate": true
+    },
+    {
+      "method": "activation_singleton",
+      "seed0": 0.5885416666666666,
+      "seed1": 0.578125,
+      "mean_accuracy": 0.5833333333333333,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "activation",
+      "controller": "singleton",
+      "metric": "uniform",
+      "confidence_ranking": false,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": false
+    },
+    {
+      "method": "activation_allow01",
+      "seed0": 0.5833333333333334,
+      "seed1": 0.5572916666666666,
+      "mean_accuracy": 0.5703125,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "activation",
+      "controller": "allowance",
+      "metric": "gradient_union",
+      "confidence_ranking": false,
+      "count_probability_weights": false,
+      "strict_candidate": true,
+      "count_candidate": true
+    },
+    {
+      "method": "activation_relative4",
+      "seed0": 0.5625,
+      "seed1": 0.5729166666666666,
+      "mean_accuracy": 0.5677083333333333,
+      "forwards": [
+        12.0,
+        12.0
+      ],
+      "ranking": "activation",
+      "controller": "feedback_relative",
+      "metric": "gradient_union",
+      "confidence_ranking": false,
+      "count_probability_weights": false,
+      "strict_candidate": true,
+      "count_candidate": true
+    },
+    {
+      "method": "activation_grounded_allow01",
+      "seed0": 0.5651041666666666,
+      "seed1": 0.546875,
+      "mean_accuracy": 0.5559895833333333,
+      "forwards": [
+        10.0,
+        11.0
+      ],
+      "ranking": "activation",
+      "controller": "allowance_grounded",
+      "metric": "gradient_union",
+      "confidence_ranking": false,
+      "count_probability_weights": false,
+      "strict_candidate": true,
+      "count_candidate": true
+    }
+  ],
+  "humaneval": [
+    {
+      "method": "fisher_singleton",
+      "passed": 14,
+      "forwards": 128.0,
+      "seconds": 109.26580353699683,
+      "mean_count": 1.0,
+      "committed": 128.0,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/fisher_singleton/results.json",
+      "ranking": "diagnostic_fisher",
+      "controller": "singleton",
+      "metric": "uniform",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": false,
+      "multi_reveal_steps": 0,
+      "activation_singleton_wins": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "activation_singleton_losses": [],
+      "activation_singleton_identical_completions": 1,
+      "eb_sampler_wins": [
+        "HumanEval/9"
+      ],
+      "eb_sampler_losses": [],
+      "eb_sampler_identical_completions": 12,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [],
+      "fisher_eb_identical_completions": 16,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [],
+      "fisher_singleton_identical_completions": 20
+    },
+    {
+      "method": "fisher_eb",
+      "passed": 14,
+      "forwards": 128.0,
+      "seconds": 111.08918628800166,
+      "mean_count": 2.73515625,
+      "committed": 350.1,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/fisher_eb/results.json",
+      "ranking": "diagnostic_fisher",
+      "controller": "eb",
+      "metric": "uniform",
+      "confidence_ranking": true,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": false,
+      "multi_reveal_steps": 1304,
+      "activation_singleton_wins": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "activation_singleton_losses": [],
+      "activation_singleton_identical_completions": 1,
+      "eb_sampler_wins": [
+        "HumanEval/9"
+      ],
+      "eb_sampler_losses": [],
+      "eb_sampler_identical_completions": 13,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [],
+      "fisher_eb_identical_completions": 20,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [],
+      "fisher_singleton_identical_completions": 16
+    },
+    {
+      "method": "fisher_uniform_grounded025",
+      "passed": 14,
+      "forwards": 128.0,
+      "seconds": 111.8295658019997,
+      "mean_count": 1.001953125,
+      "committed": 128.25,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/fisher_uniform_grounded025/results.json",
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback_grounded",
+      "metric": "uniform",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true,
+      "multi_reveal_steps": 5,
+      "activation_singleton_wins": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "activation_singleton_losses": [],
+      "activation_singleton_identical_completions": 1,
+      "eb_sampler_wins": [
+        "HumanEval/9"
+      ],
+      "eb_sampler_losses": [],
+      "eb_sampler_identical_completions": 12,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [],
+      "fisher_eb_identical_completions": 16,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [],
+      "fisher_singleton_identical_completions": 20
+    },
+    {
+      "method": "fisher_dispersion05",
+      "passed": 14,
+      "forwards": 128.0,
+      "seconds": 112.76572006799688,
+      "mean_count": 1.75703125,
+      "committed": 224.89999999999998,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/fisher_dispersion05/results.json",
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance",
+      "metric": "fisher_dispersion",
+      "confidence_ranking": true,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": true,
+      "multi_reveal_steps": 648,
+      "activation_singleton_wins": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "activation_singleton_losses": [],
+      "activation_singleton_identical_completions": 1,
+      "eb_sampler_wins": [
+        "HumanEval/9"
+      ],
+      "eb_sampler_losses": [],
+      "eb_sampler_identical_completions": 12,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [],
+      "fisher_eb_identical_completions": 16,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [],
+      "fisher_singleton_identical_completions": 20
+    },
+    {
+      "method": "fisher_dispersion01",
+      "passed": 14,
+      "forwards": 128.0,
+      "seconds": 113.28824762599834,
+      "mean_count": 1.283984375,
+      "committed": 164.35000000000002,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/fisher_dispersion01/results.json",
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance",
+      "metric": "fisher_dispersion",
+      "confidence_ranking": true,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": true,
+      "multi_reveal_steps": 327,
+      "activation_singleton_wins": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "activation_singleton_losses": [],
+      "activation_singleton_identical_completions": 1,
+      "eb_sampler_wins": [
+        "HumanEval/9"
+      ],
+      "eb_sampler_losses": [],
+      "eb_sampler_identical_completions": 12,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [],
+      "fisher_eb_identical_completions": 16,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [],
+      "fisher_singleton_identical_completions": 20
+    },
+    {
+      "method": "fisher_relative4",
+      "passed": 13,
+      "forwards": 128.0,
+      "seconds": 111.44742974900146,
+      "mean_count": 1.021484375,
+      "committed": 130.75,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/fisher_relative4/results.json",
+      "ranking": "diagnostic_fisher",
+      "controller": "feedback_relative",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true,
+      "multi_reveal_steps": 32,
+      "activation_singleton_wins": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "activation_singleton_losses": [
+        "HumanEval/4"
+      ],
+      "activation_singleton_identical_completions": 1,
+      "eb_sampler_wins": [
+        "HumanEval/9"
+      ],
+      "eb_sampler_losses": [
+        "HumanEval/4"
+      ],
+      "eb_sampler_identical_completions": 12,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [
+        "HumanEval/4"
+      ],
+      "fisher_eb_identical_completions": 16,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [
+        "HumanEval/4"
+      ],
+      "fisher_singleton_identical_completions": 19
+    },
+    {
+      "method": "eb_sampler",
+      "passed": 13,
+      "forwards": 128.0,
+      "seconds": 141.03046059500048,
+      "mean_count": null,
+      "committed": 345.9,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/eb_sampler/results.json",
+      "ranking": "eb_confidence",
+      "controller": "eb",
+      "metric": "entropy",
+      "confidence_ranking": true,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": false,
+      "multi_reveal_steps": 0,
+      "activation_singleton_wins": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "activation_singleton_losses": [],
+      "activation_singleton_identical_completions": 1,
+      "eb_sampler_wins": [],
+      "eb_sampler_losses": [],
+      "eb_sampler_identical_completions": 20,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [
+        "HumanEval/9"
+      ],
+      "fisher_eb_identical_completions": 13,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [
+        "HumanEval/9"
+      ],
+      "fisher_singleton_identical_completions": 12
+    },
+    {
+      "method": "fisher_grounded_allow01",
+      "passed": 12,
+      "forwards": 128.0,
+      "seconds": 113.20504322399938,
+      "mean_count": 1.1765625,
+      "committed": 150.60000000000002,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/fisher_grounded_allow01/results.json",
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance_grounded",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true,
+      "multi_reveal_steps": 408,
+      "activation_singleton_wins": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/12",
+        "HumanEval/13"
+      ],
+      "activation_singleton_losses": [],
+      "activation_singleton_identical_completions": 1,
+      "eb_sampler_wins": [],
+      "eb_sampler_losses": [
+        "HumanEval/18"
+      ],
+      "eb_sampler_identical_completions": 11,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [
+        "HumanEval/9",
+        "HumanEval/18"
+      ],
+      "fisher_eb_identical_completions": 12,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [
+        "HumanEval/9",
+        "HumanEval/18"
+      ],
+      "fisher_singleton_identical_completions": 15
+    },
+    {
+      "method": "fisher_gradient_allow05",
+      "passed": 11,
+      "forwards": 128.0,
+      "seconds": 112.26538528299716,
+      "mean_count": 1.575,
+      "committed": 201.60000000000002,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/fisher_gradient_allow05/results.json",
+      "ranking": "diagnostic_fisher",
+      "controller": "allowance",
+      "metric": "gradient_union",
+      "confidence_ranking": true,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": true,
+      "multi_reveal_steps": 908,
+      "activation_singleton_wins": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/18"
+      ],
+      "activation_singleton_losses": [
+        "HumanEval/11"
+      ],
+      "activation_singleton_identical_completions": 1,
+      "eb_sampler_wins": [
+        "HumanEval/9"
+      ],
+      "eb_sampler_losses": [
+        "HumanEval/5",
+        "HumanEval/11",
+        "HumanEval/13"
+      ],
+      "eb_sampler_identical_completions": 8,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [
+        "HumanEval/5",
+        "HumanEval/11",
+        "HumanEval/13"
+      ],
+      "fisher_eb_identical_completions": 8,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [
+        "HumanEval/5",
+        "HumanEval/11",
+        "HumanEval/13"
+      ],
+      "fisher_singleton_identical_completions": 8
+    },
+    {
+      "method": "activation_singleton",
+      "passed": 7,
+      "forwards": 128.0,
+      "seconds": 97.65870503600308,
+      "mean_count": 1.0,
+      "committed": 128.0,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/activation_singleton/results.json",
+      "ranking": "activation",
+      "controller": "singleton",
+      "metric": "uniform",
+      "confidence_ranking": false,
+      "count_probability_weights": false,
+      "strict_candidate": false,
+      "count_candidate": false,
+      "multi_reveal_steps": 0,
+      "activation_singleton_wins": [],
+      "activation_singleton_losses": [],
+      "activation_singleton_identical_completions": 20,
+      "eb_sampler_wins": [],
+      "eb_sampler_losses": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "eb_sampler_identical_completions": 1,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "fisher_eb_identical_completions": 1,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "fisher_singleton_identical_completions": 1
+    },
+    {
+      "method": "activation_grounded025",
+      "passed": 7,
+      "forwards": 128.0,
+      "seconds": 102.00775539099413,
+      "mean_count": 1.0109375,
+      "committed": 129.39999999999998,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/activation_grounded025/results.json",
+      "ranking": "activation",
+      "controller": "feedback_grounded",
+      "metric": "gradient_union",
+      "confidence_ranking": false,
+      "count_probability_weights": false,
+      "strict_candidate": true,
+      "count_candidate": true,
+      "multi_reveal_steps": 9,
+      "activation_singleton_wins": [],
+      "activation_singleton_losses": [],
+      "activation_singleton_identical_completions": 19,
+      "eb_sampler_wins": [],
+      "eb_sampler_losses": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "eb_sampler_identical_completions": 1,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "fisher_eb_identical_completions": 1,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/18"
+      ],
+      "fisher_singleton_identical_completions": 1
+    },
+    {
+      "method": "activation_allow01",
+      "passed": 6,
+      "forwards": 128.0,
+      "seconds": 101.98084068699973,
+      "mean_count": 1.364453125,
+      "committed": 174.64999999999998,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/activation_allow01/results.json",
+      "ranking": "activation",
+      "controller": "allowance",
+      "metric": "gradient_union",
+      "confidence_ranking": false,
+      "count_probability_weights": false,
+      "strict_candidate": true,
+      "count_candidate": true,
+      "multi_reveal_steps": 755,
+      "activation_singleton_wins": [
+        "HumanEval/13"
+      ],
+      "activation_singleton_losses": [
+        "HumanEval/4",
+        "HumanEval/11"
+      ],
+      "activation_singleton_identical_completions": 4,
+      "eb_sampler_wins": [],
+      "eb_sampler_losses": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/18"
+      ],
+      "eb_sampler_identical_completions": 1,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/18"
+      ],
+      "fisher_eb_identical_completions": 1,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [
+        "HumanEval/0",
+        "HumanEval/3",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/11",
+        "HumanEval/12",
+        "HumanEval/18"
+      ],
+      "fisher_singleton_identical_completions": 1
+    },
+    {
+      "method": "activation_dispersion01",
+      "passed": 6,
+      "forwards": 128.0,
+      "seconds": 102.10463446799986,
+      "mean_count": 1.182421875,
+      "committed": 151.35000000000002,
+      "artifact": "/root/Strace/outputs/latent_allowance_humaneval20/seed1234/activation_dispersion01/results.json",
+      "ranking": "activation",
+      "controller": "allowance",
+      "metric": "fisher_dispersion",
+      "confidence_ranking": false,
+      "count_probability_weights": true,
+      "strict_candidate": false,
+      "count_candidate": true,
+      "multi_reveal_steps": 262,
+      "activation_singleton_wins": [
+        "HumanEval/3"
+      ],
+      "activation_singleton_losses": [
+        "HumanEval/4",
+        "HumanEval/15"
+      ],
+      "activation_singleton_identical_completions": 9,
+      "eb_sampler_wins": [],
+      "eb_sampler_losses": [
+        "HumanEval/0",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/18"
+      ],
+      "eb_sampler_identical_completions": 1,
+      "fisher_eb_wins": [],
+      "fisher_eb_losses": [
+        "HumanEval/0",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/18"
+      ],
+      "fisher_eb_identical_completions": 1,
+      "fisher_singleton_wins": [],
+      "fisher_singleton_losses": [
+        "HumanEval/0",
+        "HumanEval/4",
+        "HumanEval/5",
+        "HumanEval/9",
+        "HumanEval/12",
+        "HumanEval/13",
+        "HumanEval/15",
+        "HumanEval/18"
+      ],
+      "fisher_singleton_identical_completions": 1
+    }
+  ],
+  "note": "Reused exploratory tasks. Confidence/Fisher rankings and probability-weighted count metrics are explicitly diagnostic."
+}
