@@ -1,0 +1,33 @@
+# Hydra: TAG (Temporal Attribution Graph) — entry point: hydra_runners/run_tag.py / ./scripts/tag.sh
+defaults:
+  - _self_
+
+model_path: ./models/llada
+# CST checkpoint and yaml must match the trained bank (k, w, max_steps, d_model)
+cst_checkpoint: null
+cst_config: null
+
+# Full run: prompt + model_path -> tag_trace.pt, tag_graph.json, tag_view.html
+# Chunk run: set hidden_pt to skip generation
+prompt: null
+hidden_pt: null
+out_dir: outputs_tag
+
+mode_key: pd
+gen_length: 256
+steps: 256
+# false = reference-style: full step budget, no EOS early stop (same as eval use_eos_harness=false)
+use_eos_harness: true
+device: cuda
+influence_node_mass: 0.8
+influence_edge_mass: 0.98
+mix_uniform: 0.0001
+with_residual: true
+write_html: true
+# Chunk-only: skip loading model for output sink nodes
+no_logits: false
+top_output_mass: 0.95
+max_output_tokens: 10
+# Output sinks: renormalize logits with EOS masked out (lexical readout; needs model_path for logits)
+output_exclude_eos: true
+# eos_id: null  # optional override; else inferred from model_path via config.json

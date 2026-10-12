@@ -1,9 +1,11 @@
 # G-cap stochastic reranking
 
 `gcap_rerank` generates one pool of \(K\) complete stochastic trajectories per
-prompt. It selects both the lowest SchedulerLens
-\(\widehat G=\widehat M+\widehat J\) trajectory and a deterministic random
-control from that exact pool.
+prompt. It stores every decoded candidate plus per-step
+\(\widehat M_t,\widehat J_t\), and commit counts. Selection uses the lowest
+SchedulerLens \(\widehat G=\widehat M+\widehat J\) over the configured prefix
+(32 diffusion steps by default), together with a deterministic random control
+from that exact pool.
 
 The initial implementation supports `pd`, `bd`, `eb`, `top_k_c`, `top_k_m`, and
 `dus`. FHS and FDM are excluded because their nested model forwards require a
@@ -26,6 +28,13 @@ One command generates the candidates once and runs two lm-eval scoring passes:
 The minimum-G result is in the normal output directory; the random-control
 result is in the sibling directory ending in `_random`. Random selection uses a
 separate prompt-derived RNG and does not alter candidate generation.
-The defaults are \(K=8\), temperature \(0.7\), M-cap \(\gamma=1\), and
-`--gcap_score_mode per_commit`. Raw G-cap can otherwise favor incomplete
-outputs. Compute cost is approximately \(K\) times the base scheduler NFE.
+The defaults are \(K=8\), temperature \(0.7\), a 32-step prefix, M-cap
+\(\gamma=1\), and `--gcap_score_mode per_commit`. Raw G-cap can otherwise favor
+incomplete outputs. Compute cost is approximately \(K\) times the base
+scheduler NFE.
+
+`scripts/gcap_suite.sh` runs HumanEval, MBPP, GSM8K, and MATH-500 over all six
+supported base schedulers on eight GPUs. EB and top-k margin each use two
+disjoint dataset shards. The final `schedulerlens.gcap_summary` pass reports
+exact expected random pass@1 over all candidates, pass@8, and prefix-minimum-G
+selected@1.

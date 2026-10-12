@@ -1,0 +1,155 @@
+# CST: store hiddens (Hub) | train CST | eval CST
+#
+# Store and train are independent. Store uploads hiddens; train later loads them from Hub.
+#
+#   python hydra_runners/run_cst.py mode=store store.scope=train
+#   python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=gsm8k
+#   python hydra_runners/run_cst.py mode=store store.scope=eval store.task_name=all
+#   python hydra_runners/run_cst.py mode=train
+#   python hydra_runners/run_cst.py mode=eval eval.checkpoint=... eval.hidden_dir=...
+#
+# Shell: ./scripts/cst.sh --mode store|train|eval [hydra overrides...]
+#
+# Logger output: logs/cst_store_{scope}_{task}_*.log, logs/cst_train_*.log, logs/cst_eval_*.log
+#
+# Hub folder name_token: {model}_{scheduler}_{gen_length}_{steps}
+#   e.g. llada_pd_512_256   (eval store appends _task_{task})
+# Hub auth: huggingface-cli login (or HF_TOKEN). Repos: {whoami}/hiddens-train, {whoami}/hiddens-eval
+
+defaults:
+  - launcher: local
+  - _self_
+
+mode: train
+
+wandb: true
+wandb_project: strace-cst
+
+model_path: ./models/llada
+
+# CST architecture (mode=train / mode=eval only; store does not use this)
+cst:
+  d_model: 4096
+  k: 4096
+  w: 4
+  max_steps: 512
+  # Retained for call-site compatibility; GPU residency is train.auto_memory /
+  # train.gpu_pinned_gb (cst.model.residency), not an LRU cache.
+  max_on_gpu: 512
+  jumprelu_initial_threshold: 0.03
+  jumprelu_bandwidth: 1.0
+
+# ---------------------------------------------------------------------------
+# mode=store — LM + scheduler collect, upload each batch to Hub. Does not train.
+# ---------------------------------------------------------------------------
+store:
+  scope: train          # train | eval
+  model_path: ${model_path}
+  device: cuda
+  scratch_dir: outputs/cst_staging
+  scheduler_mode: top_k_c
+  gen_length: 512
+  steps: 512
+  block_length: null
+  top_k: 2
+  inference_batch_size: 128
+  auto_batch_size: true     # lower B to fit free disk / RAM / VRAM (never raises yaml cap)
+  max_chunk_gb: null        # optional cap on one .pt; null = only free disk/RAM/VRAM
+  cpu_headroom_gb: 16
+  vram_headroom_gb: 8
+  samples: null
+  seed: 0
+  # Re-run the same store job after a crash: skip Hub chunks already in the
+  # manifest *or* already uploaded as .pt (even if the manifest write failed)
+  # when seed / samples / batch size / generation settings match.
+  # store.resume=false re-collects every batch (overwrites those files).
+  resume: true
+  compile_model: false
+  # Match eval.launch_eval: false = full steps + no truncate-at-EOS in collect
+  use_eos_harness: true
+  name_token: null      # override auto {model}_{scheduler}_{gen_length}_{steps}
+  # eval store: one lm-eval task, comma-separated list, or ``all``
+  # (gsm8k, minerva_math500, arc_challenge_chat, humaneval, mbpp)
+  task_name: null
+  num_fewshot: null     # eval: defaults to launch_eval few-shot for task
+  # Hub: huggingface-cli login (or HF_TOKEN). Repos: {whoami}/hiddens-train and {whoami}/hiddens-eval
+  # ARC-Easy / ARC-Challenge chat / CommonsenseQA collect at 128/128 even when gen_length/steps are 512.
+  delete_local_after_hf_push: true
+  # Capture: last-layer hook (not all hidden_states), bf16, pack question+gen during
+  # the forward, stream each step into the final .pt (no second copy).
+  stream_to_disk: true
+  disk_headroom_gb: 20      # refuse a batch if free disk would drop below this after the write
+
+# ---------------------------------------------------------------------------
+# mode=train — download Hub hiddens and fit CST. No LM inference.
+# scheduler_mode / gen_length / steps select the Hub folder, they do not run
+# a scheduler. Defaults interpolate from store.* (override to use another run).
+# ---------------------------------------------------------------------------
+train:
+  model_path: ${model_path}
+  device: cuda
+  scratch_dir: outputs/cst_staging
+  checkpoint_dir: outputs/cst_ckpt
+  scheduler_mode: ${store.scheduler_mode}
+  gen_length: ${store.gen_length}
+  steps: ${store.steps}
+  name_token: null      # override auto {model}_{scheduler}_{gen_length}_{steps}
+  hidden_source: hf_hub
+  # Resume: sharded dir or legacy .pt; resume_from_latest=true loads cst_<token>_latest
+  resume_checkpoint: null
+  resume_from_latest: false
+  resume_data_from_checkpoint: true
+  resume_override_sampling: true
+  num_epochs: 1
+  learning_rate: 0.0003
+  lambda_sparsity: 0.001
+  # Pre-JumpReLU dead-feature penalty: mean(ReLU(-h)); not ramped. Set 0 to disable.
+  lambda_pre_dead: 3.0e-6
+  c_tanh: 1.0
+  # Sparsity ramp: one ramp.step() per training chunk .pt file
+  ramp_total_steps: 10000
+  # Pin / G / microbatch are chosen from free RAM + VRAM (like store auto-batch).
+  # YAML values below are optional caps; leave null to fully auto.
+  auto_memory: true
+  cpu_headroom_gb: 16
+  vram_headroom_gb: 8
+  gpu_pinned_gb: null       # cap on bank GB pinned on GPU; null = auto
+  anchor_block: null        # cap on anchors per backward; null = auto per chunk
+  microbatch_rows: null     # cap on rows per backward (fits B=128 files); null = auto
+  checkpoint_every: null    # full shard dump every N files; null ≈ 8 dumps/epoch
+  prefetch_chunks: true     # download next Hub .pt while training the current one
+  # Checkpoints shard per CST. true also writes Adam moments (3x size).
+  save_optimizer_state: false
+  wandb: true
+  wandb_name: cst-train
+  # Hub download uses the same login as store ({whoami}/hiddens-train)
+  delete_local_chunks_after_train: true
+
+# ---------------------------------------------------------------------------
+# mode=eval — score a CST checkpoint on saved (local or Hub) eval hiddens
+# ---------------------------------------------------------------------------
+eval:
+  hidden_dir: outputs/eval_hidden
+  checkpoint: null
+  hidden_source: local   # local | hf_hub
+  task_name: null
+  scheduler_mode: pd
+  gen_length: 512
+  steps: 256
+  name_token: null
+  model_path: ${model_path}
+  device: cuda
+  w: null
+  ntf_conf_low: 0.2
+  ntf_conf_high: 0.8
+  ntf_first_non_eos: false
+  # >0 streams the bank from host RAM instead of placing all of it at once.
+  gpu_pinned_gb: 0.0
+  wandb_name: cst-eval
+
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.override_dirname}

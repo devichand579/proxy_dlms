@@ -80,6 +80,10 @@ GCAP_SCHEDULER="pd"
 GCAP_K=8
 GCAP_SCORE_MODE="per_commit"
 GCAP_SELECTION_SEED=0
+GCAP_PREFIX_STEPS=32
+GCAP_RANDOM_CONTROL=true
+DATASET_NUM_SHARDS=1
+DATASET_SHARD_INDEX=0
 SLURM_MODE=false
 RESUMABLE=false
 RUN_ID=""
@@ -188,6 +192,22 @@ while [[ $# -gt 0 ]]; do
             GCAP_SELECTION_SEED="$2"
             shift 2
             ;;
+        --gcap_prefix_steps)
+            GCAP_PREFIX_STEPS="$2"
+            shift 2
+            ;;
+        --gcap_random_control)
+            GCAP_RANDOM_CONTROL="$2"
+            shift 2
+            ;;
+        --dataset_num_shards)
+            DATASET_NUM_SHARDS="$2"
+            shift 2
+            ;;
+        --dataset_shard_index)
+            DATASET_SHARD_INDEX="$2"
+            shift 2
+            ;;
         --parallel_config|--parallel_runs_file)
             PARALLEL_CONFIG="$2"
             shift 2
@@ -228,7 +248,8 @@ while [[ $# -gt 0 ]]; do
             echo "Unknown option: $1"
             echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
             echo "  Core optional: --num_fewshot --limit (alias: --num_samples) --block_length --top_k --steps --gen_length --temperature --compile_model"
-            echo "  G-cap reranking: --mode gcap --gcap_scheduler pd|bd|eb|top_k_c|top_k_m|dus --gcap_k <K> --gcap_score_mode raw|per_commit"
+            echo "  G-cap reranking: --mode gcap --gcap_scheduler pd|bd|eb|top_k_c|top_k_m|dus --gcap_k <K> --gcap_score_mode raw|per_commit --gcap_prefix_steps <N>"
+            echo "  Dataset sharding: --dataset_num_shards <N> --dataset_shard_index <0-based index>"
             echo "  Harness (eval.LLaDAEvalHarness / --model_args): --intervention_mode --intervention_steps --intervention_k"
             echo "  EOS decode: --use_eos_harness <True|False> or --no_eos_harness (default true; false = full steps + full-tail decode)"
             echo "  Alternative multi-GPU: --parallel_config <parallel_runs.yaml> (per-GPU overrides: mode/model/task/batch — delegates to hydra_runners/launch_eval.py parallel_runs_file=)"
@@ -253,6 +274,18 @@ if [[ "$GCAP_SCORE_MODE" != "raw" && "$GCAP_SCORE_MODE" != "per_commit" ]]; then
     echo "Error: --gcap_score_mode must be raw or per_commit"
     exit 1
 fi
+if [[ ! "$GCAP_PREFIX_STEPS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --gcap_prefix_steps must be a positive integer"
+    exit 1
+fi
+if [[ ! "$DATASET_NUM_SHARDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --dataset_num_shards must be a positive integer"
+    exit 1
+fi
+if [[ ! "$DATASET_SHARD_INDEX" =~ ^[0-9]+$ ]] || (( 10#$DATASET_SHARD_INDEX >= 10#$DATASET_NUM_SHARDS )); then
+    echo "Error: --dataset_shard_index must be in [0, dataset_num_shards)"
+    exit 1
+fi
 
 if [[ -n "$PARALLEL_CONFIG" ]]; then
     if [[ -f "$PARALLEL_CONFIG" ]]; then
@@ -271,7 +304,8 @@ if [[ -z "$BATCH_SIZE" || -z "$MODE" || -z "$TASK_NAME" || -z "$MODEL" ]]; then
     echo "Error: Missing required arguments"
     echo "Usage: $0 --batch_size <size> --mode <mode> --task_name <task> --model <model> [options]"
     echo "  Core optional: --num_fewshot <n> --limit <n> (alias: --num_samples) --block_length <n> --top_k <n> --steps <n> --gen_length <n> --temperature <float> --compile_model <bool>"
-    echo "  G-cap reranking: --mode gcap --gcap_scheduler pd|bd|eb|top_k_c|top_k_m|dus --gcap_k <K> --gcap_score_mode raw|per_commit"
+    echo "  G-cap reranking: --mode gcap --gcap_scheduler pd|bd|eb|top_k_c|top_k_m|dus --gcap_k <K> --gcap_score_mode raw|per_commit --gcap_prefix_steps <N>"
+    echo "  Dataset sharding: --dataset_num_shards <N> --dataset_shard_index <0-based index>"
     echo "  Harness (see eval.LLaDAEvalHarness): --intervention_mode drop|swap, --intervention_steps 0,128,256, --intervention_k <k>"
     echo "  --wandb <True|False>  --tracing_enabled <True|False>  (tracing: trace_outputs/ or JSONL when --resumable)"
     echo "  --trace_hf_upload <True|False>  --trace_hf_dataset_repo <id>  --trace_hf_namespace <user|org>  (Hub dataset push; default repo schedulerlens when tracing on)"
@@ -351,17 +385,19 @@ fi
 
 fi
 
-# Initialize conda for this shell session
-eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
-conda activate strace
-export PATH="$CONDA_PREFIX/bin:$PATH" 
+# Use the project Conda environment when available. Container images already
+# provide the required Python environment and do not install Conda.
+if [[ -x "$HOME/miniconda3/bin/conda" ]]; then
+    eval "$("$HOME/miniconda3/bin/conda" shell.bash hook)"
+    conda activate strace
+    export PATH="$CONDA_PREFIX/bin:$PATH"
+fi
 
 # Set the environment variables first before running the command.
 export HF_ALLOW_CODE_EVAL=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true
 export LMEVAL_LOG_LEVEL=INFO
 export TOKENIZERS_PARALLELISM=false
-export HF_TOKEN=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
 
 if [[ "$OFFLINE" == "true" ]]; then
     export HF_DATASETS_OFFLINE=1
@@ -405,8 +441,7 @@ if [[ "$SLURM_MODE" != "true" ]]; then
     fi
 fi
 
-export WANDB_API_KEY=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
-export WANDB_PROJECT=strace
+export WANDB_PROJECT="${WANDB_PROJECT:-strace}"
 
 # Tracing: enable only when --tracing_enabled True (default off to avoid overhead)
 if [[ "${TRACING_ENABLED_ARG,,}" == "true" ]]; then
@@ -573,12 +608,12 @@ run_eval_for_task() {
     fi
 
     # Build model_args (base args + optional intervention params + checkpoint paths when resumable)
-    MODEL_ARGS="model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},strategy=${STRATEGY},top_k=${TOP_K},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME},trace_name=${OUTPUT_SUFFIX},use_eos_harness=${USE_EOS_HARNESS},device=${MODEL_DEVICE}"
+    MODEL_ARGS="model_path=${MODEL_PATH},gen_length=${GEN_LENGTH},steps=${STEPS},block_length=${BLOCK_LENGTH},mode=${MODE},strategy=${STRATEGY},top_k=${TOP_K},compile_model=${COMPILE_MODEL},task_name=${TASK_NAME},trace_name=${OUTPUT_SUFFIX},use_eos_harness=${USE_EOS_HARNESS},device=${MODEL_DEVICE},dataset_num_shards=${DATASET_NUM_SHARDS},dataset_shard_index=${DATASET_SHARD_INDEX}"
     if [[ -n "$TEMPERATURE_OVERRIDE" ]]; then
         MODEL_ARGS="${MODEL_ARGS},temperature=${TEMPERATURE_OVERRIDE}"
     fi
     if [[ "$MODE" == "gcap_rerank" ]]; then
-        MODEL_ARGS="${MODEL_ARGS},gcap_base_mode=${GCAP_BASE_MODE},gcap_k=${GCAP_K},gcap_score_mode=${GCAP_SCORE_MODE},gcap_selection_seed=${GCAP_SELECTION_SEED}"
+        MODEL_ARGS="${MODEL_ARGS},gcap_base_mode=${GCAP_BASE_MODE},gcap_k=${GCAP_K},gcap_score_mode=${GCAP_SCORE_MODE},gcap_selection_seed=${GCAP_SELECTION_SEED},gcap_prefix_steps=${GCAP_PREFIX_STEPS}"
     fi
     if [[ "$RESUMABLE" == "true" ]]; then
         MODEL_ARGS="${MODEL_ARGS},resumable=true,output_dir=${CHECKPOINT_DIR}"
@@ -607,9 +642,10 @@ run_eval_for_task() {
     if [[ "$MODE" == "gcap_rerank" ]]; then
         echo "  G-cap base scheduler: $GCAP_SCHEDULER ($GCAP_BASE_MODE)"
         echo "  G-cap candidates: $GCAP_K"
-        echo "  G-cap selections: min_g + random ($GCAP_SCORE_MODE)"
+        echo "  G-cap selections: min_g + random ($GCAP_SCORE_MODE, first ${GCAP_PREFIX_STEPS} steps)"
         echo "  Sampling temperature: $TEMPERATURE_OVERRIDE"
     fi
+    echo "  Dataset shard: ${DATASET_SHARD_INDEX}/${DATASET_NUM_SHARDS}"
     if [[ -n "$INTERVENTION_MODE" ]]; then
         echo "  Intervention Mode: $INTERVENTION_MODE"
         echo "  Intervention Steps: $INTERVENTION_STEPS"
@@ -641,12 +677,33 @@ run_eval_for_task() {
         RESUME_ENV="RESUMABLE_RUN_ID=${OUTPUT_SUFFIX} CHECKPOINT_DIR=${CHECKPOINT_DIR}"
     fi
 
-    if [[ "$RESUMABLE" == "true" ]]; then
-        ACCEL_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path ${CHECKPOINT_DIR}/results.json --log_samples --cache_requests true"
-    else
-        ACCEL_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path outputs/${OUTPUT_SUFFIX}.json --log_samples --cache_requests true"
+    SAMPLES_ARG=""
+    CACHE_REQUESTS_ARG=" --cache_requests true"
+    if (( 10#$DATASET_NUM_SHARDS > 1 )); then
+        SAMPLES_FILE="${CHECKPOINT_DIR}/samples.json"
+        SHARD_CMD=(
+            python3 -m schedulerlens.shard_samples
+            --task "$TASK_NAME"
+            --num-shards "$DATASET_NUM_SHARDS"
+            --shard-index "$DATASET_SHARD_INDEX"
+            --output "$SAMPLES_FILE"
+        )
+        if [[ -n "$LIMIT_OVERRIDE" ]]; then
+            SHARD_CMD+=(--limit "$LIMIT_OVERRIDE")
+        fi
+        "${SHARD_CMD[@]}"
+        SAMPLES_ARG=" --samples ${SAMPLES_FILE}"
+        # lm-eval 0.4.9.2 does not include --samples in its request-cache key.
+        # A cached full task would therefore replace this shard's request set.
+        CACHE_REQUESTS_ARG=""
     fi
-    if [[ -n "$LIMIT_OVERRIDE" ]]; then
+
+    if [[ "$RESUMABLE" == "true" ]]; then
+        ACCEL_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path ${CHECKPOINT_DIR}/results.json --log_samples${CACHE_REQUESTS_ARG}${SAMPLES_ARG}"
+    else
+        ACCEL_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${MODEL_ARGS} --write_out --output_path outputs/${OUTPUT_SUFFIX}.json --log_samples${CACHE_REQUESTS_ARG}${SAMPLES_ARG}"
+    fi
+    if [[ -n "$LIMIT_OVERRIDE" && "$DATASET_NUM_SHARDS" == "1" ]]; then
         ACCEL_CMD="${ACCEL_CMD} --limit ${LIMIT_OVERRIDE}"
     fi
     if [[ "${WANDB,,}" == "true" ]]; then
@@ -662,7 +719,7 @@ run_eval_for_task() {
         eval $ACCEL_CMD
     fi
     STATUS=$?
-    if [[ "$STATUS" -ne 0 || "$MODE" != "gcap_rerank" ]]; then
+    if [[ "$STATUS" -ne 0 || "$MODE" != "gcap_rerank" || "${GCAP_RANDOM_CONTROL,,}" != "true" ]]; then
         return "$STATUS"
     fi
 
@@ -671,8 +728,8 @@ run_eval_for_task() {
     RANDOM_MODEL_ARGS="${MODEL_ARGS/trace_name=${OUTPUT_SUFFIX}/trace_name=${RANDOM_SUFFIX}}"
     RANDOM_MODEL_ARGS="${RANDOM_MODEL_ARGS/output_dir=${CHECKPOINT_DIR}/output_dir=${RANDOM_DIR}}"
     RANDOM_MODEL_ARGS="${RANDOM_MODEL_ARGS},gcap_score_only=true"
-    RANDOM_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${RANDOM_MODEL_ARGS} --write_out --output_path ${RANDOM_DIR}/results.json --log_samples --cache_requests true"
-    [[ -n "$LIMIT_OVERRIDE" ]] && RANDOM_CMD="${RANDOM_CMD} --limit ${LIMIT_OVERRIDE}"
+    RANDOM_CMD="accelerate launch eval.py --tasks ${TASK_NAME} --batch_size ${BATCH_SIZE} --num_fewshot ${NUM_FEWSHOT} --model ${MODEL} --model_args ${RANDOM_MODEL_ARGS} --write_out --output_path ${RANDOM_DIR}/results.json --log_samples${CACHE_REQUESTS_ARG}${SAMPLES_ARG}"
+    [[ -n "$LIMIT_OVERRIDE" && "$DATASET_NUM_SHARDS" == "1" ]] && RANDOM_CMD="${RANDOM_CMD} --limit ${LIMIT_OVERRIDE}"
     [[ "${WANDB,,}" == "true" ]] && RANDOM_CMD="${RANDOM_CMD} --wandb_args project=${WANDB_PROJECT},name=${RANDOM_SUFFIX}"
     RANDOM_CMD="env RESUMABLE_RUN_ID=${RANDOM_SUFFIX} CHECKPOINT_DIR=${RANDOM_DIR} ${RANDOM_CMD}"
     echo "Scoring random control from the shared candidate pool..."

@@ -55,6 +55,7 @@ def generate(
     gcap_k: int = 8,
     gcap_score_mode: str = "per_commit",
     gcap_selection_seed: int = 0,
+    gcap_prefix_steps: int = 32,
 ):
     """Batched mask-diffusion `generate` for all rows in `input_ids`.
 
@@ -120,6 +121,7 @@ def generate(
             k=int(gcap_k),
             score_mode=gcap_score_mode,
             selection_seed=int(gcap_selection_seed),
+            selection_prefix_steps=int(gcap_prefix_steps),
             mask_id=mask_id,
             gen_length=gen_length,
             block_length=block_length,

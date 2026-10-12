@@ -16,8 +16,7 @@ unset _script_dir
 export HF_DATASETS_CACHE="$HOME/.cache/huggingface/datasets"
 export HF_HOME="$HOME/.cache/huggingface"
 
-# Set HuggingFace token for authentication (required for some datasets)
-export HF_TOKEN="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"  # NOTE: DON'T COMMIT THIS TOKEN
+# Set HF_TOKEN in the environment when authentication is required.
 
 echo "Downloading datasets to: $HF_DATASETS_CACHE"
 echo "================================================"

@@ -17,6 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from repo_env_defaults import apply_offline_env, apply_repo_env_defaults, resolve_eval_device
 from sampling_defaults import resolve_gen_length_steps
+from schedulerlens.shard_samples import write_samples_file
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
@@ -194,6 +195,10 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
     gcap_k = int(cfg.get("gcap_k", 8))
     gcap_score_mode = str(cfg.get("gcap_score_mode", "per_commit"))
     gcap_selection_seed = int(cfg.get("gcap_selection_seed", 0))
+    gcap_prefix_steps = int(cfg.get("gcap_prefix_steps", 32))
+    gcap_random_control = _to_bool(cfg.get("gcap_random_control", True))
+    dataset_num_shards = int(cfg.get("dataset_num_shards", 1))
+    dataset_shard_index = int(cfg.get("dataset_shard_index", 0))
     temperature_cfg = cfg.get("temperature")
     temperature = (
         0.7 if mode == "gcap_rerank" and temperature_cfg is None
@@ -203,6 +208,15 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         raise ValueError("gcap_k must be >= 2")
     if gcap_score_mode not in ("raw", "per_commit"):
         raise ValueError("gcap_score_mode must be raw or per_commit")
+    if gcap_prefix_steps < 1:
+        raise ValueError("gcap_prefix_steps must be >= 1")
+    if dataset_num_shards < 1:
+        raise ValueError("dataset_num_shards must be >= 1")
+    if not 0 <= dataset_shard_index < dataset_num_shards:
+        raise ValueError(
+            "dataset_shard_index must satisfy "
+            "0 <= index < dataset_num_shards"
+        )
 
     gen_length, steps = resolve_gen_length_steps(cfg, task_name)
     block_length_cfg = cfg.get("block_length")
@@ -271,8 +285,13 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         model_args += (
             f",gcap_base_mode={gcap_base_mode},gcap_k={gcap_k},"
             f"gcap_score_mode={gcap_score_mode},"
-            f"gcap_selection_seed={gcap_selection_seed}"
+            f"gcap_selection_seed={gcap_selection_seed},"
+            f"gcap_prefix_steps={gcap_prefix_steps}"
         )
+    model_args += (
+        f",dataset_num_shards={dataset_num_shards},"
+        f"dataset_shard_index={dataset_shard_index}"
+    )
     if resumable and checkpoint_dir:
         model_args += f",resumable=true,output_dir={checkpoint_dir}"
     if intervention_mode:
@@ -309,6 +328,16 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
             wandb_resume_args = f",resume=allow,id={wandb_run_id}"
             print(f"  Resuming wandb run: {wandb_run_id}")
 
+    samples_file = None
+    if dataset_num_shards > 1:
+        samples_file = write_samples_file(
+            Path(checkpoint_dir) / "samples.json",
+            task_name,
+            dataset_num_shards,
+            dataset_shard_index,
+            limit=limit,
+        )
+
     print("Configuration:")
     print(f"  batch_size={batch_size} mode={mode} task_name={task_name} model={model}")
     print(
@@ -319,12 +348,13 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         print(
             f"  gcap_scheduler={gcap_scheduler} gcap_k={gcap_k} "
             f"gcap_selections=min_g+random gcap_score_mode={gcap_score_mode} "
-            f"temperature={temperature}"
+            f"gcap_prefix_steps={gcap_prefix_steps} temperature={temperature}"
         )
     print(
         f"  num_fewshot={num_fewshot} limit={limit if limit is not None else 'all'} "
         f"wandb={wandb} offline={offline} device={model_device} "
         f"cuda_visible={env.get('CUDA_VISIBLE_DEVICES', '(unchanged)')} "
+        f"dataset_shard={dataset_shard_index}/{dataset_num_shards} "
         f"tracing_enabled={tracing_enabled} "
         f"trace_hf_upload={env.get('TRACE_HF_UPLOAD')} trace_hf_repo={env.get('TRACE_HF_DATASET_REPO', 'schedulerlens')} "
         f"resumable={resumable}"
@@ -348,13 +378,15 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         cmd += ["--output_path", f"{checkpoint_dir}/results.json", "--log_samples"]
     else:
         cmd += ["--output_path", f"outputs/{output_suffix}.json", "--log_samples"]
-    if limit is not None:
+    if samples_file is not None:
+        cmd += ["--samples", str(samples_file)]
+    elif limit is not None:
         cmd += ["--limit", str(limit)]
     if wandb:
         cmd += ["--wandb_args", f"project={env.get('WANDB_PROJECT', 'strace')},name={wandb_name}{wandb_resume_args}"]
 
     status = subprocess.run(cmd, env=env, cwd=project_root).returncode
-    if status or mode != "gcap_rerank":
+    if status or mode != "gcap_rerank" or not gcap_random_control:
         return status
 
     random_suffix = f"{output_suffix}_random"
@@ -373,7 +405,9 @@ def _run_single_eval(cfg: DictConfig, extra_env: Optional[dict[str, str]] = None
         f"{random_dir}/results.json",
         "--log_samples",
     ]
-    if limit is not None:
+    if samples_file is not None:
+        random_cmd += ["--samples", str(samples_file)]
+    elif limit is not None:
         random_cmd += ["--limit", str(limit)]
     if wandb:
         random_cmd += [

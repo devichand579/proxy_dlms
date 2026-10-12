@@ -5,17 +5,17 @@ from __future__ import annotations
 
 import os
 
-# Keep in sync with .env.example.
-HF_TOKEN_DEFAULT = "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" # NOTE: DON'T COMMIT THIS TOKEN
-WANDB_API_KEY_DEFAULT = (
-    "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"
-) # NOTE: DON'T COMMIT THIS TOKEN
+# Credentials must be supplied through the environment; never commit defaults.
+HF_TOKEN_DEFAULT = ""
+WANDB_API_KEY_DEFAULT = ""
 WANDB_PROJECT_DEFAULT = "strace"
 
 
 def apply_repo_env_defaults() -> None:
-    os.environ.setdefault("HF_TOKEN", HF_TOKEN_DEFAULT)
-    os.environ.setdefault("WANDB_API_KEY", WANDB_API_KEY_DEFAULT)
+    if HF_TOKEN_DEFAULT:
+        os.environ.setdefault("HF_TOKEN", HF_TOKEN_DEFAULT)
+    if WANDB_API_KEY_DEFAULT:
+        os.environ.setdefault("WANDB_API_KEY", WANDB_API_KEY_DEFAULT)
     os.environ.setdefault("WANDB_PROJECT", WANDB_PROJECT_DEFAULT)
 
 
