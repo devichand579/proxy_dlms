@@ -40,6 +40,10 @@ gcap_scheduler: pd
 gcap_k: 8
 gcap_score_mode: per_commit  # raw | per_commit
 gcap_selection_seed: 0
+gcap_prefix_steps: 32
+gcap_random_control: true
+dataset_num_shards: 1
+dataset_shard_index: 0
 # Scheduler block size; null = mode default (block_diffusion 32, fdm 64, dus 16, else gen_length). Not used for fhs.
 block_length: null
 

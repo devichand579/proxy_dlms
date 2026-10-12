@@ -1,0 +1,23 @@
+# Seven-scheduler stochastic GSM8K ablation (FDM intentionally excluded).
+# Base sampling/task/model settings come from config/lmeval.yaml or CLI overrides.
+
+- mode: pd
+  batch_size: 128
+
+- mode: bd
+  batch_size: 128
+
+- mode: top_k_c
+  batch_size: 128
+
+- mode: top_k_m
+  batch_size: 128
+
+- mode: eb
+  batch_size: 128
+
+- mode: dus
+  batch_size: 128
+
+- mode: fhs
+  batch_size: 64

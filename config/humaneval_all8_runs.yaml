@@ -1,0 +1,25 @@
+# One HumanEval scheduler per GPU. Use on both nodes with disjoint dataset shards.
+
+- mode: pd
+  batch_size: 64
+
+- mode: bd
+  batch_size: 64
+
+- mode: top_k_c
+  batch_size: 64
+
+- mode: top_k_m
+  batch_size: 64
+
+- mode: eb
+  batch_size: 64
+
+- mode: dus
+  batch_size: 64
+
+- mode: fhs
+  batch_size: 32
+
+- mode: fdm
+  batch_size: 8

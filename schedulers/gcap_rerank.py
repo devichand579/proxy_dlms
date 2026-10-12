@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import torch
 
-from schedulerlens.proxies import compute_sample_proxies
+from schedulerlens.proxies import compute_sample_proxies, cumulative_caps
 from traces.trace_checks import repair_drop_last_step
 from traces.trace_generator import TracingContext
 from traces.trace_wrapper import ModelTracer, _task_trace_list_ctx
@@ -16,6 +16,7 @@ SUPPORTED_SCORES = ("raw", "per_commit")
 # Filled by the most recent ``generate_gcap_rerank`` call.
 last_rerank_metrics: list[dict[str, Any]] = []
 last_random_output: torch.Tensor | None = None
+last_candidate_outputs: torch.Tensor | None = None
 
 
 def _run_traced_candidate(
@@ -54,22 +55,51 @@ def _run_traced_candidate(
     return result, traces
 
 
-def _candidate_metrics(trace: dict[str, Any], score_mode: str) -> dict[str, Any]:
+def _candidate_metrics(
+    trace: dict[str, Any],
+    score_mode: str,
+    selection_prefix_steps: int,
+) -> dict[str, Any]:
     repaired, _repairs = repair_drop_last_step(trace)
     proxies = compute_sample_proxies(repaired)
     commits = sum(step.n_selected for step in proxies.step_proxies)
     g_cap = float(proxies.M_hat + proxies.J_hat)
+    prefix_m, prefix_j, prefix_g = cumulative_caps(
+        proxies.step_proxies,
+        selection_prefix_steps,
+    )
+    prefix_commits = sum(
+        step.n_selected
+        for step in proxies.step_proxies
+        if int(step.step) < int(selection_prefix_steps)
+    )
     if score_mode == "raw":
-        selection_score = g_cap
+        selection_score = prefix_g
     else:
-        selection_score = g_cap / float(max(commits, 1))
+        selection_score = prefix_g / float(max(prefix_commits, 1))
     return {
         "M_hat": float(proxies.M_hat),
         "J_hat": float(proxies.J_hat),
         "G_hat": g_cap,
+        "prefix_steps": int(selection_prefix_steps),
+        "prefix_M_hat": float(prefix_m),
+        "prefix_J_hat": float(prefix_j),
+        "prefix_G_hat": float(prefix_g),
+        "prefix_n_committed": int(prefix_commits),
         "selection_score": selection_score,
         "n_committed": int(commits),
         "n_steps": len(proxies.step_proxies),
+        "step_proxies": [
+            {
+                "step": int(step.step),
+                "M_hat_t": float(step.M_hat_t),
+                "J_hat_t": float(step.J_hat_t),
+                "n_committed": int(step.n_committed),
+                "n_selected": int(step.n_selected),
+                "n_remaining": int(step.n_remaining),
+            }
+            for step in proxies.step_proxies
+        ],
     }
 
 
@@ -83,12 +113,14 @@ def generate_gcap_rerank(
     k: int,
     score_mode: str,
     selection_seed: int,
+    selection_prefix_steps: int,
     mask_id: int,
     gen_length: int,
     block_length: int | None,
 ):
     """Generate one pool and expose both minimum-G and random selections."""
-    global last_random_output, last_rerank_metrics
+    global last_candidate_outputs, last_random_output, last_rerank_metrics
+    last_candidate_outputs = None
     last_random_output = None
     last_rerank_metrics = []
     if int(k) < 2:
@@ -115,7 +147,10 @@ def generate_gcap_rerank(
         generated, steps_taken, blocks = result
         candidates.append(generated)
         metrics_by_candidate.append(
-            [_candidate_metrics(trace, score_mode) for trace in traces]
+            [
+                _candidate_metrics(trace, score_mode, selection_prefix_steps)
+                for trace in traces
+            ]
         )
         total_steps += int(steps_taken)
         total_blocks += int(blocks)
@@ -140,6 +175,7 @@ def generate_gcap_rerank(
         random_indices.append(int(torch.randint(int(k), (), generator=generator).item()))
 
     stacked = torch.stack(candidates, dim=0)
+    last_candidate_outputs = stacked
     rows = torch.arange(batch, device=prompt.device)
     min_selected = torch.tensor(min_indices, dtype=torch.long, device=prompt.device)
     random_selected = torch.tensor(
@@ -150,6 +186,7 @@ def generate_gcap_rerank(
     last_rerank_metrics = [
         {
             "score_mode": score_mode,
+            "selection_prefix_steps": int(selection_prefix_steps),
             "min_g_index": int(min_indices[row]),
             "random_index": int(random_indices[row]),
             "candidates": [

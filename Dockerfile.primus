@@ -1,0 +1,16 @@
+FROM docker.io/rocm/primus:v26.7
+
+WORKDIR /workspace/Strace
+
+COPY requirements.txt /tmp/requirements.txt
+
+# Preserve Primus's ROCm PyTorch and Triton stack while installing the
+# remaining Strace evaluation dependencies.
+RUN grep -Ev '^(torch|triton|nvidia-)' /tmp/requirements.txt \
+      > /tmp/requirements-rocm.txt \
+ && python3 -m pip install --no-cache-dir \
+      -r /tmp/requirements-rocm.txt
+
+ENV PYTHONUNBUFFERED=1 \
+    TOKENIZERS_PARALLELISM=false \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

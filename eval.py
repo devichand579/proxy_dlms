@@ -271,7 +271,10 @@ class LLaDAEvalHarness(LM):
         gcap_k=8,
         gcap_score_mode="per_commit",
         gcap_selection_seed=0,
+        gcap_prefix_steps=32,
         gcap_score_only=False,
+        dataset_num_shards=1,
+        dataset_shard_index=0,
     ):
         '''
         Args:
@@ -334,7 +337,17 @@ class LLaDAEvalHarness(LM):
         self.gcap_k = int(gcap_k)
         self.gcap_score_mode = str(gcap_score_mode)
         self.gcap_selection_seed = int(gcap_selection_seed)
+        self.gcap_prefix_steps = int(gcap_prefix_steps)
         self.gcap_score_only = str(gcap_score_only).lower() in ("true", "1", "yes")
+        self.dataset_num_shards = int(dataset_num_shards)
+        self.dataset_shard_index = int(dataset_shard_index)
+        if self.dataset_num_shards < 1:
+            raise ValueError("dataset_num_shards must be >= 1")
+        if not 0 <= self.dataset_shard_index < self.dataset_num_shards:
+            raise ValueError(
+                "dataset_shard_index must satisfy "
+                "0 <= index < dataset_num_shards"
+            )
         self.intervention_mode = str(intervention_mode) if intervention_mode is not None else None  # keep None when not set
         if intervention_steps is None:
             self.intervention_steps = None
@@ -674,15 +687,25 @@ class LLaDAEvalHarness(LM):
         self._maybe_persist_wandb_run_id()
 
         # Get prompt lengths and group request indices by length bucket for better batching
-        question_texts = [req.args[0] for req in requests]
+        # Dataset sharding is applied by lm-eval's --samples option before the
+        # harness receives requests. Keep shard metadata here for checkpoints.
+        active_indices = list(range(total_requests))
+        self.logger.info(
+            "Dataset shard %d/%d received %d requests",
+            self.dataset_shard_index,
+            self.dataset_num_shards,
+            total_requests,
+        )
+        question_texts = [requests[i].args[0] for i in active_indices]
         question_texts = self._maybe_bos_prompts(question_texts)
         enc_no_pad = self.tokenizer(question_texts, add_special_tokens=False, padding=False)
         lengths = [len(ids) for ids in enc_no_pad["input_ids"]]
+        lengths_by_index = dict(zip(active_indices, lengths))
         bucket_to_indices = defaultdict(list)
-        for i, L in enumerate(lengths):
-            bucket_to_indices[_bucket_for_length(L)].append(i)
+        for orig_idx, length in zip(active_indices, lengths):
+            bucket_to_indices[_bucket_for_length(length)].append(orig_idx)
         for bucket_key in bucket_to_indices:
-            bucket_to_indices[bucket_key].sort(key=lambda idx: lengths[idx])
+            bucket_to_indices[bucket_key].sort(key=lengths_by_index.__getitem__)
 
         # Build chunks: each chunk is a list of request indices from the same bucket
         chunks = []
@@ -691,7 +714,7 @@ class LLaDAEvalHarness(LM):
             for chunk_start in range(0, len(indices), self.batch_size):
                 chunks.append(indices[chunk_start : chunk_start + self.batch_size])
 
-        all_gen_texts = [None] * total_requests
+        all_gen_texts = [""] * total_requests
         total_steps_taken = 0
         total_blocks_processed = 0
         total_gen_time = 0.0
@@ -771,6 +794,7 @@ class LLaDAEvalHarness(LM):
                         gcap_k=self.gcap_k,
                         gcap_score_mode=self.gcap_score_mode,
                         gcap_selection_seed=self.gcap_selection_seed,
+                        gcap_prefix_steps=self.gcap_prefix_steps,
                     )
                     chunk_gcap_metrics = (
                         list(gcap_rerank.last_rerank_metrics)
@@ -804,6 +828,20 @@ class LLaDAEvalHarness(LM):
                         if self.mode == "gcap_rerank"
                         else []
                     )
+                    candidate_gen_texts = (
+                        [
+                            decode(gcap_rerank.last_candidate_outputs[candidate])
+                            for candidate in range(self.gcap_k)
+                        ]
+                        if self.mode == "gcap_rerank"
+                        and gcap_rerank.last_candidate_outputs is not None
+                        else []
+                    )
+                    if self.mode == "gcap_rerank" and len(candidate_gen_texts) != self.gcap_k:
+                        raise RuntimeError(
+                            "G-cap candidate output count does not match k: "
+                            f"{len(candidate_gen_texts)} != {self.gcap_k}"
+                        )
 
                     for j, orig_idx in enumerate(to_compute_indices):
                         all_gen_texts[orig_idx] = chunk_gen_texts[j]
@@ -816,20 +854,47 @@ class LLaDAEvalHarness(LM):
                                     "task_name": getattr(req, "task_name", self.task_name),
                                     "prompt": req.args[0],
                                     "resps": [chunk_gen_texts[j]],
+                                    "dataset_num_shards": self.dataset_num_shards,
+                                    "dataset_shard_index": self.dataset_shard_index,
                                 }
                                 if self.mode == "gcap_rerank":
+                                    candidate_metrics = []
+                                    for candidate_index, candidate in enumerate(
+                                        chunk_gcap_metrics[j]["candidates"]
+                                    ):
+                                        candidate_metrics.append(
+                                            {
+                                                **candidate,
+                                                "candidate_index": candidate_index,
+                                                "response": candidate_gen_texts[
+                                                    candidate_index
+                                                ][j],
+                                            }
+                                        )
                                     rec["gcap_rerank"] = {
                                         "base_mode": self.gcap_base_mode,
                                         "k": self.gcap_k,
                                         "temperature": self.temperature,
                                         "selection_seed": self.gcap_selection_seed,
                                         **chunk_gcap_metrics[j],
+                                        "candidates": candidate_metrics,
                                     }
                                     if random_checkpoint_writer is not None:
                                         random_rec = {
-                                            **rec,
+                                            "doc_id": rec["doc_id"],
+                                            "task_name": rec["task_name"],
+                                            "prompt": rec["prompt"],
                                             "resps": [random_gen_texts[j]],
                                             "gcap_selection": "random",
+                                            "gcap_rerank": {
+                                                "base_mode": self.gcap_base_mode,
+                                                "k": self.gcap_k,
+                                                "temperature": self.temperature,
+                                                "selection_seed": self.gcap_selection_seed,
+                                                "random_index": chunk_gcap_metrics[j][
+                                                    "random_index"
+                                                ],
+                                            },
                                         }
                                         random_checkpoint_writer.write(
                                             json.dumps(random_rec, ensure_ascii=False) + "\n"
