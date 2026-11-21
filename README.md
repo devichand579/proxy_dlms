@@ -1,6 +1,6 @@
-# Scheduler Tracing: Understanding Diffusion Language Models and Unmasking Schedulers
+# From Interaction to Adaptation: Proxy-Guided Test-Time Decoding for Masked Diffusion Language Models
 
-This repository contains the code for the papers "_____" and "____". A unified framework for understanding and characterizing diffusion-based text generation which includes integration of diffusion language models, unmasking schedulers, evaluations, tracing, interpretability, hidden representations capture, cross-step-transcoder training/evaluation and circuit tracing for unmasking sequences.
+This repository contains the code for the papers "From Interaction to Adaptation: Proxy-Guided Test-Time Decoding for Masked Diffusion Language Models". A unified framework for understanding and characterizing diffusion-based text generation which includes integration of diffusion language models, unmasking schedulers, evaluations, tracing, interpretability, hidden representations capture, cross-step-transcoder training/evaluation and circuit tracing for unmasking sequences.
 
 ## Quick start
 
